@@ -1828,6 +1828,11 @@ export default function Accounts() {
     useState<ModelMappingEntry[]>(emptyModelMappingEntries);
   const [editOpenAIModelsLoading, setEditOpenAIModelsLoading] = useState(false);
   const [importing, setImporting] = useState(false);
+  // React state updates are asynchronous.  A file input/drop event can fire
+  // twice before `importing` becomes true, which would submit the same file
+  // in two concurrent requests.  Keep an imperative lock alongside the
+  // state so the import endpoint is always called at most once per batch.
+  const importInFlightRef = useRef(false);
   const [showImportPicker, setShowImportPicker] = useState(false);
   const [importProxyUrl, setImportProxyUrl] = useState("");
   const [importCustomHeadersText, setImportCustomHeadersText] = useState("");
@@ -3952,6 +3957,9 @@ export default function Accounts() {
       return;
     }
 
+    if (files.length === 0 || importInFlightRef.current) return;
+    importInFlightRef.current = true;
+
     // 按累计大小把文件切成多批,每批控制在 IMPORT_BATCH_MAX_BYTES 内,避免单个
     // 请求体过大触发后端限制;后端导入无状态且按凭据幂等去重,分批完全安全。
     const batches = splitFilesIntoBatches(files, IMPORT_BATCH_MAX_BYTES);
@@ -4048,6 +4056,7 @@ export default function Accounts() {
       );
     } finally {
       setImporting(false);
+      importInFlightRef.current = false;
     }
   };
 

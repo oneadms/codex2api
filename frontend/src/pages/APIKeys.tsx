@@ -387,8 +387,10 @@ export default function APIKeys() {
       cancelled = true;
     };
   }, [anyScopeBudget, keys.length]);
-  // 模型下拉跟随渠道选择:grok 只列 Grok 模型(账号未声明时用常见兜底),
-  // codex 只列 Codex 目录,auto 合并两者。
+  // 模型下拉跟随渠道选择：grok / antigravity / traecn 只列各自上游目录，
+  // codex 只列 Codex 目录；auto 与后端自动路由保持一致，仅合并可由通用
+  // Responses 路径调度的 Codex、Grok 和 Antigravity 模型。TRAECN 是显式
+  // 渠道，必须选择 traecn 后才展示，避免模型下拉暗示 auto 会落到 TRAECN。
   const grokModelOptions =
     data.grokModelOptions.length > 0
       ? data.grokModelOptions
@@ -415,7 +417,7 @@ export default function APIKeys() {
       if (channel === "codex") return modelOptions;
       const seen = new Set(modelOptions.map((m) => m.toLowerCase()));
       const merged = [...modelOptions];
-      for (const candidate of [...grokModelOptions, ...antigravityModelOptions, ...traeModelOptions]) {
+      for (const candidate of [...grokModelOptions, ...antigravityModelOptions]) {
         if (!seen.has(candidate.toLowerCase())) {
           seen.add(candidate.toLowerCase());
           merged.push(candidate);
@@ -3119,7 +3121,7 @@ function KeyScopeBudgetBadge({
   );
 }
 
-// KeyChannelBadge 展示该 Key 的上游渠道限定（auto/codex/grok），一眼区分 Key 用途。
+// KeyChannelBadge 展示该 Key 的上游渠道限定（auto/codex/grok/antigravity/traecn），一眼区分 Key 用途。
 function KeyChannelBadge({
   keyRow,
   t,

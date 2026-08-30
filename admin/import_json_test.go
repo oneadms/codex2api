@@ -21,6 +21,89 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// TestImportSub2APICDKExportWithReviveManifest ensures a cdk/Sub2API export
+// containing one account and an auxiliary x_revive_manifest is treated as one
+// credential.  The manifest is metadata only and must not inflate the import
+// total (or create a second account).
+func TestImportSub2APICDKExportWithReviveManifest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	fixture := []byte(`{
+		"accounts": [{
+			"name": "fixture-account",
+			"platform": "openai",
+			"type": "oauth",
+			"credentials": {
+				"refresh_token": "rt-fixture-1",
+				"access_token": "at-fixture-1",
+				"email": "fixture@example.com"
+			}
+		}],
+		"x_revive_manifest": {
+			"version": 1,
+			"records": [{"account": "fixture-account", "status": "active"}]
+		}
+	}`)
+
+	tokens, err := parseImportJSONTokens(fixture)
+	if err != nil {
+		t.Fatalf("parseImportJSONTokens returned error: %v", err)
+	}
+	if len(tokens) != 1 {
+		t.Fatalf("parsed token count = %d, want 1", len(tokens))
+	}
+	if tokens[0].refreshToken != "rt-fixture-1" || tokens[0].accessToken != "at-fixture-1" {
+		t.Fatalf("parsed credentials = refresh %q/access %q, want both fixture tokens", tokens[0].refreshToken, tokens[0].accessToken)
+	}
+
+	db := newTestAdminDB(t)
+	h := &Handler{db: db}
+	body := bytes.NewBuffer(nil)
+	mw := multipart.NewWriter(body)
+	fw, err := mw.CreateFormFile("file", "cdk-fixture.json")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err := fw.Write(fixture); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	if err := mw.WriteField("format", "json"); err != nil {
+		t.Fatalf("WriteField: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/import", body)
+	ctx.Request.Header.Set("Content-Type", mw.FormDataContentType())
+	h.ImportAccounts(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("import status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"type":"complete"`) ||
+		!strings.Contains(recorder.Body.String(), `"total":1`) ||
+		!strings.Contains(recorder.Body.String(), `"success":1`) {
+		t.Fatalf("import response = %s, want complete total=1 success=1", recorder.Body.String())
+	}
+
+	rows, err := db.ListActive(context.Background())
+	if err != nil {
+		t.Fatalf("ListActive: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("active account count = %d, want 1", len(rows))
+	}
+	if got := rows[0].GetCredential("refresh_token"); got != "rt-fixture-1" {
+		t.Fatalf("stored refresh_token = %q, want fixture token", got)
+	}
+	if got := rows[0].GetCredential("access_token"); got != "at-fixture-1" {
+		t.Fatalf("stored access_token = %q, want fixture token", got)
+	}
+}
+
 func TestParseImportJSONTokensSupportsFlatObjectWithBOM(t *testing.T) {
 	data := append([]byte{0xef, 0xbb, 0xbf}, []byte(`{"refresh_token":"rt-flat","email":"flat@example.com"}`)...)
 

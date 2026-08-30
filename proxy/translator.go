@@ -915,6 +915,156 @@ func normalizeResponsesSystemRoleMessages(body map[string]any) bool {
 	return modified
 }
 
+// normalizeResponsesAgentMessages lowers Codex multi-agent replay items to the
+// standard Responses message shape used by OpenAI-compatible relay endpoints.
+//
+// `agent_message` is a Codex/ChatGPT extension.  The native Codex endpoint can
+// route that item between agents, but ordinary OpenAI Responses relays reject
+// it while deserializing input[] ("unknown item type agent_message").  The
+// relay cannot reproduce the routing semantics, so retain the textual history
+// as an assistant message and discard the transport-only author/recipient
+// metadata.  This function is deliberately called only by
+// PrepareOpenAIResponsesBody; the native Codex path must continue to pass the
+// extension through unchanged.
+func normalizeResponsesAgentMessages(body map[string]any) bool {
+	if len(body) == 0 {
+		return false
+	}
+	inputItems, ok := body["input"].([]any)
+	if !ok {
+		return false
+	}
+
+	modified := false
+	for index, raw := range inputItems {
+		item, ok := raw.(map[string]any)
+		if !ok || !strings.EqualFold(strings.TrimSpace(firstNonEmptyAnyString(item["type"])), "agent_message") {
+			continue
+		}
+
+		// The collaboration envelope normally uses content.  A few client
+		// versions emitted text/output instead, so retain those fallbacks rather
+		// than turning an otherwise useful history item into an empty message.
+		content, exists := item["content"]
+		if !exists || content == nil {
+			for _, key := range []string{"text", "output"} {
+				if candidate, present := item[key]; present && candidate != nil {
+					content = candidate
+					exists = true
+					break
+				}
+			}
+		}
+		if !exists || content == nil {
+			content = ""
+		}
+		// Codex collaboration messages commonly carry an opaque
+		// `encrypted_content` part alongside the visible envelope text.  That
+		// part is an internal transport value, not a public Responses content
+		// part, and forwarding it after changing the outer discriminator would
+		// simply move the deserialization failure one level deeper.  Remove it
+		// (and any nested encrypted_content fields) while retaining all visible
+		// content that can be represented by a standard message.
+		if cleaned, changed := normalizeResponsesAgentMessageContent(content); changed {
+			content = cleaned
+		}
+
+		inputItems[index] = map[string]any{
+			"type":    "message",
+			"role":    "assistant",
+			"content": content,
+		}
+		modified = true
+	}
+	if modified {
+		body["input"] = inputItems
+	}
+	return modified
+}
+
+// normalizeResponsesAgentMessageContent removes Codex-only encrypted content
+// blocks from a converted agent message.  The helper intentionally handles
+// arbitrary nested arrays/maps because client versions have emitted both a
+// direct content-part array and wrapper objects around those parts.  The
+// returned value is always JSON-marshalable; an all-opaque content array is
+// represented by an empty string, which is accepted for an assistant message.
+func normalizeResponsesAgentMessageContent(content any) (any, bool) {
+	switch value := content.(type) {
+	case []any:
+		cleaned := make([]any, 0, len(value))
+		changed := false
+		for _, part := range value {
+			partCleaned, keep, partChanged := normalizeResponsesAgentMessageValue(part)
+			if partChanged {
+				changed = true
+			}
+			if !keep {
+				changed = true
+				continue
+			}
+			cleaned = append(cleaned, partCleaned)
+		}
+		if len(cleaned) == 0 && len(value) > 0 {
+			return "", true
+		}
+		return cleaned, changed
+	case map[string]any:
+		cleaned, keep, changed := normalizeResponsesAgentMessageValue(value)
+		if !keep {
+			return "", true
+		}
+		return cleaned, changed
+	default:
+		return content, false
+	}
+}
+
+// normalizeResponsesAgentMessageValue is the recursive implementation used by
+// normalizeResponsesAgentMessageContent.  keep=false marks a complete
+// encrypted_content part for omission from its containing array.
+func normalizeResponsesAgentMessageValue(value any) (cleaned any, keep bool, changed bool) {
+	switch typed := value.(type) {
+	case []any:
+		out := make([]any, 0, len(typed))
+		for _, child := range typed {
+			childCleaned, childKeep, childChanged := normalizeResponsesAgentMessageValue(child)
+			if childChanged {
+				changed = true
+			}
+			if !childKeep {
+				changed = true
+				continue
+			}
+			out = append(out, childCleaned)
+		}
+		return out, true, changed
+	case map[string]any:
+		itemType := strings.ToLower(strings.TrimSpace(firstNonEmptyAnyString(typed["type"])))
+		if itemType == "encrypted_content" {
+			return nil, false, true
+		}
+		out := make(map[string]any, len(typed))
+		for key, child := range typed {
+			if strings.EqualFold(strings.TrimSpace(key), "encrypted_content") {
+				changed = true
+				continue
+			}
+			childCleaned, childKeep, childChanged := normalizeResponsesAgentMessageValue(child)
+			if childChanged {
+				changed = true
+			}
+			if !childKeep {
+				changed = true
+				continue
+			}
+			out[key] = childCleaned
+		}
+		return out, true, changed
+	default:
+		return value, true, false
+	}
+}
+
 // normalizeResponsesToolCallArgumentTypes 修正 input[] 中工具调用项 arguments 的
 // JSON 类型。上游对不同 item 类型的要求不对称：function_call.arguments 必须是
 // string（JSON 编码），tool_search_call.arguments 必须是 object。客户端与缓存
@@ -2475,6 +2625,11 @@ func PrepareOpenAIResponsesBody(rawBody []byte) []byte {
 	normalizeResponsesStructuredOutputFormat(body)
 	normalizeResponsesFunctionTools(body)
 	normalizeResponsesToolChoice(body)
+	// Codex multi-agent replay uses the non-standard agent_message item.  An
+	// OpenAI-compatible relay does not know that discriminator, so lower it
+	// before normalizing its content parts (input_text -> output_text for the
+	// assistant role).
+	normalizeResponsesAgentMessages(body)
 	normalizeResponsesContentPartTypes(body)
 	normalizeResponsesInputMessageContent(body)
 	if shouldInjectOpenAIResponsesImageGenerationTool(body) {

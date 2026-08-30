@@ -115,7 +115,7 @@
       "upstreamChannelTraeCN": "TRAECN",
       "upstreamChannelAutoTab": "自動",
       "upstreamChannelHint": {
-        "auto": "不限渠道：請求依模型路由到 Codex、Grok 或 Antigravity 帳號。",
+        "auto": "自動依模型路由到 Codex、Grok 或 Antigravity 帳號；TRAECN 需明確選擇 TRAECN 渠道。",
         "codex": "此 Key 只調度 Codex 帳號，不會使用 Grok 或 Antigravity 帳號。",
         "grok": "此 Key 只調度 Grok 帳號，並使用該渠道的模型目錄。",
         "antigravity": "此 Key 只調度 Google Antigravity 帳號，並使用 Gemini 模型目錄。",

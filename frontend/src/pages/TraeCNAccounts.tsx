@@ -102,7 +102,7 @@ function parseLines(value: string): string[] {
 }
 
 function accountLabel(account: AccountRow): string {
-  return account.name?.trim() || account.email?.trim() || account.traecn_host?.trim() || `#${account.id}`;
+  return account.name?.trim() || account.email?.trim() || account.traecn_host?.trim() || `ID ${account.id}`;
 }
 
 function ImportResult({ result }: { result: AddTraeCNAccountsResponse }) {
@@ -685,7 +685,12 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
                     <tr key={account.id} className={cn("border-b border-border/70 last:border-0", account.enabled === false && "opacity-60")}>
                       <td className="max-w-[220px] px-3 py-3">
                         <div className="truncate font-semibold" title={accountLabel(account)}>{accountLabel(account)}</div>
-                        <div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground" title={account.email || undefined}>{account.email || `#${account.id}`}</div>
+                        <div
+                          className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground"
+                          title={account.email || `ID ${account.id}`}
+                        >
+                          {account.email || `ID ${account.id}`}
+                        </div>
                       </td>
                       <td className="max-w-[250px] px-3 py-3">
                         <div className="flex flex-wrap gap-1">

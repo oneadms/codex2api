@@ -91,6 +91,14 @@ func (h *Handler) accountVisibleToAPIKey(account *auth.Account, apiKeyID int64, 
 	if !account.AllowsAPIKey(apiKeyID) || !h.store.APIKeyAllowsAccount(apiKeyID, account) {
 		return false
 	}
+	// TRAECN is an explicit channel.  Generic/Codex keys must not advertise
+	// models backed only by TRAECN, because the Responses adapter does not
+	// implement the complete Codex input contract (for example
+	// `additional_tools`).  Keep the catalog and request admission in lockstep;
+	// callers that need TRAECN use a key with upstream_channel=traecn.
+	if account.IsTraeCNAPI() && h.store.APIKeyUpstreamChannel(apiKeyID) != database.UpstreamChannelTraeCN {
+		return false
+	}
 	if account.IsGrokAPI() && !account.GrokModelCatalogHardAllowed(now) {
 		return false
 	}

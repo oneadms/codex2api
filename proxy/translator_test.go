@@ -1273,6 +1273,127 @@ func TestPrepareOpenAIResponsesBody_NormalizesLegacyImageContentPart(t *testing.
 	}
 }
 
+// OpenAI's public Responses schema does not include Codex's internal
+// agent_message item type.  Relay requests must present those replayed
+// collaboration messages as ordinary assistant messages and omit the
+// collaboration-only routing metadata.
+func TestPrepareOpenAIResponsesBody_NormalizesAgentMessage(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.5",
+		"input":[
+			{
+				"type":"agent_message",
+				"author":"/root",
+				"recipient":"/root/worker",
+				"content":[{"type":"input_text","text":"prior worker result"}]
+			},
+			{"type":"message","role":"user","content":"continue"}
+		]
+	}`)
+
+	got := PrepareOpenAIResponsesBody(raw)
+	item := gjson.GetBytes(got, "input.0")
+	if typ := item.Get("type").String(); typ != "message" {
+		t.Fatalf("agent_message should become a standard message, got %q; body=%s", typ, got)
+	}
+	if role := item.Get("role").String(); role != "assistant" {
+		t.Fatalf("agent_message should become an assistant message, got role %q; body=%s", role, got)
+	}
+	if item.Get("author").Exists() || item.Get("recipient").Exists() {
+		t.Fatalf("agent routing metadata should not reach OpenAI Responses; body=%s", got)
+	}
+	part := item.Get("content.0")
+	if typ := part.Get("type").String(); typ != "output_text" {
+		t.Fatalf("assistant input_text should become output_text, got %q; body=%s", typ, got)
+	}
+	if text := part.Get("text").String(); text != "prior worker result" {
+		t.Fatalf("agent message content changed: got %q; body=%s", text, got)
+	}
+}
+
+func TestPrepareOpenAIResponsesBody_DropsAgentMessageEncryptedContent(t *testing.T) {
+	// A real Codex multi-agent replay contains a visible collaboration envelope
+	// plus an opaque encrypted_content part.  The latter is not a public
+	// Responses content discriminator and must not survive the relay conversion.
+	raw := []byte(`{
+		"model":"gpt-5.5",
+		"input":[{
+			"type":"agent_message",
+			"id":"amsg_123",
+			"author":"/root",
+			"recipient":"/root/worker",
+			"content":[
+				{"type":"input_text","text":"Message Type: MESSAGE\nTask name: worker\nPayload:"},
+				{"type":"encrypted_content","encrypted_content":"gAAAAopaque"}
+			],
+			"internal_chat_message_metadata_passthrough":{"turn_id":"turn_123"}
+		}]
+	}`)
+
+	got := PrepareOpenAIResponsesBody(raw)
+	item := gjson.GetBytes(got, "input.0")
+	if typ := item.Get("type").String(); typ != "message" {
+		t.Fatalf("agent_message should become message, got %q; body=%s", typ, got)
+	}
+	if encrypted := gjson.GetBytes(got, "input.0.content.#(type==\"encrypted_content\")"); encrypted.Exists() {
+		t.Fatalf("encrypted agent content should be removed; body=%s", got)
+	}
+	if strings.Contains(string(got), "gAAAAopaque") {
+		t.Fatalf("encrypted agent payload leaked into relay body: %s", got)
+	}
+	if text := item.Get("content.0.text").String(); text == "" {
+		t.Fatalf("visible agent text should be retained; body=%s", got)
+	}
+	if typ := item.Get("content.0.type").String(); typ != "output_text" {
+		t.Fatalf("visible assistant text should normalize to output_text, got %q; body=%s", typ, got)
+	}
+	if item.Get("id").Exists() || item.Get("author").Exists() || item.Get("recipient").Exists() || item.Get("internal_chat_message_metadata_passthrough").Exists() {
+		t.Fatalf("relay body should omit collaboration metadata; body=%s", got)
+	}
+}
+
+func TestPrepareOpenAIResponsesBody_EmptyAgentMessageEncryptedContentBecomesEmptyMessage(t *testing.T) {
+	raw := []byte(`{"model":"gpt-5.5","input":[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"gAAAAopaque"}]}]}`)
+	got := PrepareOpenAIResponsesBody(raw)
+	item := gjson.GetBytes(got, "input.0")
+	if typ := item.Get("type").String(); typ != "message" {
+		t.Fatalf("agent_message should become message, got %q; body=%s", typ, got)
+	}
+	if content := item.Get("content"); !content.Exists() || content.Type != gjson.String || content.String() != "" {
+		t.Fatalf("all-opaque agent content should become an empty string, got %s; body=%s", content.Raw, got)
+	}
+}
+
+// The native Codex Responses path still supports agent_message as a first
+// class item.  Keep its type and collaboration metadata intact there; only
+// the OpenAI relay adapter needs the compatibility conversion above.
+func TestPrepareResponsesBody_PreservesNativeAgentMessage(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.5",
+		"input":[{
+			"type":"agent_message",
+			"author":"/root",
+			"recipient":"/root/worker",
+			"content":[{"type":"input_text","text":"prior worker result"}]
+		}]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+	item := gjson.GetBytes(got, "input.0")
+	if typ := item.Get("type").String(); typ != "agent_message" {
+		t.Fatalf("native agent_message type should be preserved, got %q; body=%s", typ, got)
+	}
+	if author := item.Get("author").String(); author != "/root" {
+		t.Fatalf("native agent author changed: got %q; body=%s", author, got)
+	}
+	if recipient := item.Get("recipient").String(); recipient != "/root/worker" {
+		t.Fatalf("native agent recipient changed: got %q; body=%s", recipient, got)
+	}
+	if typ := item.Get("content.0.type").String(); typ != "input_text" {
+		t.Fatalf("native agent content type should remain input_text, got %q; body=%s", typ, got)
+	}
+}
+
 func TestPrepareOpenAIResponsesBody_ImageGenerationToolChoiceInjectsTool(t *testing.T) {
 	tests := []struct {
 		name string

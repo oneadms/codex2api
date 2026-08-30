@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -939,6 +940,56 @@ func TestUpdateAPIKeyRefreshesRuntimeStoreAndCache(t *testing.T) {
 	}
 	if _, ok, err := tc.GetRuntime(ctx, adminAPIKeyCountNamespace, "all"); err != nil || ok {
 		t.Fatalf("runtime api key count cache after update ok=%v err=%v, want miss", ok, err)
+	}
+}
+
+func TestAPIKeyChannelChangesRefreshSchedulerImmediately(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("database.New 返回错误: %v", err)
+	}
+	defer db.Close()
+	store := auth.NewStore(nil, nil, nil)
+	defer store.Stop()
+	handler := &Handler{db: db, store: store}
+
+	createRecorder := httptest.NewRecorder()
+	createCtx, _ := gin.CreateTestContext(createRecorder)
+	createCtx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/keys", strings.NewReader(`{"name":"Trae key","key":"sk-test-channel-refresh-1234567890","limits":{"upstream_channel":"traecn"}}`))
+	createCtx.Request.Header.Set("Content-Type", "application/json")
+	handler.CreateAPIKey(createCtx)
+	if createRecorder.Code != http.StatusOK {
+		t.Fatalf("create status = %d, want %d, body=%s", createRecorder.Code, http.StatusOK, createRecorder.Body.String())
+	}
+	var created createAPIKeyResponse
+	if err := json.Unmarshal(createRecorder.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if got := store.APIKeyUpstreamChannel(created.ID); got != database.UpstreamChannelTraeCN {
+		t.Fatalf("channel after create = %q, want %q", got, database.UpstreamChannelTraeCN)
+	}
+
+	update := func(payload string) {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Params = gin.Params{{Key: "id", Value: strconv.FormatInt(created.ID, 10)}}
+		ctx.Request = httptest.NewRequest(http.MethodPatch, "/api/admin/keys/"+strconv.FormatInt(created.ID, 10), strings.NewReader(payload))
+		ctx.Request.Header.Set("Content-Type", "application/json")
+		handler.UpdateAPIKey(ctx)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("update status = %d, want %d, body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+		}
+	}
+	update(`{"limits":{"upstream_channel":"codex"}}`)
+	if got := store.APIKeyUpstreamChannel(created.ID); got != database.UpstreamChannelCodex {
+		t.Fatalf("channel after update = %q, want %q", got, database.UpstreamChannelCodex)
+	}
+	update(`{"limits":{}}`)
+	if got := store.APIKeyUpstreamChannel(created.ID); got != database.UpstreamChannelAuto {
+		t.Fatalf("channel after clearing limits = %q, want %q", got, database.UpstreamChannelAuto)
 	}
 }
 

@@ -164,6 +164,10 @@ type Handler struct {
 	// 防止并发请求在“检查不存在”后同时建号。
 	agentIdentityImportMu sync.Mutex
 
+	// fallback 凭证插入互斥锁。初始批量快照查重与最终“再查 + 插入”必须
+	// 串行，避免并发导入请求同时通过快照检查而建出重复账号。
+	importFallbackMu sync.Mutex
+
 	// Paid subscription mutations are experimental and disabled by default.
 	// 开关由管理后台设置持有：数据库显式值优先，未设置过才回落到环境变量。
 	subscriptionUpgradeEnabled       atomic.Bool
@@ -2660,6 +2664,38 @@ func (h *Handler) findCredentialWorkspaceRouteDuplicate(ctx context.Context, see
 		}
 	}
 	return 0, nil
+}
+
+// insertImportedFallbackCredential performs the final duplicate check and
+// insert for the non-OAuth (RT/ST/AT fallback) import path.  The first check in
+// importAccountsCommon is intentionally a cheap snapshot so a large import can
+// be prepared before workers start.  Two concurrent requests can both observe
+// that snapshot as empty, however; serialize the final re-check + insert with
+// importFallbackMu.  allowDuplicate=true deliberately retains the old behavior
+// and skips this check.
+//
+// The bool result is true when an already-active credential route was found.
+// A lookup error is logged and the insert is attempted, matching the existing
+// best-effort import behavior when the initial dedupe query fails.
+func (h *Handler) insertImportedFallbackCredential(ctx context.Context, name string, seed tokenCredentialSeed, proxyURL string, allowDuplicate bool) (id int64, duplicate bool, err error) {
+	if !allowDuplicate {
+		h.importFallbackMu.Lock()
+		defer h.importFallbackMu.Unlock()
+
+		// mergeDuplicateMu is also taken here to share the existing account-merge
+		// critical section with other import/restore paths that use it.
+		h.mergeDuplicateMu.Lock()
+		defer h.mergeDuplicateMu.Unlock()
+
+		if duplicateID, checkErr := h.findCredentialWorkspaceRouteDuplicate(ctx, seed, 0); checkErr != nil {
+			log.Printf("导入二次查询凭证工作区路由失败: %v", checkErr)
+		} else if duplicateID > 0 {
+			return 0, true, nil
+		}
+	}
+
+	id, err = h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), proxyURL)
+	return id, false, err
 }
 
 type optionalStringSlice struct {
@@ -5170,6 +5206,14 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 
 	var newTokens []importToken
 	duplicateCount := ambiguousOAuthIdentityCount
+	// A fallback credential can become a duplicate after the initial snapshot
+	// when another request inserts it first. Workers update this counter while
+	// the SSE pusher reads it, so use atomic operations. The token is already in
+	// newTokens and contributes to current; only the duplicate badge changes.
+	var lateDuplicateCount int64
+	duplicateSnapshot := func() int {
+		return duplicateCount + int(atomic.LoadInt64(&lateDuplicateCount))
+	}
 
 	workspaceOverrideKnown := openaiidentity.WorkspaceOverrideFromHeaders(importCustomHeaders) != ""
 	if allowDuplicate && !workspaceOverrideKnown {
@@ -5263,7 +5307,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 		c.JSON(http.StatusOK, gin.H{
 			"message":   fmt.Sprintf("导入完成：新增 %d 个，跳过 %d 个，失败 %d 个", agentSuccess, duplicateCount, agentFailed),
 			"success":   agentSuccess,
-			"duplicate": duplicateCount,
+			"duplicate": duplicateSnapshot(),
 			"failed":    agentFailed,
 			"total":     total,
 		})
@@ -5305,6 +5349,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 	progressStopped := runImportProgressPusher(
 		c.Request.Context(), done, importProgressInterval,
 		func() importEvent {
+			lateDuplicate := int(atomic.LoadInt64(&lateDuplicateCount))
 			return importEvent{
 				Type:      "progress",
 				Current:   int(atomic.LoadInt64(&current)) + duplicateCount,
@@ -5312,7 +5357,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				Success:   int(atomic.LoadInt64(&successCount)),
 				Updated:   int(atomic.LoadInt64(&updatedCount)),
 				Failed:    int(atomic.LoadInt64(&failCount)),
-				Duplicate: duplicateCount,
+				Duplicate: duplicateCount + lateDuplicate,
 			}
 		},
 		func(e importEvent) bool { return sendImportEvent(c, e) },
@@ -5389,8 +5434,13 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				}
 
 				insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				id, err := h.db.InsertAccountWithCredentials(insertCtx, name, h.newCodexAccountCredentials(seed), proxyURL)
+				id, lateDuplicate, err := h.insertImportedFallbackCredential(insertCtx, name, seed, proxyURL, allowDuplicate)
 				insertCancel()
+				if lateDuplicate {
+					atomic.AddInt64(&lateDuplicateCount, 1)
+					atomic.AddInt64(&current, 1)
+					return
+				}
 
 				if err != nil {
 					log.Printf("导入 AT 账号 %d/%d 失败: %v", idx+1, len(newTokens), err)
@@ -5413,8 +5463,13 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				}
 
 				insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				id, err := h.db.InsertAccountWithCredentials(insertCtx, name, h.newCodexAccountCredentials(seed), proxyURL)
+				id, lateDuplicate, err := h.insertImportedFallbackCredential(insertCtx, name, seed, proxyURL, allowDuplicate)
 				insertCancel()
+				if lateDuplicate {
+					atomic.AddInt64(&lateDuplicateCount, 1)
+					atomic.AddInt64(&current, 1)
+					return
+				}
 
 				if err != nil {
 					log.Printf("导入账号 %d/%d 失败: %v", idx+1, len(newTokens), err)
@@ -5473,10 +5528,10 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 	}
 	sendImportEvent(c, importEvent{
 		Type: "complete", Current: total, Total: total,
-		Success: suc, Updated: upd, Duplicate: duplicateCount, Failed: fai,
+		Success: suc, Updated: upd, Duplicate: duplicateSnapshot(), Failed: fai,
 	})
 
-	log.Printf("导入完成: success=%d, updated=%d, duplicate=%d, failed=%d, total=%d", suc, upd, duplicateCount, fai, total)
+	log.Printf("导入完成: success=%d, updated=%d, duplicate=%d, failed=%d, total=%d", suc, upd, duplicateSnapshot(), fai, total)
 }
 
 // importAccountsATTXT 通过 TXT 文件导入 AT-only 账号（每行一个 Access Token）
@@ -7923,6 +7978,11 @@ func (h *Handler) CreateAPIKey(c *gin.Context) {
 	if h.store != nil {
 		h.store.SetAPIKeyNoAffinityGroups(id, limits.NoAffinityGroupIDs)
 		h.store.SetAPIKeyAllowedPlans(id, limits.PlanAllow)
+		// Keep the scheduler's in-memory channel gate in sync immediately after
+		// creation. Requests normally refresh this through proxy middleware, but
+		// an immediate update avoids a brief window where a newly-created TRAECN
+		// key is still treated as automatic (or vice versa).
+		h.store.SetAPIKeyUpstreamChannel(id, limits.ResolveUpstreamChannel())
 	}
 	// 新配的累计额度要立刻开始记账，不等落库侧的 60s 缓存过期。
 	h.db.InvalidateScopeQuotaKeyCache()
@@ -8076,6 +8136,7 @@ func (h *Handler) UpdateAPIKey(c *gin.Context) {
 	if update.LimitsSet && h.store != nil {
 		h.store.SetAPIKeyNoAffinityGroups(id, update.Limits.NoAffinityGroupIDs)
 		h.store.SetAPIKeyAllowedPlans(id, update.Limits.PlanAllow)
+		h.store.SetAPIKeyUpstreamChannel(id, update.Limits.ResolveUpstreamChannel())
 	}
 	if update.LimitsSet {
 		h.db.InvalidateScopeQuotaKeyCache()
@@ -8376,6 +8437,7 @@ func (h *Handler) DeleteAPIKey(c *gin.Context) {
 		h.store.SetAPIKeyAllowedGroups(id, nil)
 		h.store.SetAPIKeyNoAffinityGroups(id, nil)
 		h.store.SetAPIKeyAllowedPlans(id, nil)
+		h.store.SetAPIKeyUpstreamChannel(id, database.UpstreamChannelAuto)
 		h.store.RemovePromptFilterNewAPIBinding(id)
 	}
 	h.invalidateAPIKeyRuntimeCaches(ctx, keyToInvalidate)

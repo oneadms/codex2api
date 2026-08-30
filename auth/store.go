@@ -8771,7 +8771,7 @@ func (s *Store) GetAPIKeyAllowedGroups(apiKeyID int64) []int64 {
 	return cloneInt64Slice(s.apiKeyAllowedGroups[apiKeyID])
 }
 
-// SetAPIKeyUpstreamChannel 设置某 API Key 的上游渠道限定（codex/grok，空=不限）。
+// SetAPIKeyUpstreamChannel 设置某 API Key 的上游渠道限定（codex/grok/antigravity/traecn，空=自动；TRAECN 不参与自动路由）。
 // 仅在取值真正变化时重建调度器。
 func (s *Store) SetAPIKeyUpstreamChannel(apiKeyID int64, channel string) {
 	if apiKeyID <= 0 {
@@ -8798,7 +8798,8 @@ func (s *Store) SetAPIKeyUpstreamChannel(apiKeyID int64, channel string) {
 	s.rebuildFastScheduler()
 }
 
-// APIKeyUpstreamChannel 返回某 API Key 的上游渠道限定（空=不限）。
+// APIKeyUpstreamChannel 返回某 API Key 的上游渠道限定（空=自动；TRAECN
+// 需显式选择 traecn）。
 func (s *Store) APIKeyUpstreamChannel(apiKeyID int64) string {
 	if s == nil || apiKeyID <= 0 {
 		return ""
@@ -8861,7 +8862,8 @@ func (s *Store) APIKeyAllowsAccount(apiKeyID int64, acc *Account) bool {
 	allowedPlans := s.apiKeyAllowedPlanSets[apiKeyID]
 	channel := s.apiKeyUpstreamChannels[apiKeyID]
 	s.apiKeyGroupsMu.RUnlock()
-	// 渠道限定是硬门：grok 渠道只允许 Grok 账号，codex 渠道排除 Grok 账号。
+	// 渠道限定是硬门：每个显式渠道只允许对应上游账号；codex 还排除 Grok、
+	// Antigravity 与 TRAECN。空渠道由 proxy 层按模型路由，TRAECN 不参与自动池。
 	switch channel {
 	case database.UpstreamChannelGrok:
 		if !acc.IsGrokAPI() {

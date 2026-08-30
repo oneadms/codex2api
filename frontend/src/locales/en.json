@@ -4487,7 +4487,7 @@
       "upstreamChannelAntigravity": "Antigravity",
       "upstreamChannelTraeCN": "TRAECN",
       "upstreamChannelHint": {
-        "auto": "No restriction: requests are routed by model to Codex, Grok, or Antigravity accounts.",
+        "auto": "Routes by model to Codex, Grok, or Antigravity accounts; choose TRAECN explicitly to use TRAECN.",
         "codex": "This key only dispatches to Codex accounts; Grok and Antigravity accounts are excluded.",
         "grok": "This key only dispatches to Grok accounts. Account mappings are applied first, then the target must be in the visible catalog or conservative defaults; an explicit model list narrows that set.",
         "antigravity": "This key only dispatches to Google Antigravity accounts and uses the Gemini catalog.",

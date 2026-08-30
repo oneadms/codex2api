@@ -4487,7 +4487,7 @@
       "upstreamChannelAntigravity": "Antigravity",
       "upstreamChannelTraeCN": "TRAECN",
       "upstreamChannelHint": {
-        "auto": "不限渠道：请求按模型路由到 Codex、Grok 或 Antigravity 账号。",
+        "auto": "自动按模型路由到 Codex、Grok 或 Antigravity 账号；TRAECN 需显式选择 TRAECN 渠道。",
         "codex": "该 Key 只调度 Codex 账号，不会使用 Grok 或 Antigravity 账号。",
         "grok": "该 Key 只调度 Grok 账号；先应用账号模型映射，再要求目标位于可见目录或保守默认集，显式模型列表只会进一步收窄。",
         "antigravity": "该 Key 只调度 Google Antigravity 账号，并使用 Gemini 模型目录。",

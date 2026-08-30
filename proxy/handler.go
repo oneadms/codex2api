@@ -355,7 +355,8 @@ func accountFilterForModel(model string) auth.AccountFilter {
 	}
 }
 
-// requestUpstreamChannel 返回当前请求下游 Key 的上游渠道限定（空=不限）。
+// requestUpstreamChannel 返回当前请求下游 Key 的上游渠道限定（空=自动；TRAECN
+// 仅在显式 traecn 渠道下参与调度）。
 func requestUpstreamChannel(c *gin.Context) string {
 	row := apiKeyRowFromContext(c)
 	if row == nil {
@@ -388,7 +389,12 @@ func (h *Handler) applyUpstreamChannelFilter(c *gin.Context, effectiveModel stri
 			return filter == nil || filter(account)
 		}
 	}
-	return filter
+	// The automatic channel is intentionally limited to the providers that
+	// implement the shared Codex/Responses contract.  TRAECN is a separate
+	// provider surface and its adapter cannot represent several Codex input
+	// items (for example `additional_tools`).  Leaving it in the generic relay
+	// pool turns an exhausted Codex pool into a misleading 400 conversion error.
+	return excludeTraeCNAccountsFilter(filter)
 }
 
 // grokChannelAccountFilter 是 grok 渠道 Key 的账号过滤器：仅 Grok 账号；
@@ -1756,6 +1762,19 @@ func relayOnlyAccountFilter(inner auth.AccountFilter) auth.AccountFilter {
 func excludeAntigravityAccountsFilter(inner auth.AccountFilter) auth.AccountFilter {
 	return func(account *auth.Account) bool {
 		if account == nil || account.IsAntigravityAPI() {
+			return false
+		}
+		return inner == nil || inner(account)
+	}
+}
+
+// excludeTraeCNAccountsFilter keeps the automatic/Codex-compatible pool from
+// selecting TRAECN.  TRAECN requests must opt in through the explicit
+// `upstream_channel=traecn` API-key setting, where the dedicated adapter and
+// model validation are applied.
+func excludeTraeCNAccountsFilter(inner auth.AccountFilter) auth.AccountFilter {
+	return func(account *auth.Account) bool {
+		if account == nil || account.IsTraeCNAPI() {
 			return false
 		}
 		return inner == nil || inner(account)
@@ -5719,6 +5738,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	// 中转账号会命中上游自身的 /responses/compact，使仅接入中转的用户也能压缩（issue #174）。
 	accountFilter := accountFilterForCompactResponsesModelWithOriginal(routingModel, effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
 	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
+	accountFilter = h.applyUpstreamChannelFilter(c, effectiveModel, accountFilter)
 	if continuationUnavailable {
 		accountFilter = relayOnlyAccountFilter(accountFilter)
 	}
