@@ -62,6 +62,61 @@ func TestApplyCooldownForModelSkipsAntigravityUnauthorizedBan(t *testing.T) {
 	}
 }
 
+func TestApplyCooldownForModelUsesTraeCNRelaySemantics(t *testing.T) {
+	account := &auth.Account{
+		DBID:         6,
+		UpstreamType: auth.UpstreamTraeCN,
+		AccessToken:  "trae-at",
+		RefreshToken: "trae-rt",
+		HealthTier:   auth.HealthTierHealthy,
+		Status:       auth.StatusReady,
+	}
+	store := auth.NewStore(nil, nil, nil)
+	store.SetModelCooldownSettings(database.ModelCooldownSettings{
+		RelayMode:           database.ModelCooldownModeFixed,
+		RelaySeconds:        3,
+		RelayBackoffEnabled: false,
+		OAuthMode:           database.ModelCooldownModeAdaptive,
+		OAuthSeconds:        300,
+		OAuthBackoffEnabled: true,
+	})
+	handler := &Handler{store: store}
+
+	decision := handler.applyCooldownForModel(account, http.StatusTooManyRequests, []byte(`{"error":{"message":"busy"}}`), &http.Response{Header: make(http.Header)}, "deepseek-v3")
+	if decision.Scope != rateLimitScopeModel || decision.Reason != "rate_limited_model" || decision.Model != "deepseek-v3" || decision.Cooldown <= 0 {
+		t.Fatalf("Trae CN 429 decision = %+v, want relay model cooldown", decision)
+	}
+	if account.HasActiveCooldown() || account.IsBanned() {
+		t.Fatal("Trae CN 429 must not apply a Codex account-wide cooldown")
+	}
+	if cooldowns := account.ActiveModelCooldowns(); len(cooldowns) != 1 || cooldowns[0].Model != "deepseek-v3" {
+		t.Fatalf("Trae CN model cooldowns = %+v", cooldowns)
+	}
+
+	decision = handler.applyCooldownForModel(account, http.StatusUnauthorized, []byte(`{"error":{"message":"usage limit reached"}}`), &http.Response{Header: make(http.Header)}, "deepseek-v3")
+	if decision.Reason != "" {
+		t.Fatalf("Trae CN 401 decision = %+v, want empty while refresh retry owns recovery", decision)
+	}
+	if account.HasActiveCooldown() || account.IsBanned() {
+		t.Fatal("Trae CN 401 must not apply Codex unauthorized or subscription state")
+	}
+}
+
+func TestTraeCN4011ResponseFailedUsesRateLimitRetryBudget(t *testing.T) {
+	t.Parallel()
+	payload := []byte(`{"type":"response.failed","response":{"status":"failed","error":{"code":"4011","message":"We're sorry, your requests have exceeded the rate limit."}}}`)
+	if status, evidenced := responseFailedStatusCodeWithEvidence(payload); !evidenced || status != http.StatusTooManyRequests {
+		t.Fatalf("responseFailedStatusCodeWithEvidence() = (%d, %v), want (429, true)", status, evidenced)
+	}
+	outcome := classifyResponseFailedOutcome(payload)
+	if outcome.logStatusCode != http.StatusTooManyRequests || outcome.failureKind != "rate_limited" || !outcome.penalize {
+		t.Fatalf("4011 outcome = %+v, want retryable rate limit", outcome)
+	}
+	if !streamOutcomeUsesRateLimitBudget(outcome) {
+		t.Fatal("4011 outcome did not use the independent rate-limit retry budget")
+	}
+}
+
 func TestInternalResponseAttributionPreservesParentAuditIdentity(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	parent, _ := gin.CreateTestContext(httptest.NewRecorder())

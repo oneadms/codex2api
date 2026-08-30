@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { AccountRow } from "../types";
+import type { AccountRow, UpstreamChannel } from "../types";
 import {
   filterAccountOperationResults,
   paginateAccountOperationResults,
@@ -57,7 +57,7 @@ export default function OperationResultsModal({
 }: {
   state: AccountOperationResultsState | null;
   accounts: AccountRow[];
-  channel: "codex" | "grok";
+  channel: UpstreamChannel;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
@@ -175,7 +175,7 @@ export default function OperationResultsModal({
           <ChannelLogo
             channel={channel}
             size={26}
-            title={channel === "grok" ? "Grok" : "Codex"}
+            title={channel === "grok" ? "Grok" : channel === "antigravity" ? "Antigravity" : channel === "traecn" ? "TRAECN" : "Codex"}
           />
           <span>{title}</span>
         </span>

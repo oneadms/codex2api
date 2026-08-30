@@ -97,20 +97,25 @@ func mapHTTPStatusToAnthropicError(statusCode int) string {
 // 别名注入会同时写入顶层 reasoning_effort（Chat 形态字段）与 reasoning.effort；
 // 本路径的 codexBody 已是 Responses 形态且不再经过 PrepareResponsesBody 净化，
 // 顶层字段原样发到上游会触发 400 Unsupported parameter（issue #412），在此剥离。
-func (h *Handler) applyMessagesModelMapping(codexBody []byte, supportedModels []string) []byte {
-	codexBody, _, _, _ = h.applyConfiguredModelMappingToBody(codexBody, supportedModels)
+func (h *Handler) applyMessagesModelMapping(codexBody []byte, supportedModels []string, preserveModel ...bool) []byte {
+	if len(preserveModel) == 0 || !preserveModel[0] {
+		codexBody, _, _, _ = h.applyConfiguredModelMappingToBody(codexBody, supportedModels)
+	}
 	codexBody, _ = sjson.DeleteBytes(codexBody, "reasoning_effort")
 	return codexBody
 }
 
 // resolveMessagesRoutingBody 用廉价 stub 完成模型映射与 effort/tier 提取，
 // 避免在选号前把整段 Anthropic messages 转成有损 Codex Responses。
-func (h *Handler) resolveMessagesRoutingBody(rawBody []byte, requestedModel string, supportedModels []string) []byte {
+func (h *Handler) resolveMessagesRoutingBody(rawBody []byte, requestedModel string, supportedModels []string, preserveModel ...bool) []byte {
 	mappingJSON := ""
 	if h != nil && h.store != nil {
 		mappingJSON = h.store.GetModelMapping()
 	}
-	mapped := resolveAnthropicModel(requestedModel, mappingJSON, supportedModels)
+	mapped := strings.TrimSpace(requestedModel)
+	if len(preserveModel) == 0 || !preserveModel[0] {
+		mapped = resolveAnthropicModel(requestedModel, mappingJSON, supportedModels)
+	}
 	stub, err := sjson.SetBytes([]byte(`{}`), "model", mapped)
 	if err != nil {
 		stub = []byte(`{"model":"` + mapped + `"}`)
@@ -125,7 +130,7 @@ func (h *Handler) resolveMessagesRoutingBody(rawBody []byte, requestedModel stri
 			stub, _ = sjson.SetBytes(stub, "service_tier", upstreamTier)
 		}
 	}
-	return h.applyMessagesModelMapping(stub, supportedModels)
+	return h.applyMessagesModelMapping(stub, supportedModels, preserveModel...)
 }
 
 type anthropicCodexTranslation struct {
@@ -134,7 +139,17 @@ type anthropicCodexTranslation struct {
 	done bool
 }
 
-func (h *Handler) translateAnthropicMessagesToCodexOnce(state *anthropicCodexTranslation, rawBody []byte, supportedModels []string) ([]byte, error) {
+func (h *Handler) translateAnthropicMessagesToCodexOnce(state *anthropicCodexTranslation, rawBody []byte, supportedModels []string, preserveModel ...bool) ([]byte, error) {
+	preserveRequestedModel := len(preserveModel) > 0 && preserveModel[0]
+	preserveModelName := strings.TrimSpace(gjson.GetBytes(rawBody, "model").String())
+	applyTranslationMapping := func(body []byte) []byte {
+		if preserveRequestedModel && preserveModelName != "" {
+			if updated, err := sjson.SetBytes(body, "model", preserveModelName); err == nil {
+				body = updated
+			}
+		}
+		return h.applyMessagesModelMapping(body, supportedModels, preserveRequestedModel)
+	}
 	if state == nil {
 		mappingJSON := ""
 		if h != nil && h.store != nil {
@@ -144,7 +159,7 @@ func (h *Handler) translateAnthropicMessagesToCodexOnce(state *anthropicCodexTra
 		if err != nil {
 			return nil, err
 		}
-		return h.applyMessagesModelMapping(body, supportedModels), nil
+		return applyTranslationMapping(body), nil
 	}
 	if state.done {
 		return state.body, state.err
@@ -159,7 +174,7 @@ func (h *Handler) translateAnthropicMessagesToCodexOnce(state *anthropicCodexTra
 		state.err = err
 		return nil, err
 	}
-	state.body = h.applyMessagesModelMapping(body, supportedModels)
+	state.body = applyTranslationMapping(body)
 	return state.body, nil
 }
 
@@ -214,7 +229,8 @@ func (h *Handler) Messages(c *gin.Context) {
 	// Grok 账号选中后再走一次 TranslateAnthropicToResponsesForGrok；
 	// Codex / OpenAI 中转仍按需翻译成 Codex-safe Responses。
 	supportedModels := h.supportedModelIDs(c.Request.Context())
-	routingBody := h.resolveMessagesRoutingBody(rawBody, model, supportedModels)
+	preserveTraeCNModel := requestUpstreamChannel(c) == database.UpstreamChannelTraeCN
+	routingBody := h.resolveMessagesRoutingBody(rawBody, model, supportedModels, preserveTraeCNModel)
 	originalModel := model
 	effectiveModel := effectiveRequestModel(routingBody, model)
 	if isMediaOnlyModel(effectiveModel) {
@@ -278,6 +294,7 @@ func (h *Handler) Messages(c *gin.Context) {
 	capacityShedRetries := map[int64]int{}
 	var affinityGuard auth.SessionAffinityGuard
 	grokQualityAttempts := 0
+	traeRefreshRetried := map[int64]bool{}
 	for attempt := 0; ; attempt++ {
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
@@ -368,7 +385,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			upstreamBody := routingBody
 			if !account.IsGrokAPI() {
 				var translateErr error
-				upstreamBody, translateErr = h.translateAnthropicMessagesToCodexOnce(&codexTranslation, rawBody, supportedModels)
+				upstreamBody, translateErr = h.translateAnthropicMessagesToCodexOnce(&codexTranslation, rawBody, supportedModels, preserveTraeCNModel)
 				if translateErr != nil {
 					ttftGuard.Stop()
 					h.store.Release(account)
@@ -379,15 +396,17 @@ func (h *Handler) Messages(c *gin.Context) {
 					return
 				}
 			}
-			if mappedBody, mappedModel, ok := h.applyAccountModelMappingToBody(upstreamBody, account); ok {
-				upstreamBody = mappedBody
-				attemptEffectiveModel = mappedModel
+			if !account.IsTraeCNAPI() {
+				if mappedBody, mappedModel, ok := h.applyAccountModelMappingToBody(upstreamBody, account); ok {
+					upstreamBody = mappedBody
+					attemptEffectiveModel = mappedModel
+				}
 			}
 			resp, reqErr = executeHTTPWithContinuousRetryKeepalive(upstreamCtx, func() (*http.Response, error) {
-				return ExecuteRelayStyleProtocolRequest(upstreamCtx, account, GrokProtocolMessages, rawBody, upstreamBody, proxyURL, downstreamHeaders)
+				return ExecuteRelayStyleProtocolRequestWithStore(upstreamCtx, h.store, account, GrokProtocolMessages, rawBody, upstreamBody, proxyURL, downstreamHeaders)
 			})
 		} else {
-			codexBody, translateErr := h.translateAnthropicMessagesToCodexOnce(&codexTranslation, rawBody, supportedModels)
+			codexBody, translateErr := h.translateAnthropicMessagesToCodexOnce(&codexTranslation, rawBody, supportedModels, preserveTraeCNModel)
 			if translateErr != nil {
 				ttftGuard.Stop()
 				h.store.Release(account)
@@ -505,6 +524,17 @@ func (h *Handler) Messages(c *gin.Context) {
 			if continuousRetryCommitExpired(c, continuousRetryProtocolAnthropic) {
 				h.store.Release(account)
 				return
+			}
+			if resp.StatusCode == http.StatusUnauthorized && account.IsTraeCNAPI() && !traeRefreshRetried[account.ID()] {
+				traeRefreshRetried[account.ID()] = true
+				if refreshErr := h.store.RefreshTraeCNAccountByIDWithProxy(c.Request.Context(), account.ID(), proxyURL); refreshErr == nil {
+					h.store.Release(account)
+					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					log.Printf("Trae CN token refreshed after upstream 401 (account=%d)", account.ID())
+					continue
+				} else {
+					log.Printf("Trae CN token refresh failed after upstream 401 (account=%d): %v", account.ID(), refreshErr)
+				}
 			}
 			if kind := classifyHTTPFailure(resp.StatusCode); kind != "" {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)

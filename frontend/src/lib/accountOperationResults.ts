@@ -38,7 +38,7 @@ export interface AccountOperationResultsState {
   results: AccountOperationResult[];
 }
 
-export type AccountOperationChannel = "codex" | "grok";
+export type AccountOperationChannel = "codex" | "grok" | "antigravity" | "traecn";
 export type AccountOperationResultFilter =
   | "all"
   | "success"
@@ -180,15 +180,18 @@ export function paginateAccountOperationResults(
 }
 
 export function resolveChannelBatchTestAccountIDs(
-  accounts: Array<{ id: number; grok_api?: boolean }>,
+  accounts: Array<{ id: number; grok_api?: boolean; antigravity_api?: boolean; traecn_api?: boolean }>,
   channel: AccountOperationChannel,
   requestedIDs?: number[],
 ): number[] {
   const allowedIDs = new Set(
     accounts
-      .filter((account) =>
-        channel === "grok" ? Boolean(account.grok_api) : !account.grok_api,
-      )
+      .filter((account) => {
+        if (channel === "grok") return Boolean(account.grok_api);
+        if (channel === "antigravity") return Boolean(account.antigravity_api);
+        if (channel === "traecn") return Boolean(account.traecn_api);
+        return !account.grok_api && !account.antigravity_api && !account.traecn_api;
+      })
       .map((account) => account.id),
   );
   const candidates = requestedIDs ?? Array.from(allowedIDs);

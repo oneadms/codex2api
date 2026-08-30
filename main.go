@@ -297,7 +297,7 @@ func main() {
 	}
 
 	// 4c. 初始化 Resin 粘性代理池
-	if settings.ResinURL != "" && settings.ResinPlatformName != "" {
+	if strings.TrimSpace(settings.ResinURL) != "" && strings.TrimSpace(settings.ResinPlatformName) != "" {
 		proxy.SetResinConfig(&proxy.ResinConfig{
 			BaseURL:      settings.ResinURL,
 			PlatformName: settings.ResinPlatformName,

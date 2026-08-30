@@ -1,6 +1,6 @@
 export type ToastType = 'success' | 'error' | 'warning' | 'info'
 export type ISODateString = string
-export type UpstreamChannel = 'codex' | 'grok' | 'antigravity'
+export type UpstreamChannel = 'codex' | 'grok' | 'antigravity' | 'traecn'
 
 export interface ToastState {
   msg: string
@@ -108,6 +108,7 @@ export interface AccountRow {
   openai_responses_api?: boolean
   grok_api?: boolean
   antigravity_api?: boolean
+  traecn_api?: boolean
   antigravity_auth_kind?: 'oauth' | 'api_key' | string
   agent_identity?: boolean
   grok_auth_kind?: string
@@ -126,6 +127,7 @@ export interface AccountRow {
   antigravity_permissions?: AntigravityPermissionsSnapshot
   antigravity_sync_warning?: string
   base_url?: string
+  traecn_host?: string
   balance_query_url?: string
   models?: string[]
   model_mapping?: string
@@ -685,6 +687,45 @@ export interface AddGrokAccountRequest {
 }
 
 export type UpdateGrokAccountRequest = AddGrokAccountRequest
+
+export interface AddTraeCNAccountsRequest {
+  name?: string
+  refresh_tokens: string | string[]
+  refresh_token?: string
+  host?: string
+  models?: string[]
+  proxy_url?: string
+  group_ids?: number[]
+  enabled?: boolean
+}
+
+export interface TraeCNImportItem {
+  index: number
+  id?: number
+  name?: string
+  user_id?: string
+  ok: boolean
+  stored: boolean
+  warning?: string
+  error?: string
+}
+
+export interface AddTraeCNAccountsResponse extends MessageResponse {
+  total: number
+  success: number
+  failed: number
+  items: TraeCNImportItem[]
+  group_ids?: number[]
+  host?: string
+}
+
+export interface UpdateTraeCNAccountRequest {
+  name?: string
+  host?: string
+  models?: string[]
+  proxy_url?: string
+  group_ids?: number[]
+}
 
 export interface AntigravityModelQuota {
   model?: string
@@ -1620,6 +1661,8 @@ export interface SystemSettings {
   max_concurrency: number
   global_rpm: number
   test_model: string
+  traecn_default_model: string
+  traecn_test_model: string
   test_content: string
   test_concurrency: number
   background_refresh_interval_minutes: number
@@ -2672,6 +2715,7 @@ export interface ModelsResponse {
   antigravity_models?: string[]
   // Grok 渠道账号声明模型的并集;渠道选 grok 时模型下拉用这份
   grok_models?: string[]
+  traecn_models?: string[]
   items?: ModelInfo[]
   last_synced_at?: string
   source_url: string

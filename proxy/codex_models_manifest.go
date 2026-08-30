@@ -104,7 +104,8 @@ func (h *Handler) CodexModelsManifestHandler(c *gin.Context) {
 }
 
 func (h *Handler) preferScopedCodexManifest(c *gin.Context) bool {
-	return requestUpstreamChannel(c) == database.UpstreamChannelAntigravity
+	channel := requestUpstreamChannel(c)
+	return channel == database.UpstreamChannelAntigravity || channel == database.UpstreamChannelTraeCN
 }
 
 func (h *Handler) serveScopedCodexManifest(c *gin.Context, row *database.APIKeyRow) bool {

@@ -229,6 +229,31 @@ func TestScopedModelsIncludeAntigravityAccounts(t *testing.T) {
 	}
 }
 
+func TestScopedModelsTraeCNChannelExcludesOtherProviders(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2})
+	defer store.Stop()
+	trae := &auth.Account{
+		DBID: 1, UpstreamType: auth.UpstreamTraeCN, AccessToken: "trae-at", RefreshToken: "trae-rt",
+		Models: []string{"deepseek-v3"},
+	}
+	codex := &auth.Account{DBID: 2, AccessToken: "codex-at", Models: []string{"gpt-5.4"}}
+	grok := &auth.Account{DBID: 3, UpstreamType: auth.UpstreamGrok, APIKey: "grok-key", Models: []string{"grok-only"}}
+	grok.SetGrokRoutingState(auth.GrokRoutingState{Models: []auth.GrokModelRoute{{ModelID: "grok-only", APIBackend: auth.GrokProtocolResponses}}})
+	store.AddAccount(trae)
+	store.AddAccount(codex)
+	store.AddAccount(grok)
+	handler := NewHandler(store, nil, nil, nil)
+	models := listScopedModelsForTest(t, handler, &database.APIKeyRow{ID: 99, Limits: database.APIKeyLimits{UpstreamChannel: database.UpstreamChannelTraeCN}})
+	if owner, _, ok := scopedModelByID(models, "deepseek-v3"); !ok || owner != "trae" {
+		t.Fatalf("TRAECN model = owner:%q present:%t, want owner trae; models=%+v", owner, ok, models)
+	}
+	for _, id := range []string{"gpt-5.4", "grok-only"} {
+		if _, _, ok := scopedModelByID(models, id); ok {
+			t.Fatalf("non-TRAECN model %q leaked into scoped catalog: %+v", id, models)
+		}
+	}
+}
+
 func TestScopedModelsDeclaredListCannotOverrideCatalogVisibility(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1})
 	account := &auth.Account{DBID: 1, UpstreamType: auth.UpstreamGrok, APIKey: "xai", Models: []string{"declared-only", "hidden", "visible"}}

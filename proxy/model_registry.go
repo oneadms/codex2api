@@ -49,6 +49,7 @@ type ModelCatalog struct {
 	// 供前端在渠道选 grok 时切换模型下拉选项；注册表本身仍只管 Codex 模型。
 	GrokModels        []string   `json:"grok_models,omitempty"`
 	AntigravityModels []string   `json:"antigravity_models,omitempty"`
+	TraeCNModels      []string   `json:"traecn_models,omitempty"`
 	LastSyncedAt      *time.Time `json:"last_synced_at,omitempty"`
 	SourceURL         string     `json:"source_url"`
 	Warning           string     `json:"warning,omitempty"`

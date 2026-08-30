@@ -1720,6 +1720,7 @@ export default function Usage() {
   const [apiKeys, setAPIKeys] = useState<APIKeyRow[]>([])
   const [modelOptions, setModelOptions] = useState<string[]>([])
   const [grokModelOptions, setGrokModelOptions] = useState<string[]>([])
+  const [traeModelOptions, setTraeModelOptions] = useState<string[]>([])
   const [apiKeyLoadFailed, setAPIKeyLoadFailed] = useState(false)
   const showFastFilter = true
   const pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS
@@ -1851,10 +1852,12 @@ export default function Usage() {
           : response.models ?? []
         setModelOptions(models)
         setGrokModelOptions(response.grok_models ?? [])
+        setTraeModelOptions(response.traecn_models ?? [])
       } catch {
         if (active) {
           setModelOptions([])
           setGrokModelOptions([])
+          setTraeModelOptions([])
         }
       }
     }
@@ -1908,6 +1911,8 @@ export default function Usage() {
     const merged: string[] = []
     const catalog = channel === 'grok'
       ? grokModelOptions
+      : channel === 'traecn'
+        ? traeModelOptions
       : channel === 'codex'
         ? modelOptions
         : [...modelOptions, ...grokModelOptions]
@@ -1920,7 +1925,7 @@ export default function Usage() {
       if (key && key !== 'unknown' && !seen.has(key)) { seen.add(key); merged.push(key) }
     }
     return merged
-  }, [modelOptions, grokModelOptions, modelStats, channel])
+  }, [modelOptions, grokModelOptions, traeModelOptions, modelStats, channel])
   const featureStats = stats?.feature_stats
   const endpointStats = stats?.endpoint_stats ?? []
   const apiKeyStats = stats?.api_key_stats ?? []
@@ -2725,12 +2730,12 @@ export default function Usage() {
                               </Badge>
                             )}
                             <Badge variant="outline" className={usageTableBadgeClass}>
-                              {(log.channel === 'codex' || log.channel === 'grok' || log.channel === 'antigravity') && (
+                              {(log.channel === 'codex' || log.channel === 'grok' || log.channel === 'antigravity' || log.channel === 'traecn') && (
                                 <ChannelLogo
                                   channel={log.channel}
                                   size={13}
                                   className="mr-1"
-                                  title={log.channel === 'grok' ? 'Grok' : log.channel === 'antigravity' ? 'Antigravity' : 'Codex'}
+                                  title={log.channel === 'grok' ? 'Grok' : log.channel === 'antigravity' ? 'Antigravity' : log.channel === 'traecn' ? 'TRAECN' : 'Codex'}
                                 />
                               )}
                               {log.model || '-'}

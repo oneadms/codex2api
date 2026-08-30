@@ -2,7 +2,7 @@ import { cn } from "@/lib/utils";
 import type { UpstreamChannel } from "@/types";
 
 /**
- * 渠道品牌图标（Codex / Grok / Antigravity）。
+ * 渠道品牌图标（Codex / Grok / Antigravity / TRAECN）。
  *
  * 使用 `@lobehub/icons-static-svg`，对齐 `@lobehub/icons` 的 Codex.Avatar 彩色方案，
  * 但不引入 antd / @lobehub/ui peer deps。
@@ -10,6 +10,7 @@ import type { UpstreamChannel } from "@/types";
  * - Codex：`codex-color.svg`（白底圆角 + 紫蓝渐变 mark，即 Codex.Avatar）
  * - Grok：仅有 mono `grok.svg`（fill=currentColor，跟随文字色适配深浅主题）
  * - Antigravity：`antigravity-color.svg`（官方彩色 mark）
+ * - TRAECN：本地文字标记，避免依赖外部品牌资源。
  */
 const ICON_URLS = import.meta.glob(
   [
@@ -95,6 +96,22 @@ export default function ChannelLogo({
         )}
         style={{ width: size, height: size }}
       />
+    );
+  }
+
+  if (channel === "traecn") {
+    return (
+      <span
+        title={title ?? "TRAECN"}
+        aria-label={title ?? "TRAECN"}
+        className={cn(
+          "inline-flex shrink-0 items-center justify-center rounded-[3px] bg-emerald-500/15 px-[3px] py-px font-mono font-bold leading-none text-emerald-700 dark:text-emerald-300",
+          className,
+        )}
+        style={{ fontSize: Math.max(8, Math.round(size * 0.58)), height: size, minWidth: size }}
+      >
+        T
+      </span>
     );
   }
 

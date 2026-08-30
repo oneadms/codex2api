@@ -34,7 +34,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { api, type ProxyRow } from "../api";
-import type { AccountRow } from "../types";
+import type { AccountRow, UpstreamChannel } from "../types";
 import ChannelLogo from "../components/ChannelLogo";
 import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
@@ -60,7 +60,7 @@ import { cn } from "@/lib/utils";
 const PROXY_SCHEMES = ["http:", "https:", "socks5:", "socks5h:"];
 
 type BindFilter = "all" | "unbound" | "this" | "other";
-type BindKindFilter = "all" | "codex" | "grok";
+type BindKindFilter = "all" | UpstreamChannel;
 type StatusFilter = "all" | "enabled" | "disabled" | "error" | "untested";
 
 function accountDisplayName(account: AccountRow): string {
@@ -71,6 +71,8 @@ function accountDisplayName(account: AccountRow): string {
 }
 
 function accountKindKey(account: AccountRow): string {
+  if (account.traecn_api) return "traecn";
+  if (account.antigravity_api) return "antigravity";
   if (account.grok_api) return "grok";
   if (account.openai_responses_api) return "openai";
   if (account.agent_identity) return "agent";
@@ -325,7 +327,7 @@ export default function Proxies() {
   const [bindSubmitting, setBindSubmitting] = useState(false);
 
   const [showBalance, setShowBalance] = useState(false);
-  const [balanceChannel, setBalanceChannel] = useState<"" | "codex" | "grok">("grok");
+  const [balanceChannel, setBalanceChannel] = useState<"" | UpstreamChannel>("grok");
   const [balanceMode, setBalanceMode] = useState<"unbound" | "all">("unbound");
   const [balanceMaxPerProxy, setBalanceMaxPerProxy] = useState("");
   const [balanceSubmitting, setBalanceSubmitting] = useState(false);
@@ -1659,6 +1661,8 @@ export default function Proxies() {
                 [
                   ["grok", t("proxies.bindKindGrok")],
                   ["codex", t("proxies.bindKindCodex")],
+                  ["antigravity", t("proxies.bindKindAntigravity")],
+                  ["traecn", t("proxies.bindKindTraeCN")],
                   ["", t("proxies.bindKindAll")],
                 ] as const
               ).map(([key, label]) => (
@@ -1841,6 +1845,8 @@ export default function Proxies() {
                       ["all", t("proxies.bindKindAll")],
                       ["codex", t("proxies.bindKindCodex")],
                       ["grok", t("proxies.bindKindGrok")],
+                      ["antigravity", t("proxies.bindKindAntigravity")],
+                      ["traecn", t("proxies.bindKindTraeCN")],
                     ] as const
                   ).map(([key, label]) => (
                     <button
@@ -1853,7 +1859,7 @@ export default function Proxies() {
                           : "text-muted-foreground hover:text-foreground"
                       }`}
                     >
-                      {key === "codex" || key === "grok" ? (
+                      {key !== "all" ? (
                         <ChannelLogo channel={key} size={14} />
                       ) : null}
                       {label}

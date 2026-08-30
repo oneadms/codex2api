@@ -27,6 +27,7 @@ const (
 	modelBackingGrok
 	modelBackingRelay
 	modelBackingAntigravity
+	modelBackingTraeCN
 )
 
 type scopedModelRecord struct {
@@ -76,6 +77,8 @@ func scopedModelOwner(record *scopedModelRecord) string {
 		return "openai"
 	case modelBackingAntigravity:
 		return "google"
+	case modelBackingTraeCN:
+		return "trae"
 	default:
 		return "codex2api"
 	}
@@ -222,6 +225,16 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 				addTarget(id)
 			}
 
+		case account.IsTraeCNAPI():
+			models := account.TraeCNModels()
+			if len(models) == 0 {
+				models = auth.TraeCNDefaultModelIDs()
+			}
+			for _, id := range models {
+				addScopedModel(records, id, modelBackingTraeCN, time.Time{}, false)
+				addTarget(id)
+			}
+
 		default:
 			for _, item := range catalog.Items {
 				if !item.Enabled || !account.SupportsCodexModel(item.ID) {
@@ -239,7 +252,8 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 	// Antigravity-only keys intentionally expose exactly the native logical
 	// surface. Global/OpenAI aliases and synthesized effort aliases belong to
 	// other providers and would make Cockpit's catalog diverge again.
-	if row.Limits.ResolveUpstreamChannel() != database.UpstreamChannelAntigravity {
+	channel := row.Limits.ResolveUpstreamChannel()
+	if channel != database.UpstreamChannelAntigravity && channel != database.UpstreamChannelTraeCN {
 		// Global exact aliases are visible only when their concrete target is
 		// routeable in this key's account snapshot. Wildcards are patterns, not
 		// model IDs, and therefore never appear in /v1/models.

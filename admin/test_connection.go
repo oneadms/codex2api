@@ -65,10 +65,21 @@ func classifyResponsesTerminalEvent(data []byte) responsesTerminalOutcome {
 }
 
 func (h *Handler) applyResponsesUsageLimitFailure(account *auth.Account, resp *http.Response, model string, payload []byte) bool {
-	if h == nil || h.store == nil || account == nil || !proxy.IsUsageLimitReachedError(payload) {
+	if h == nil || h.store == nil || account == nil || account.IsTraeCNAPI() || !proxy.IsUsageLimitReachedError(payload) {
 		return false
 	}
 	proxy.Apply429Cooldown(h.store, account, payload, resp, model)
+	return true
+}
+
+func (h *Handler) applyTraeCNRateLimitFailure(account *auth.Account, payload []byte) bool {
+	if h == nil || h.store == nil || account == nil || !account.IsTraeCNAPI() || !proxy.IsTraeCNRateLimitError(payload) {
+		return false
+	}
+	// 4011 is an application-level throttle, not a credential ban. A short
+	// account cooldown lets normal pool dispatch rotate to another RT without
+	// poisoning the account's long-term health state.
+	h.store.MarkCooldown(account, time.Minute, "rate_limited")
 	return true
 }
 
@@ -107,8 +118,9 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	}
 
 	isOpenAIResponsesAccount := account.IsRelayStyle()
-	// Agent Identity 无 AT，凭私钥动态签名，跳过 AT 预检（请求走 Codex 执行器动态签名）。
-	if !isOpenAIResponsesAccount && !account.IsCodexAgentIdentity() && account.GetAccessToken() == "" {
+	// Agent Identity 无 AT，凭私钥动态签名；TRAECN RT-only 账号会在请求
+	// 执行器中懒兑换 AT。两类账号都必须跳过仅检查 AT 的前置判断。
+	if !isOpenAIResponsesAccount && !account.IsCodexAgentIdentity() && !account.IsTraeCNAPI() && account.GetAccessToken() == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "账号没有可用的 Access Token，请先刷新"})
 		return
 	}
@@ -139,16 +151,21 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	}
 
 	// 构建最小测试请求体（参考 sub2api createOpenAITestPayload）
-	payload := buildConnectionTestPayload(h.store, testModel)
+	payload := buildConnectionTestPayloadForAccount(h.store, account, testModel)
 
 	// 发送请求
 	start := time.Now()
 	var resp *http.Response
 	var reqErr error
+	proxyURL := h.store.ResolveProxyForAccount(account)
 	if isOpenAIResponsesAccount {
-		resp, reqErr = proxy.ExecuteRelayStyleRequest(c.Request.Context(), account, payload, h.store.ResolveProxyForAccount(account), nil)
+		if isTransient {
+			resp, reqErr = proxy.ExecuteRelayStyleRequest(c.Request.Context(), account, payload, proxyURL, nil)
+		} else {
+			resp, reqErr = proxy.ExecuteRelayStyleRequestWithStore(c.Request.Context(), h.store, account, payload, proxyURL, nil)
+		}
 	} else {
-		resp, reqErr = proxy.ExecuteRequest(c.Request.Context(), account, payload, "", h.store.ResolveProxyForAccount(account), "", nil, nil)
+		resp, reqErr = proxy.ExecuteRequest(c.Request.Context(), account, payload, "", proxyURL, "", nil, nil)
 	}
 	if reqErr != nil {
 		sendTestEvent(c, testEvent{Type: "error", Error: fmt.Sprintf("请求失败: %s", reqErr.Error())})
@@ -163,29 +180,38 @@ func (h *Handler) TestConnection(c *gin.Context) {
 		errBody, _ := io.ReadAll(resp.Body)
 		errMsg := fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, truncate(string(errBody), 500))
 		if !isTransient {
-			switch resp.StatusCode {
-			case http.StatusUnauthorized:
-				h.store.MarkCooldownWithError(account, 24*time.Hour, "unauthorized", errMsg)
-			case http.StatusPaymentRequired:
-				// 测连 402 是账号侧计费/工作区拒绝，标成错误，避免继续显示成「未采样」。
-				if proxy.IsDeactivatedWorkspaceError(errBody) {
-					h.store.MarkDeactivatedWorkspace(account, errMsg)
-				} else {
-					h.store.MarkError(account, errMsg)
-				}
-			case http.StatusForbidden:
-				if proxy.IsAgentRuntimeDeletedError(errBody) {
-					h.store.MarkCooldownWithErrorExactDuration(account, 24*time.Hour, "unauthorized", errMsg)
-				} else if proxy.IsDeactivatedWorkspaceError(errBody) {
-					h.store.MarkDeactivatedWorkspace(account, errMsg)
-				}
-			case http.StatusTooManyRequests:
-				// Grok 虽是 relay 风格，但有自己的免费额度语义（free-usage-exhausted → 24h），
-				// 不能并入"relay 一律 1 分钟 rate_limited"，否则耗尽会被标成短冷却、1 分钟即恢复。
-				if isOpenAIResponsesAccount && !account.IsGrokAPI() {
-					h.store.MarkCooldown(account, time.Minute, "rate_limited")
-				} else {
+			if account.IsTraeCNAPI() {
+				// Trae CN has no Codex subscription state. A 401 is left for
+				// the request refresh/retry path; only a real HTTP 429 gets a
+				// relay model cooldown.
+				if resp.StatusCode == http.StatusTooManyRequests {
 					proxy.Apply429Cooldown(h.store, account, errBody, resp, testModel)
+				}
+			} else {
+				switch resp.StatusCode {
+				case http.StatusUnauthorized:
+					h.store.MarkCooldownWithError(account, 24*time.Hour, "unauthorized", errMsg)
+				case http.StatusPaymentRequired:
+					// 测连 402 是账号侧计费/工作区拒绝，标成错误，避免继续显示成「未采样」。
+					if proxy.IsDeactivatedWorkspaceError(errBody) {
+						h.store.MarkDeactivatedWorkspace(account, errMsg)
+					} else {
+						h.store.MarkError(account, errMsg)
+					}
+				case http.StatusForbidden:
+					if proxy.IsAgentRuntimeDeletedError(errBody) {
+						h.store.MarkCooldownWithErrorExactDuration(account, 24*time.Hour, "unauthorized", errMsg)
+					} else if proxy.IsDeactivatedWorkspaceError(errBody) {
+						h.store.MarkDeactivatedWorkspace(account, errMsg)
+					}
+				case http.StatusTooManyRequests:
+					// Grok 虽是 relay 风格，但有自己的免费额度语义（free-usage-exhausted → 24h），
+					// 不能并入"relay 一律 1 分钟 rate_limited"，否则耗尽会被标成短冷却、1 分钟即恢复。
+					if isOpenAIResponsesAccount && !account.IsGrokAPI() {
+						h.store.MarkCooldown(account, time.Minute, "rate_limited")
+					} else {
+						proxy.Apply429Cooldown(h.store, account, errBody, resp, testModel)
+					}
 				}
 			}
 		}
@@ -261,13 +287,16 @@ func (h *Handler) TestConnection(c *gin.Context) {
 			gotTerminal = true
 			if status := gjson.GetBytes(data, "response.status").String(); status == "failed" || status == "incomplete" {
 				sentTerminal = true
-				if !isTransient {
+				traeRateLimited := account.IsTraeCNAPI() && proxy.IsTraeCNRateLimitError(data)
+				if !isTransient && traeRateLimited {
+					h.applyTraeCNRateLimitFailure(account, data)
+				} else if !isTransient {
 					h.applyResponsesUsageLimitFailure(account, resp, testModel, data)
 				}
-				if isTransient && proxy.IsUsageLimitReachedError(data) {
+				if isTransient && (proxy.IsUsageLimitReachedError(data) || traeRateLimited) {
 					transientOutcome = "rate_limited"
 				}
-				sendTestEvent(c, testEvent{Type: "error", Error: formatUpstreamTestError(data, "上游返回 "+status)})
+				sendTestEvent(c, testEvent{Type: "error", Error: formatAccountUpstreamTestError(account, data, "上游返回 "+status)})
 				return false
 			}
 			if !hasContent {
@@ -309,24 +338,30 @@ func (h *Handler) TestConnection(c *gin.Context) {
 		case "response.failed":
 			gotTerminal = true
 			sentTerminal = true
-			if !isTransient {
+			traeRateLimited := account.IsTraeCNAPI() && proxy.IsTraeCNRateLimitError(data)
+			if !isTransient && traeRateLimited {
+				h.applyTraeCNRateLimitFailure(account, data)
+			} else if !isTransient {
 				h.applyResponsesUsageLimitFailure(account, resp, testModel, data)
 			}
-			if isTransient && proxy.IsUsageLimitReachedError(data) {
+			if isTransient && (proxy.IsUsageLimitReachedError(data) || traeRateLimited) {
 				transientOutcome = "rate_limited"
 			}
-			sendTestEvent(c, testEvent{Type: "error", Error: formatUpstreamTestError(data, "上游返回 response.failed")})
+			sendTestEvent(c, testEvent{Type: "error", Error: formatAccountUpstreamTestError(account, data, "上游返回 response.failed")})
 			return false
 		case "error":
 			gotTerminal = true
 			sentTerminal = true
-			if !isTransient {
+			traeRateLimited := account.IsTraeCNAPI() && proxy.IsTraeCNRateLimitError(data)
+			if !isTransient && traeRateLimited {
+				h.applyTraeCNRateLimitFailure(account, data)
+			} else if !isTransient {
 				h.applyResponsesUsageLimitFailure(account, resp, testModel, data)
 			}
-			if isTransient && proxy.IsUsageLimitReachedError(data) {
+			if isTransient && (proxy.IsUsageLimitReachedError(data) || traeRateLimited) {
 				transientOutcome = "rate_limited"
 			}
-			sendTestEvent(c, testEvent{Type: "error", Error: formatUpstreamTestError(data, "上游返回 error 事件")})
+			sendTestEvent(c, testEvent{Type: "error", Error: formatAccountUpstreamTestError(account, data, "上游返回 error 事件")})
 			return false
 		}
 		return true
@@ -349,6 +384,17 @@ func buildConnectionTestPayload(store *auth.Store, model string) []byte {
 	// 多行内容按行随机抽取 + 变量展开（issue #320），减少批量账号
 	// 共用同一句测活内容的指纹特征。单行配置行为不变。
 	return buildTestPayloadWithContent(model, auth.RenderTestContent(content))
+}
+
+func buildConnectionTestPayloadForAccount(store *auth.Store, account *auth.Account, model string) []byte {
+	payload := buildConnectionTestPayload(store, model)
+	if account != nil && account.IsTraeCNAPI() {
+		// Keep the provider probe small and match the desktop llm_utils_chat
+		// envelope. Omitting max_tokens is accepted by some concrete models but
+		// has produced inconsistent auto/inline_chat routing failures.
+		payload, _ = sjson.SetBytes(payload, "max_output_tokens", 64)
+	}
+	return payload
 }
 
 // buildTestPayload 构建默认最小测试请求体
@@ -508,6 +554,28 @@ func formatUpstreamTestError(data []byte, fallback string) string {
 	return formatUpstreamEventDetail(msg, data)
 }
 
+func formatAccountUpstreamTestError(account *auth.Account, data []byte, fallback string) string {
+	if account != nil && account.IsTraeCNAPI() && proxy.IsTraeCNRateLimitError(data) {
+		return formatTraeCNRateLimitTestError(data)
+	}
+	return formatUpstreamTestError(data, fallback)
+}
+
+func formatTraeCNRateLimitTestError(data []byte) string {
+	code := firstNonEmptyGJSONString(data,
+		"response.status_details.error.code",
+		"response.error.code",
+		"error.code",
+		"code",
+	)
+	message := "Trae CN 上游触发业务限流"
+	if code != "" {
+		message += " (code: " + code + ")"
+	}
+	message += "。请求已经通过格式校验并进入上游业务层，并非缺少必填参数；请稍后重试或切换号池账号。"
+	return formatUpstreamEventDetail(message, data)
+}
+
 func formatNoOutputUpstreamError(data []byte) string {
 	msg := "上游已完成但没有返回文本输出"
 	if status := gjson.GetBytes(data, "response.status").String(); status != "" && status != "completed" {
@@ -590,6 +658,36 @@ func (h *Handler) connectionTestModelForAccount(ctx context.Context, account *au
 			return "", fmt.Errorf("不支持的测试模型: %s", requested)
 		}
 		return requested, nil
+	}
+	if account.IsTraeCNAPI() {
+		models := account.TraeCNModels()
+		if len(models) == 0 {
+			models = auth.TraeCNDefaultModelIDs()
+		}
+		textModels := make([]string, 0, len(models))
+		for _, model := range models {
+			if isTextConnectionModel(model) {
+				textModels = append(textModels, strings.TrimSpace(model))
+			}
+		}
+		if len(textModels) == 0 {
+			return "", fmt.Errorf("该 Trae CN 账号没有可用于测试的文本模型")
+		}
+		if requested != "" {
+			for _, model := range textModels {
+				if strings.EqualFold(model, requested) {
+					return model, nil
+				}
+			}
+			return "", fmt.Errorf("该账号不支持测试模型: %s", requested)
+		}
+		defaultModel := strings.TrimSpace(h.store.GetTraeCNTestModel())
+		for _, model := range textModels {
+			if strings.EqualFold(model, defaultModel) {
+				return model, nil
+			}
+		}
+		return textModels[0], nil
 	}
 
 	models := account.OpenAIResponsesModels()
@@ -1039,7 +1137,8 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 		return "failed", "Antigravity 账号尚未接入推理测连"
 	}
 
-	if !acc.IsRelayStyle() && !acc.IsCodexAgentIdentity() && acc.GetAccessToken() == "" {
+	// TRAECN RT-only 账号由 ExecuteRelayStyleRequestWithStore 懒兑换 AT。
+	if !acc.IsRelayStyle() && !acc.IsCodexAgentIdentity() && !acc.IsTraeCNAPI() && acc.GetAccessToken() == "" {
 		acc.Mu().RLock()
 		hasRefreshToken := acc.RefreshToken != ""
 		acc.Mu().RUnlock()
@@ -1065,15 +1164,16 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 		h.store.MarkError(acc, "批量测试失败: "+modelErr.Error())
 		return "failed", modelErr.Error()
 	}
-	payload := buildConnectionTestPayload(h.store, testModel)
+	payload := buildConnectionTestPayloadForAccount(h.store, acc, testModel)
 	start := time.Now()
 
 	var resp *http.Response
 	var err error
+	proxyURL := h.store.ResolveProxyForAccount(acc)
 	if acc.IsRelayStyle() {
-		resp, err = proxy.ExecuteRelayStyleRequest(testCtx, acc, payload, h.store.ResolveProxyForAccount(acc), nil)
+		resp, err = proxy.ExecuteRelayStyleRequestWithStore(testCtx, h.store, acc, payload, proxyURL, nil)
 	} else {
-		resp, err = proxy.ExecuteRequest(testCtx, acc, payload, "", h.store.ResolveProxyForAccount(acc), "", nil, nil)
+		resp, err = proxy.ExecuteRequest(testCtx, acc, payload, "", proxyURL, "", nil, nil)
 	}
 	if err != nil {
 		if msg, ok := batchTestContextFailure(testCtx, err); ok {
@@ -1111,6 +1211,9 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 		if !acc.IsRelayStyle() {
 			proxy.SyncCodexUsageState(h.store, acc, resp)
 		}
+		if acc.IsTraeCNAPI() {
+			return "failed", "Trae CN 上游返回 401，RT 刷新后仍未通过鉴权"
+		}
 		h.store.MarkCooldownWithError(acc, 24*time.Hour, "unauthorized", fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, truncate(string(body), 300)))
 		return "banned", "上游返回 401: 账号授权失败"
 	case http.StatusTooManyRequests:
@@ -1120,7 +1223,9 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 		}
 		// Grok 走 relay 但有 free-usage-exhausted 语义，须交给 Apply429Cooldown 识别耗尽
 		// （→ 24h usage_limited + 落权威用量快照），不能并入 relay 的 1 分钟 rate_limited。
-		if acc.IsRelayStyle() && !acc.IsGrokAPI() {
+		if acc.IsTraeCNAPI() {
+			proxy.Apply429Cooldown(h.store, acc, body, resp, testModel)
+		} else if acc.IsRelayStyle() && !acc.IsGrokAPI() {
 			h.store.MarkCooldown(acc, time.Minute, "rate_limited")
 		} else {
 			if !acc.IsRelayStyle() {
@@ -1160,7 +1265,7 @@ func (h *Handler) runRecycleBinSingleTest(ctx context.Context, acc *auth.Account
 		return "failed", "Antigravity 账号尚未接入推理测连"
 	}
 
-	if !acc.IsRelayStyle() && !acc.IsCodexAgentIdentity() && acc.GetAccessToken() == "" {
+	if !acc.IsRelayStyle() && !acc.IsCodexAgentIdentity() && !acc.IsTraeCNAPI() && acc.GetAccessToken() == "" {
 		return "failed", "账号缺少可用的 Access Token"
 	}
 
@@ -1171,7 +1276,7 @@ func (h *Handler) runRecycleBinSingleTest(ctx context.Context, acc *auth.Account
 		}
 		return "failed", modelErr.Error()
 	}
-	payload := buildConnectionTestPayload(h.store, testModel)
+	payload := buildConnectionTestPayloadForAccount(h.store, acc, testModel)
 
 	var resp *http.Response
 	var err error
@@ -1251,7 +1356,12 @@ func readRecycleBinTestStream(ctx context.Context, resp *http.Response) (string,
 				if proxy.IsUsageLimitReachedError(data) {
 					resultStatus = "rate_limited"
 				}
-				resultMessage = formatUpstreamTestError(data, "上游返回 "+status)
+				if proxy.IsTraeCNRateLimitError(data) {
+					resultStatus = "rate_limited"
+					resultMessage = formatTraeCNRateLimitTestError(data)
+				} else {
+					resultMessage = formatUpstreamTestError(data, "上游返回 "+status)
+				}
 				return false
 			}
 			if !hasContent && extractCompletedOutputText(data) != "" {
@@ -1271,12 +1381,22 @@ func readRecycleBinTestStream(ctx context.Context, resp *http.Response) (string,
 			if proxy.IsUsageLimitReachedError(data) {
 				resultStatus = "rate_limited"
 			}
-			resultMessage = formatUpstreamTestError(data, "上游返回 response.failed")
+			if proxy.IsTraeCNRateLimitError(data) {
+				resultStatus = "rate_limited"
+				resultMessage = formatTraeCNRateLimitTestError(data)
+			} else {
+				resultMessage = formatUpstreamTestError(data, "上游返回 response.failed")
+			}
 			return false
 		case "error":
 			gotTerminal = true
 			resultStatus = "failed"
-			resultMessage = formatUpstreamTestError(data, "上游返回 error 事件")
+			if proxy.IsTraeCNRateLimitError(data) {
+				resultStatus = "rate_limited"
+				resultMessage = formatTraeCNRateLimitTestError(data)
+			} else {
+				resultMessage = formatUpstreamTestError(data, "上游返回 error 事件")
+			}
 			return false
 		}
 		return true
@@ -1429,6 +1549,10 @@ func (h *Handler) readBatchTestStreamResult(ctx context.Context, acc *auth.Accou
 }
 
 func (h *Handler) batchTestTerminalFailure(acc *auth.Account, resp *http.Response, model string, payload []byte, fallback string) (string, string) {
+	if acc != nil && acc.IsTraeCNAPI() && proxy.IsTraeCNRateLimitError(payload) {
+		h.applyTraeCNRateLimitFailure(acc, payload)
+		return "rate_limited", formatTraeCNRateLimitTestError(payload)
+	}
 	message := formatUpstreamTestError(payload, fallback)
 	if h.applyResponsesUsageLimitFailure(acc, resp, model, payload) {
 		return "rate_limited", message

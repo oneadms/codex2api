@@ -62,6 +62,7 @@ func (h *Handler) buildAccountResponse(
 	isOpenAIResponsesAccount := strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses)
 	isGrokAccount := strings.EqualFold(upstreamType, auth.UpstreamGrok)
 	isAntigravityAccount := strings.EqualFold(upstreamType, auth.UpstreamAntigravity)
+	isTraeCNAccount := strings.EqualFold(upstreamType, auth.UpstreamTraeCN)
 	antigravityAuthKind := ""
 	if isAntigravityAccount {
 		if strings.TrimSpace(row.GetCredential("api_key")) != "" {
@@ -112,6 +113,14 @@ func (h *Handler) buildAccountResponse(
 			planType = runtimePlan
 		}
 	}
+	if isTraeCNAccount {
+		if email == "" {
+			email = row.GetCredential("traecn_user_id")
+		}
+		if planType == "" {
+			planType = "traecn"
+		}
+	}
 	var grokPlan *auth.GrokPlan
 	if isGrokAccount {
 		if resolved, ok := auth.ResolveGrokPlan(planType); ok {
@@ -128,7 +137,7 @@ func (h *Handler) buildAccountResponse(
 	}
 	// 指纹收敛只作用于 Codex 官方出站路径，中转/Grok 账号不暴露该字段。
 	codexFingerprintMode := ""
-	if !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount {
+	if !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isTraeCNAccount {
 		codexFingerprintMode = auth.NormalizeCodexFingerprintMode(row.GetCredential(auth.CodexFingerprintModeCredentialKey))
 	}
 	ignoreUsageLimitStatusOverride := row.GetCredentialOptionalBool("ignore_usage_limit_status_override")
@@ -165,7 +174,7 @@ func (h *Handler) buildAccountResponse(
 		SubscriptionExpiresAt:    row.GetCredential("subscription_expires_at"),
 		Status:                   row.Status,
 		ErrorMessage:             row.ErrorMessage,
-		ATOnly:                   !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
+		ATOnly:                   !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isTraeCNAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
 		CreditEnabled:            row.CreditEnabled,
 		CreditSkipUsageWindow:    row.CreditSkipUsageWindow,
 		SkipWarmTier:             row.SkipWarmTier,
@@ -174,6 +183,7 @@ func (h *Handler) buildAccountResponse(
 		OpenAIResponsesAPI:       isOpenAIResponsesAccount,
 		GrokAPI:                  isGrokAccount,
 		AntigravityAPI:           isAntigravityAccount,
+		TraeCNAPI:                isTraeCNAccount,
 		AntigravityAuthKind:      antigravityAuthKind,
 		AgentIdentity:            isAgentIdentityCredentialRow(row),
 		GrokAuthKind:             grokAuthKind,
@@ -186,6 +196,7 @@ func (h *Handler) buildAccountResponse(
 		AntigravityPermissions:   antigravityPermissions,
 		AntigravitySyncWarning:   row.GetCredential("antigravity_sync_warning"),
 		BaseURL:                  baseURL,
+		TraeCNHost:               row.GetCredential("traecn_host"),
 		BalanceQueryURL:          balanceQueryURL,
 		Models:                   row.GetCredentialStringSlice("models"),
 		ModelMapping:             modelMapping,

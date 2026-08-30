@@ -1631,6 +1631,24 @@ func ExecuteGrokProtocolRequest(ctx context.Context, account *auth.Account, inbo
 // the three HTTP handlers. Relay accounts still receive canonical Responses;
 // Grok accounts select a backend after the concrete retry account is known.
 func ExecuteRelayStyleProtocolRequest(ctx context.Context, account *auth.Account, inbound GrokProtocol, inboundBody, responsesBody []byte, proxyOverride string, headers http.Header) (*http.Response, error) {
+	return executeRelayStyleProtocolRequest(ctx, nil, account, inbound, inboundBody, responsesBody, proxyOverride, headers)
+}
+
+// ExecuteRelayStyleProtocolRequestWithStore is the durable variant used by
+// production handlers. Trae CN may rotate its refresh token while preparing a
+// request, so the executor needs the Store-owned refresh path rather than an
+// in-memory-only fallback.
+func ExecuteRelayStyleProtocolRequestWithStore(ctx context.Context, store *auth.Store, account *auth.Account, inbound GrokProtocol, inboundBody, responsesBody []byte, proxyOverride string, headers http.Header) (*http.Response, error) {
+	return executeRelayStyleProtocolRequest(ctx, store, account, inbound, inboundBody, responsesBody, proxyOverride, headers)
+}
+
+func executeRelayStyleProtocolRequest(ctx context.Context, store *auth.Store, account *auth.Account, inbound GrokProtocol, inboundBody, responsesBody []byte, proxyOverride string, headers http.Header) (*http.Response, error) {
+	if account != nil && account.IsTraeCNAPI() {
+		if store != nil {
+			return ExecuteTraeCNRequestWithStore(ctx, store, account, inbound, inboundBody, responsesBody, proxyOverride, headers)
+		}
+		return ExecuteTraeCNRequest(ctx, account, inbound, inboundBody, responsesBody, proxyOverride, headers)
+	}
 	if account != nil && account.IsGrokAPI() {
 		return ExecuteGrokProtocolRequest(ctx, account, inbound, inboundBody, responsesBody, proxyOverride, headers)
 	}
@@ -1641,6 +1659,10 @@ func ExecuteRelayStyleProtocolRequest(ctx context.Context, account *auth.Account
 }
 
 func relayUpstreamEndpointForProtocol(account *auth.Account, inbound GrokProtocol, model string) string {
+	if account != nil && account.IsTraeCNAPI() {
+		host, _ := account.TraeCNCredentials()
+		return host + auth.TraeCNChatPath
+	}
 	if account != nil && account.IsGrokAPI() {
 		return ResolveGrokUpstreamRoute(account, model, inbound, time.Now()).Endpoint
 	}

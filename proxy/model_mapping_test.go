@@ -166,6 +166,26 @@ func TestApplyMessagesModelMappingStripsTopLevelReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestMessagesTraeCNModelBypassesCodexMappings(t *testing.T) {
+	store := auth.NewStore(nil, nil, nil)
+	store.SetCodexModelMapping(`{"claude-opus-4-6":"gpt-5.4"}`)
+	handler := NewHandler(store, nil, nil, nil)
+	raw := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":"hello"}],"output_config":{"effort":"medium"}}`)
+
+	routing := handler.resolveMessagesRoutingBody(raw, "claude-opus-4-6", []string{"gpt-5.4"}, true)
+	if got := gjson.GetBytes(routing, "model").String(); got != "claude-opus-4-6" {
+		t.Fatalf("TRAECN routing model = %q, want original logical model; body=%s", got, routing)
+	}
+
+	body, err := handler.translateAnthropicMessagesToCodexOnce(nil, raw, []string{"gpt-5.4"}, true)
+	if err != nil {
+		t.Fatalf("TRAECN translation error = %v", err)
+	}
+	if got := gjson.GetBytes(body, "model").String(); got != "claude-opus-4-6" {
+		t.Fatalf("TRAECN translated model = %q, want original logical model; body=%s", got, body)
+	}
+}
+
 // ultra 是预埋的思考强度档位（未来新模型可能支持），必须在 alias 配置与
 // 请求级 effort 归一化中原样透传，而不是被钳位回 high。
 func TestApplyReasoningEffortModelAliasSupportsUltra(t *testing.T) {

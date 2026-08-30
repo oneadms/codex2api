@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/codex2api/database"
 )
 
 func newFastSchedulerTestAccount(id int64, tier AccountHealthTier, score float64, limit int64) *Account {
@@ -1350,5 +1352,31 @@ func TestStoreAPIKeyAllowsConfiguredNoAffinityGroups(t *testing.T) {
 	}
 	if store.APIKeyAllowsAccount(1, other) {
 		t.Fatal("unconfigured group should remain unauthorized")
+	}
+}
+
+func TestStoreAPIKeyUpstreamChannelIsolatesTraeCN(t *testing.T) {
+	codex := newFastSchedulerTestAccount(1, HealthTierHealthy, 100, 1)
+	trae := newFastSchedulerTestAccount(2, HealthTierHealthy, 100, 1)
+	trae.UpstreamType = UpstreamTraeCN
+	trae.AccessToken = "trae-at"
+	trae.RefreshToken = "trae-rt"
+	store := &Store{accounts: []*Account{codex, trae}, maxConcurrency: 1}
+	store.rebuildAccountIndex()
+
+	store.SetAPIKeyUpstreamChannel(10, database.UpstreamChannelCodex)
+	if !store.APIKeyAllowsAccount(10, codex) {
+		t.Fatal("Codex key should allow a Codex account")
+	}
+	if store.APIKeyAllowsAccount(10, trae) {
+		t.Fatal("Codex key must not allow a Trae CN account")
+	}
+
+	store.SetAPIKeyUpstreamChannel(11, database.UpstreamChannelTraeCN)
+	if store.APIKeyAllowsAccount(11, codex) {
+		t.Fatal("Trae CN key must not allow a Codex account")
+	}
+	if !store.APIKeyAllowsAccount(11, trae) {
+		t.Fatal("Trae CN key should allow a Trae CN account")
 	}
 }

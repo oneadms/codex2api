@@ -20,7 +20,8 @@ func (db *DB) ListAccountListProjection(ctx context.Context, channel string) ([]
 			models jsonb, api_key text, refresh_token text, scheduler_priority text,
 			avatar_url text, verified_email boolean, project_id text,
 			antigravity_sync_error text, antigravity_sync_warning text,
-			antigravity_permissions text, antigravity_entitlements text, antigravity_quota text
+			antigravity_permissions text, antigravity_entitlements text, antigravity_quota text,
+			traecn_host text, traecn_user_id text
 		)`
 	credentialColumns := `
 		COALESCE(account_public.upstream_type, ''),
@@ -37,7 +38,9 @@ func (db *DB) ListAccountListProjection(ctx context.Context, channel string) ([]
 		COALESCE(account_public.antigravity_sync_error, ''),
 		COALESCE(account_public.antigravity_sync_warning, ''),
 		COALESCE(NULLIF(account_public.antigravity_permissions, ''), account_public.antigravity_entitlements, ''),
-		COALESCE(account_public.antigravity_quota, '')`
+		COALESCE(account_public.antigravity_quota, ''),
+		COALESCE(account_public.traecn_host, ''),
+		COALESCE(account_public.traecn_user_id, '')`
 	if db.isSQLite() {
 		upstreamExpr = `LOWER(COALESCE(json_extract(credentials, '$.upstream_type'), ''))`
 		fromClause = `FROM accounts`
@@ -56,7 +59,9 @@ func (db *DB) ListAccountListProjection(ctx context.Context, channel string) ([]
 			COALESCE(json_extract(credentials, '$.antigravity_sync_error'), ''),
 			COALESCE(json_extract(credentials, '$.antigravity_sync_warning'), ''),
 			COALESCE(NULLIF(json_extract(credentials, '$.antigravity_permissions'), ''), json_extract(credentials, '$.antigravity_entitlements'), '{}'),
-			COALESCE(json_extract(credentials, '$.antigravity_quota'), '{}')`
+			COALESCE(json_extract(credentials, '$.antigravity_quota'), '{}'),
+			COALESCE(json_extract(credentials, '$.traecn_host'), ''),
+			COALESCE(json_extract(credentials, '$.traecn_user_id'), '')`
 	}
 	where += accountChannelFilterSQL(channel, upstreamExpr)
 	query := `SELECT id, name, type, proxy_url, status, cooldown_reason, cooldown_until,
@@ -90,6 +95,7 @@ func scanAccountListProjection(scanner accountProjectionScanner) (*AccountRow, e
 	var upstreamType, email, baseURL, planType, schedulerPriority string
 	var avatarURL, projectID string
 	var antigravitySyncError, antigravitySyncWarning, antigravityPermissions, antigravityQuota string
+	var traeCNHost, traeCNUserID string
 	var modelsRaw interface{}
 	var hasAPIKey, hasRefreshToken, verifiedEmail bool
 	if err := scanner.Scan(
@@ -100,6 +106,7 @@ func scanAccountListProjection(scanner accountProjectionScanner) (*AccountRow, e
 		&hasAPIKey, &hasRefreshToken, &schedulerPriority,
 		&avatarURL, &verifiedEmail, &projectID,
 		&antigravitySyncError, &antigravitySyncWarning, &antigravityPermissions, &antigravityQuota,
+		&traeCNHost, &traeCNUserID,
 	); err != nil {
 		return nil, fmt.Errorf("扫描账号列表投影失败: %w", err)
 	}
@@ -118,10 +125,12 @@ func scanAccountListProjection(scanner accountProjectionScanner) (*AccountRow, e
 		return nil, fmt.Errorf("解析 updated_at 失败: %w", err)
 	}
 	row.Credentials = map[string]interface{}{
-		"upstream_type": upstreamType,
-		"email":         email,
-		"base_url":      baseURL,
-		"plan_type":     planType,
+		"upstream_type":  upstreamType,
+		"email":          email,
+		"base_url":       baseURL,
+		"plan_type":      planType,
+		"traecn_host":    traeCNHost,
+		"traecn_user_id": traeCNUserID,
 	}
 	// 调度优先级参与列表排序(issue 截图反馈:排序不生效),投影缺了它会让
 	// 快照全员按 0 打平、退化成 ID 序。以文本取出交给 GetCredentialInt64 解析。

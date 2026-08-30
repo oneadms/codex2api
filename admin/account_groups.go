@@ -474,6 +474,9 @@ func accountRowGroupChannel(row *database.AccountRow) string {
 	if row != nil && strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamAntigravity) {
 		return database.AccountGroupChannelAntigravity
 	}
+	if row != nil && strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamTraeCN) {
+		return database.AccountGroupChannelTraeCN
+	}
 	if isGrokAccountRow(row) {
 		return database.AccountGroupChannelGrok
 	}
@@ -521,6 +524,8 @@ func groupChannelDisplayName(channel string) string {
 		return "Grok"
 	case database.AccountGroupChannelAntigravity:
 		return "Antigravity"
+	case database.AccountGroupChannelTraeCN:
+		return "TRAECN"
 	default:
 		return "Codex"
 	}

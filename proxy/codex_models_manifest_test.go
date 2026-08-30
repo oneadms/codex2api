@@ -100,6 +100,51 @@ func TestListModelsOrManifestServesAntigravityAsCodexManifest(t *testing.T) {
 	}
 }
 
+func TestListModelsOrManifestServesTraeCNAsScopedCodexManifest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2})
+	t.Cleanup(store.Stop)
+	store.AddAccount(&auth.Account{
+		DBID: 10, UpstreamType: auth.UpstreamTraeCN, AccessToken: "trae-token",
+		Models: []string{"claude-sonnet-4-6", "deepseek-v4-pro"},
+	})
+	handler := NewHandler(store, nil, nil, nil)
+	row := &database.APIKeyRow{ID: 4, Limits: database.APIKeyLimits{UpstreamChannel: database.UpstreamChannelTraeCN}}
+
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set(contextAPIKeyRow, row)
+		c.Next()
+	})
+	router.GET("/v1/models", handler.listModelsOrManifest)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.140.0", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("TRAECN Codex manifest status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Models []struct {
+			Slug             string `json:"slug"`
+			PreferWebsockets bool   `json:"prefer_websockets"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("manifest JSON: %v body=%s", err, rec.Body.String())
+	}
+	got := make(map[string]bool, len(payload.Models))
+	for _, model := range payload.Models {
+		got[model.Slug] = true
+		if model.PreferWebsockets {
+			t.Fatalf("slug %s prefer_websockets=true, TRAECN must stay on HTTP", model.Slug)
+		}
+	}
+	if len(got) != 2 || !got["claude-sonnet-4-6"] || !got["deepseek-v4-pro"] {
+		t.Fatalf("manifest slugs = %v, want scoped TRAECN models", got)
+	}
+}
+
 func TestMergeCodexManifestModelsAppendsMissingRelaySlugs(t *testing.T) {
 	merged, err := mergeCodexManifestModels(
 		[]byte(`{"models":[{"slug":"gpt-5.4","display_name":"GPT"}],"future":true}`),

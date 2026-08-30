@@ -173,18 +173,24 @@ func TestSummarizeDashboardAccountsExcludesUnsampledFromAvailable(t *testing.T) 
 		{ID: 2, Status: "active", Enabled: true},
 		{ID: 3, Status: "active", Enabled: true, Credentials: map[string]interface{}{"upstream_type": auth.UpstreamGrok}},
 		{ID: 4, Status: "active", Enabled: true, Credentials: map[string]interface{}{"upstream_type": auth.UpstreamOpenAIResponses}},
+		{ID: 5, Status: "active", Enabled: true, Credentials: map[string]interface{}{"upstream_type": auth.UpstreamTraeCN}},
+		{ID: 6, Status: "active", Enabled: true, Credentials: map[string]interface{}{"upstream_type": auth.UpstreamTraeCN}},
 	}
 	sampled := &auth.Account{DBID: 1, Status: auth.StatusReady, AccessToken: "at-1", UsagePercent7d: 12, UsagePercent7dValid: true}
 	unsampled := &auth.Account{DBID: 2, Status: auth.StatusReady, AccessToken: "at-2"}
 	grok := &auth.Account{DBID: 3, Status: auth.StatusReady, AccessToken: "at-3", UpstreamType: auth.UpstreamGrok}
 	responses := &auth.Account{DBID: 4, Status: auth.StatusReady, APIKey: "sk-test", BaseURL: "https://relay.example", UpstreamType: auth.UpstreamOpenAIResponses}
+	trae := &auth.Account{DBID: 5, Status: auth.StatusReady, AccessToken: "trae-at", UpstreamType: auth.UpstreamTraeCN}
 
-	got, channels := summarizeDashboardAccounts(rows, []*auth.Account{sampled, unsampled, grok, responses})
-	if got.total != 4 || got.normal != 3 || got.rateLimited != 0 || got.abnormal != 0 {
-		t.Fatalf("counts = %+v, want total=4 normal=3 rateLimited=0 abnormal=0", got)
+	got, channels := summarizeDashboardAccounts(rows, []*auth.Account{sampled, unsampled, grok, responses, trae})
+	if got.total != 6 || got.normal != 5 || got.rateLimited != 0 || got.abnormal != 0 {
+		t.Fatalf("counts = %+v, want total=6 normal=5 rateLimited=0 abnormal=0", got)
 	}
 	if channels[database.UpstreamChannelCodex].normal != 2 || channels[database.UpstreamChannelGrok].normal != 1 {
 		t.Fatalf("channel counts = %+v", channels)
+	}
+	if channel := channels[database.UpstreamChannelTraeCN]; channel.total != 2 || channel.normal != 2 {
+		t.Fatalf("Trae CN channel counts = %+v", channel)
 	}
 }
 

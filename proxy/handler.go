@@ -378,9 +378,11 @@ func (h *Handler) applyUpstreamChannelFilter(c *gin.Context, effectiveModel stri
 		return combine(grokChannelAccountFilter(effectiveModel))
 	case database.UpstreamChannelAntigravity:
 		return combine(antigravityChannelAccountFilter(effectiveModel))
+	case database.UpstreamChannelTraeCN:
+		return combine(traeCNChannelAccountFilter(effectiveModel))
 	case database.UpstreamChannelCodex:
 		return func(account *auth.Account) bool {
-			if account == nil || account.IsGrokAPI() || account.IsAntigravityAPI() {
+			if account == nil || account.IsGrokAPI() || account.IsAntigravityAPI() || account.IsTraeCNAPI() {
 				return false
 			}
 			return filter == nil || filter(account)
@@ -425,6 +427,19 @@ func antigravityChannelAccountFilter(model string) auth.AccountFilter {
 	}
 }
 
+func traeCNChannelAccountFilter(model string) auth.AccountFilter {
+	model = strings.TrimSpace(model)
+	return func(account *auth.Account) bool {
+		if account == nil || !account.IsTraeCNAPI() {
+			return false
+		}
+		if model != "" && account.IsModelRateLimited(model) {
+			return false
+		}
+		return account.TraeCNSupportsModel(model)
+	}
+}
+
 func accountFilterForResponsesModel(model string, allowCodexAccounts bool) auth.AccountFilter {
 	return accountFilterForResponsesModelWithOriginal(model, model, allowCodexAccounts)
 }
@@ -441,7 +456,7 @@ func accountFilterForCompactResponsesModelWithOriginal(originalModel string, eff
 	return func(account *auth.Account) bool {
 		// Grok/Antigravity 上游都没有 Responses compact 适配器。尤其不能让
 		// Antigravity Google bearer 落入官方 Codex executor。
-		if account.IsGrokAPI() || account.IsAntigravityAPI() {
+		if account.IsGrokAPI() || account.IsAntigravityAPI() || account.IsTraeCNAPI() {
 			return false
 		}
 		return inner(account)
@@ -502,6 +517,9 @@ func relayAccountSupportsModel(account *auth.Account, model string) bool {
 	}
 	if account.IsGrokAPI() {
 		return grokAccountSupportsVisibleModel(account, model)
+	}
+	if account.IsTraeCNAPI() {
+		return account.TraeCNSupportsModel(model)
 	}
 	if account.SupportsOpenAIResponsesModel(model) {
 		return true
@@ -1323,6 +1341,8 @@ func (h *Handler) logUsage(input *database.UsageLogInput) {
 					input.Channel = database.UpstreamChannelGrok
 				case acc.IsAntigravityAPI():
 					input.Channel = database.UpstreamChannelAntigravity
+				case acc.IsTraeCNAPI():
+					input.Channel = database.UpstreamChannelTraeCN
 				}
 			}
 		}
@@ -2373,6 +2393,12 @@ func responseFailedStatusCodeWithEvidence(payload []byte) (int, bool) {
 		if code >= 400 && code <= 599 {
 			return code, true
 		}
+	}
+	// Trae CN reports throttling as code 4011 inside HTTP 200 SSE. Promote it to
+	// transport-equivalent 429 semantics so it uses the independent rate-limit
+	// retry budget and rotates the account before the first output token.
+	if IsTraeCNRateLimitError(payload) {
+		return http.StatusTooManyRequests, true
 	}
 
 	codeOrType := strings.ToLower(strings.Join([]string{
@@ -3578,13 +3604,20 @@ func (h *Handler) Responses(c *gin.Context) {
 
 	supportedModels := h.supportedModelIDs(c.Request.Context())
 	upstreamChannel := requestUpstreamChannel(c)
+	if upstreamChannel == database.UpstreamChannelTraeCN && strings.TrimSpace(gjson.GetBytes(rawBody, "model").String()) == "" {
+		defaultModel := h.store.GetTraeCNDefaultModel()
+		if rawBody, err = sjson.SetBytes(rawBody, "model", defaultModel); err != nil {
+			api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Request model preparation failed: "+err.Error(), api.ErrorTypeInvalidRequest))
+			return
+		}
+	}
 	var requestModel, mappedModel string
 	var mappingApplied bool
-	if upstreamChannel == database.UpstreamChannelAntigravity {
-		// Antigravity is a native, fixed public surface. Do not let global Codex
-		// aliases or synthesized reasoning aliases rewrite an Antigravity-only
-		// request before validation; the adapter performs the sole public->wire
-		// translation after an account proves it owns the required backing model.
+	if upstreamChannel == database.UpstreamChannelAntigravity || upstreamChannel == database.UpstreamChannelTraeCN {
+		// Antigravity and Trae CN are native, fixed public surfaces. Do not let
+		// global Codex aliases or synthesized reasoning aliases rewrite a
+		// channel-only request before validation; each adapter performs the sole
+		// public->wire translation after an account proves it owns the model.
 		requestModel = strings.TrimSpace(gjson.GetBytes(rawBody, "model").String())
 		mappedModel = requestModel
 	} else if nativeRemoteCompactionV2 {
@@ -3605,6 +3638,8 @@ func (h *Handler) Responses(c *gin.Context) {
 		// Antigravity 专用 Key 公开稳定的逻辑模型，同时继续接受旧的固定
 		// effort 别名；raw backing 与 account model_mapping 不是下游模型名。
 		rules["model"] = append(rules["model"], api.ModelValidator(antigravityAcceptedModelIDs()))
+	case database.UpstreamChannelTraeCN:
+		rules["model"] = append(rules["model"], api.ModelValidator(h.traeCNChannelModels()))
 	default:
 		rules["model"] = append(rules["model"], h.modelValidator(supportedModels))
 	}
@@ -3766,6 +3801,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	dispatchPolicy := dispatchPolicyForModel(effectiveModel)
 	var affinityGuard auth.SessionAffinityGuard
 	grokQualityAttempts := 0
+	traeRefreshRetried := map[int64]bool{}
 	for attempt := 0; ; attempt++ {
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
@@ -3906,19 +3942,20 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 			upstreamEndpoint := relayUpstreamEndpointForProtocol(account, GrokProtocolResponses, attemptEffectiveModel)
 			upstreamBody := getOpenAIResponsesBody()
-			if account.IsAntigravityAPI() {
+			if account.IsAntigravityAPI() || account.IsTraeCNAPI() {
 				// Antigravity has no upstream previous_response_id store. Use the
 				// owner-scoped, locally expanded body so a later function_call_output
-				// still carries the matching function_call/name history.
+				// still carries the matching function_call/name history. Trae CN is
+				// likewise stateless from the gateway's point of view.
 				upstreamBody = codexBody
 			}
 			var mappedBody []byte
 			var mappedModel string
 			var accountMappingApplied bool
-			if account.IsAntigravityAPI() {
-				// Antigravity exposes only native public model IDs. Account-level
-				// OpenAI aliases are deliberately ignored so the adapter receives
-				// the public ID once and performs the single public->wire mapping.
+			if account.IsAntigravityAPI() || account.IsTraeCNAPI() {
+				// Antigravity and TRAECN expose provider-owned logical model IDs.
+				// Account-level OpenAI aliases are deliberately ignored so each
+				// adapter receives the public ID and performs one wire conversion.
 				mappedBody = upstreamBody
 			} else if nativeRemoteCompactionV2 {
 				mappedBody, mappedModel, accountMappingApplied = h.applyAccountCompactModelMappingToBody(upstreamBody, account, logModel, effectiveModel)
@@ -3939,7 +3976,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					upstreamEndpoint = "/v1internal:" + map[bool]string{true: "streamGenerateContent", false: "generateContent"}[isStream]
 					return resp, err
 				}
-				return ExecuteRelayStyleProtocolRequest(upstreamCtx, account, GrokProtocolResponses, rawBody, upstreamBody, proxyURL, downstreamHeaders)
+				return ExecuteRelayStyleProtocolRequestWithStore(upstreamCtx, h.store, account, GrokProtocolResponses, rawBody, upstreamBody, proxyURL, downstreamHeaders)
 			})
 			durationMs := int(time.Since(start).Milliseconds())
 
@@ -4038,6 +4075,17 @@ func (h *Handler) Responses(c *gin.Context) {
 					} else {
 						antigravityRefreshFailed = true
 						log.Printf("Antigravity OAuth refresh failed after upstream 401 (account=%d): %v", account.ID(), refreshErr)
+					}
+				}
+				if resp.StatusCode == http.StatusUnauthorized && account.IsTraeCNAPI() && !traeRefreshRetried[account.ID()] {
+					traeRefreshRetried[account.ID()] = true
+					if refreshErr := h.store.RefreshTraeCNAccountByIDWithProxy(c.Request.Context(), account.ID(), proxyURL); refreshErr == nil {
+						h.store.Release(account)
+						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+						log.Printf("Trae CN token refreshed after upstream 401 (account=%d)", account.ID())
+						continue
+					} else {
+						log.Printf("Trae CN token refresh failed after upstream 401 (account=%d): %v", account.ID(), refreshErr)
 					}
 				}
 
@@ -5575,7 +5623,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	// Validate request
 	validator := api.NewValidator(rawBody)
 	rules := api.ResponsesAPIValidationRulesForModel(mappedModel)
-	if requestUpstreamChannel(c) != database.UpstreamChannelGrok {
+	if requestUpstreamChannel(c) == database.UpstreamChannelTraeCN {
+		rules["model"] = append(rules["model"], api.ModelValidator(h.traeCNChannelModels()))
+	} else if requestUpstreamChannel(c) != database.UpstreamChannelGrok {
 		// grok 渠道 Key 的模型由 Grok 上游校验，跳过网关侧模型白名单
 		rules["model"] = append(rules["model"], h.modelValidator(supportedModels))
 	}
@@ -6386,12 +6436,31 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	h.capturePromptRequestIngress(c, rawBody)
 
 	supportedModels := h.supportedModelIDs(c.Request.Context())
-	rawBody, requestModel, mappedModel, mappingApplied := h.applyConfiguredModelMappingToBody(rawBody, supportedModels)
+	if requestUpstreamChannel(c) == database.UpstreamChannelTraeCN && strings.TrimSpace(gjson.GetBytes(rawBody, "model").String()) == "" {
+		defaultModel := h.store.GetTraeCNDefaultModel()
+		if rawBody, err = sjson.SetBytes(rawBody, "model", defaultModel); err != nil {
+			api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Request model preparation failed: "+err.Error(), api.ErrorTypeInvalidRequest))
+			return
+		}
+	}
+	var requestModel, mappedModel string
+	var mappingApplied bool
+	if requestUpstreamChannel(c) == database.UpstreamChannelTraeCN {
+		// TRAECN exposes a provider-owned logical model catalog. Keep the public
+		// model name through validation, routing, and translation; the adapter
+		// performs the only logical-to-wire conversion at the upstream boundary.
+		requestModel = strings.TrimSpace(gjson.GetBytes(rawBody, "model").String())
+		mappedModel = requestModel
+	} else {
+		rawBody, requestModel, mappedModel, mappingApplied = h.applyConfiguredModelMappingToBody(rawBody, supportedModels)
+	}
 
 	// Validate request
 	validator := api.NewValidator(rawBody)
 	rules := api.ChatCompletionValidationRules()
-	if requestUpstreamChannel(c) != database.UpstreamChannelGrok {
+	if requestUpstreamChannel(c) == database.UpstreamChannelTraeCN {
+		rules["model"] = append(rules["model"], api.ModelValidator(h.traeCNChannelModels()))
+	} else if requestUpstreamChannel(c) != database.UpstreamChannelGrok {
 		// grok 渠道 Key 的模型由 Grok 上游校验，跳过网关侧模型白名单
 		rules["model"] = append(rules["model"], h.modelValidator(supportedModels))
 	}
@@ -6512,6 +6581,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	dispatchPolicy := dispatchPolicyForModel(effectiveModel)
 	var affinityGuard auth.SessionAffinityGuard
 	grokQualityAttempts := 0
+	traeRefreshRetried := map[int64]bool{}
 	for attempt := 0; ; attempt++ {
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
@@ -6621,13 +6691,15 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		var reqErr error
 		if isRelayAccount {
 			upstreamBody := codexBody
-			if mappedBody, mappedModel, ok := h.applyAccountModelMappingToBodyForModels(upstreamBody, account, logModel, effectiveModel); ok {
-				upstreamBody = mappedBody
-				attemptEffectiveModel = mappedModel
-				attemptLogEffectiveModel = usageEffectiveModelForMapping(logModel, attemptEffectiveModel, true)
+			if !account.IsTraeCNAPI() {
+				if mappedBody, mappedModel, ok := h.applyAccountModelMappingToBodyForModels(upstreamBody, account, logModel, effectiveModel); ok {
+					upstreamBody = mappedBody
+					attemptEffectiveModel = mappedModel
+					attemptLogEffectiveModel = usageEffectiveModelForMapping(logModel, attemptEffectiveModel, true)
+				}
 			}
 			resp, reqErr = executeHTTPWithContinuousRetryKeepalive(upstreamCtx, func() (*http.Response, error) {
-				return ExecuteRelayStyleProtocolRequest(upstreamCtx, account, GrokProtocolChatCompletions, rawBody, upstreamBody, proxyURL, downstreamHeaders)
+				return ExecuteRelayStyleProtocolRequestWithStore(upstreamCtx, h.store, account, GrokProtocolChatCompletions, rawBody, upstreamBody, proxyURL, downstreamHeaders)
 			})
 		} else {
 			// WebSocket 上游下剥离自动注入的图片工具，防止模型自主生图卡死 WS 流（issue #220）。
@@ -6728,6 +6800,17 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			if continuousRetryCommitExpired(c, continuousRetryProtocolChat) {
 				h.store.Release(account)
 				return
+			}
+			if resp.StatusCode == http.StatusUnauthorized && account.IsTraeCNAPI() && !traeRefreshRetried[account.ID()] {
+				traeRefreshRetried[account.ID()] = true
+				if refreshErr := h.store.RefreshTraeCNAccountByIDWithProxy(c.Request.Context(), account.ID(), proxyURL); refreshErr == nil {
+					h.store.Release(account)
+					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					log.Printf("Trae CN token refreshed after upstream 401 (account=%d)", account.ID())
+					continue
+				} else {
+					log.Printf("Trae CN token refresh failed after upstream 401 (account=%d): %v", account.ID(), refreshErr)
+				}
 			}
 			if kind := classifyHTTPFailure(resp.StatusCode); kind != "" {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
@@ -7861,6 +7944,16 @@ func (h *Handler) applyCooldownForModel(account *auth.Account, statusCode int, b
 		}
 		return codex429Decision{}
 	}
+	// Trae CN uses rotating RT/AT credentials and its 401 is retried through
+	// RefreshTraeCNAccountByID by the request handlers. Only a real upstream 429
+	// participates in the relay model-cooldown policy; all other provider errors
+	// must not inherit Codex subscription, payment, or auto-clean semantics.
+	if account.IsTraeCNAPI() {
+		if statusCode == http.StatusTooManyRequests {
+			return Apply429Cooldown(h.store, account, body, resp, model)
+		}
+		return codex429Decision{}
+	}
 	if IsUsageLimitReachedError(body) {
 		decision := Apply429Cooldown(h.store, account, body, resp, model)
 		log.Printf("账号 %d 触发用量上限 (status=%d, plan=%s, reason=%s)，冷却到 %s", account.ID(), statusCode, account.GetPlanType(), decision.Reason, decision.ResetAt.Format(time.RFC3339))
@@ -8382,6 +8475,11 @@ func (h *Handler) supportedModelIDs(ctx context.Context) []string {
 			if account.IsGrokAPI() {
 				declared = append(append([]string{}, declared...), grokMediaModelsForAccount(account)...)
 			}
+			if account.IsTraeCNAPI() {
+				if len(declared) == 0 {
+					declared = auth.TraeCNDefaultModelIDs()
+				}
+			}
 			for _, model := range declared {
 				key := strings.ToLower(strings.TrimSpace(model))
 				if key == "" {
@@ -8427,5 +8525,39 @@ func (h *Handler) supportedModelIDs(ctx context.Context) []string {
 			models = append(models, rule.From)
 		}
 	}
+	return models
+}
+
+func (h *Handler) traeCNChannelModels() []string {
+	if h == nil || h.store == nil {
+		return auth.TraeCNDefaultModelIDs()
+	}
+	seen := make(map[string]struct{})
+	models := make([]string, 0)
+	for _, account := range h.store.Accounts() {
+		if account == nil || !account.IsTraeCNAPI() {
+			continue
+		}
+		declared := account.TraeCNModels()
+		if len(declared) == 0 {
+			declared = auth.TraeCNDefaultModelIDs()
+		}
+		for _, model := range declared {
+			model = strings.TrimSpace(model)
+			key := strings.ToLower(model)
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			models = append(models, model)
+		}
+	}
+	if len(models) == 0 {
+		models = auth.TraeCNDefaultModelIDs()
+	}
+	sort.Strings(models)
 	return models
 }

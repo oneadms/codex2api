@@ -14,6 +14,9 @@ import type {
   OpenAIResponsesBalanceResponse,
   AddGrokAccountRequest,
   UpdateGrokAccountRequest,
+  AddTraeCNAccountsRequest,
+  AddTraeCNAccountsResponse,
+  UpdateTraeCNAccountRequest,
   AddAntigravityAccountRequest,
   AntigravityCreateResponse,
   UpdateAntigravityAccountRequest,
@@ -592,7 +595,7 @@ export const api = {
     if (params.order) searchParams.set('order', params.order)
     return request<AccountsPageResponse>(`/accounts?${searchParams.toString()}`, { signal })
   },
-  getAccountAnalysis: (channel: 'codex' | 'grok' | 'antigravity' = 'codex', signal?: AbortSignal) =>
+  getAccountAnalysis: (channel: 'codex' | 'grok' | 'antigravity' | 'traecn' = 'codex', signal?: AbortSignal) =>
     request<AccountAnalysisResponse>(`/accounts/analysis?channel=${channel}`, { signal }),
   getAccountPageStats: (ids: number[], signal?: AbortSignal) => {
     const query = new URLSearchParams({ ids: ids.join(',') })
@@ -652,6 +655,23 @@ export const api = {
     }),
   updateGrokAccount: (id: number, data: UpdateGrokAccountRequest) =>
     request<MessageResponse>(`/accounts/${id}/grok`, { method: 'PATCH', body: JSON.stringify(data) }),
+  addTraeCNAccounts: (data: AddTraeCNAccountsRequest) =>
+    request<AddTraeCNAccountsResponse>('/accounts/traecn', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: 180_000,
+    }),
+  updateTraeCNAccount: (id: number, data: UpdateTraeCNAccountRequest) =>
+    request<MessageResponse>(`/accounts/${id}/traecn`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+      timeoutMs: 30_000,
+    }),
+  refreshTraeCNAccount: (id: number) =>
+    request<MessageResponse>(`/accounts/${id}/traecn/refresh`, {
+      method: 'POST',
+      timeoutMs: 45_000,
+    }),
   fetchAntigravityModels: (data: AddAntigravityAccountRequest) =>
     request<{ models: string[] }>('/accounts/antigravity/models', {
       method: 'POST',
@@ -1350,7 +1370,7 @@ export const api = {
     request<{ message: string; cleaned: number }>('/accounts/antigravity/clean-banned', { method: 'POST' }),
   cleanAntigravityError: () =>
     request<{ message: string; cleaned: number }>('/accounts/antigravity/clean-error', { method: 'POST' }),
-  exportAccounts: (params: { filter: 'healthy' | 'all'; ids?: number[]; channel?: 'codex' | 'grok' }) => {
+  exportAccounts: (params: { filter: 'healthy' | 'all'; ids?: number[]; channel?: UpstreamChannel }) => {
     const sp = new URLSearchParams({ filter: params.filter })
     if (params.ids && params.ids.length > 0) sp.set('ids', params.ids.join(','))
     if (params.channel) sp.set('channel', params.channel)
@@ -1398,7 +1418,7 @@ export const api = {
     request<{ message: string; deleted: number }>('/proxies/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
   cleanErrorProxies: () =>
     request<{ message: string; cleaned: number; unbound: number }>('/proxies/clean-error', { method: 'POST' }),
-  autoBalanceProxies: (data: { channel?: 'codex' | 'grok'; mode?: 'unbound' | 'all'; max_per_proxy?: number; proxy_ids?: number[] }) =>
+  autoBalanceProxies: (data: { channel?: UpstreamChannel; mode?: 'unbound' | 'all'; max_per_proxy?: number; proxy_ids?: number[] }) =>
     request<AutoBalanceProxiesResult>('/proxies/auto-balance', { method: 'POST', body: JSON.stringify(data) }),
   testProxy: (url: string, id?: number, lang?: string) =>
     request<ProxyTestResult>('/proxies/test', { method: 'POST', body: JSON.stringify({ url, id, lang }) }),

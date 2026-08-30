@@ -148,6 +148,35 @@ func TestOAuthRefreshLocalLockHonorsContext(t *testing.T) {
 	}
 }
 
+func TestOAuthRefreshDistributedLeaseHonorsWaitingContext(t *testing.T) {
+	sharedCache := cache.NewMemory(4)
+	storeA := NewStore(nil, sharedCache, &database.SystemSettings{MaxConcurrency: 1})
+	storeB := NewStore(nil, sharedCache, &database.SystemSettings{MaxConcurrency: 1})
+	defer storeA.Stop()
+	defer storeB.Stop()
+
+	firstLease, err := storeA.acquireOAuthRefreshLease(context.Background(), "shared-distributed-rt")
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	defer firstLease.Release()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	secondLease, err := storeB.acquireOAuthRefreshLease(ctx, "shared-distributed-rt")
+	if secondLease != nil {
+		secondLease.Release()
+		t.Fatal("second store acquired a held distributed lease")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second acquire error = %v, want context deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("distributed lease cancellation took %s", elapsed)
+	}
+}
+
 func TestOAuthRefreshLeaseHoldDeadlinePrecedesTTL(t *testing.T) {
 	store := NewStore(nil, cache.NewMemory(1), &database.SystemSettings{MaxConcurrency: 2})
 	defer store.Stop()

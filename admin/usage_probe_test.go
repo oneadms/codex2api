@@ -24,6 +24,14 @@ func TestProbeUsageSnapshotRejectsAntigravity(t *testing.T) {
 	}
 }
 
+func TestProbeUsageSnapshotSkipsTraeCN(t *testing.T) {
+	handler := &Handler{}
+	account := &auth.Account{UpstreamType: auth.UpstreamTraeCN, AccessToken: "trae-token"}
+	if err := handler.ProbeUsageSnapshot(context.Background(), account); err != nil {
+		t.Fatalf("ProbeUsageSnapshot() error = %v, want no-op for Trae CN", err)
+	}
+}
+
 func TestShouldMarkUsageProbeAccountError(t *testing.T) {
 	tests := []struct {
 		name       string

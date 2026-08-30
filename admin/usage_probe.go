@@ -66,6 +66,11 @@ func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account)
 	if account.IsAntigravityAPI() {
 		return errors.New("Antigravity 账号请使用专用配额刷新，不能执行 Codex wham 探针")
 	}
+	if account.IsTraeCNAPI() {
+		// Trae CN has no ChatGPT WHAM endpoint. Its access token is refreshed
+		// lazily by the request executor, so a Codex usage probe must be a no-op.
+		return nil
+	}
 
 	// Grok 账号绝不能走 ChatGPT wham / codex responses 探针——
 	// 否则会用错误的上游把有效 token 判成 unauthorized 并封禁。

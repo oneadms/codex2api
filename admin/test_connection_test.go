@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -56,6 +57,30 @@ func TestBuildConnectionTestPayloadUsesStoreContent(t *testing.T) {
 	}
 }
 
+func TestBuildConnectionTestPayloadForTraeCNUsesSmallOutputLimit(t *testing.T) {
+	t.Parallel()
+	account := &auth.Account{UpstreamType: auth.UpstreamTraeCN, AccessToken: "trae-at"}
+	payload := buildConnectionTestPayloadForAccount(nil, account, "auto")
+	if got := gjson.GetBytes(payload, "max_output_tokens").Int(); got != 64 {
+		t.Fatalf("max_output_tokens = %d, want 64; payload=%s", got, payload)
+	}
+	ordinary := buildConnectionTestPayloadForAccount(nil, &auth.Account{AccessToken: "codex-at"}, "gpt-5.5")
+	if gjson.GetBytes(ordinary, "max_output_tokens").Exists() {
+		t.Fatalf("Trae-specific output limit leaked to ordinary probe: %s", ordinary)
+	}
+}
+
+func TestFormatTraeCN4011ExplainsApplicationRateLimit(t *testing.T) {
+	t.Parallel()
+	payload := []byte(`{"type":"response.failed","response":{"error":{"code":"4011","message":"We're sorry, your requests have exceeded the rate limit."}}}`)
+	message := formatTraeCNRateLimitTestError(payload)
+	for _, want := range []string{"业务限流", "4011", "并非缺少必填参数", "上游事件"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("message %q does not contain %q", message, want)
+		}
+	}
+}
+
 // TestBuildConnectionTestPayloadRandomizesMultiLineContent 验证多行测活内容
 // 按行随机抽取并展开变量（issue #320）。
 func TestBuildConnectionTestPayloadRandomizesMultiLineContent(t *testing.T) {
@@ -74,6 +99,61 @@ func TestBuildConnectionTestPayloadRandomizesMultiLineContent(t *testing.T) {
 	}
 	if len(seen) != 3 {
 		t.Fatalf("unexpected payload variants: %v", seen)
+	}
+}
+
+func TestConnectionAllowsTraeCNRefreshTokenOnlyAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var exchangeCalls atomic.Int32
+	var inferenceCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case auth.TraeCNExchangePath:
+			exchangeCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"trae-at","refreshToken":"trae-rotated-rt","expiresIn":3600,"userId":"trae-user"}`))
+		case auth.TraeCNChatPath:
+			inferenceCalls.Add(1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("event: output\ndata: {\"type\":\"text\",\"content\":\"pong\"}\n\nevent: done\ndata: {\"finish_reason\":\"stop\"}\n\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	store := auth.NewStore(nil, nil, nil)
+	defer store.Stop()
+	account := &auth.Account{
+		DBID:         501,
+		UpstreamType: auth.UpstreamTraeCN,
+		RefreshToken: "trae-refresh-token",
+		TraeCNHost:   server.URL,
+		Status:       auth.StatusReady,
+	}
+	store.AddAccount(account)
+	handler := &Handler{store: store}
+	router := gin.New()
+	router.GET("/api/admin/accounts/:id/test", handler.TestConnection)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/accounts/501/test", nil)
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if exchangeCalls.Load() != 1 || inferenceCalls.Load() != 1 {
+		t.Fatalf("exchange/inference calls = %d/%d, want 1/1", exchangeCalls.Load(), inferenceCalls.Load())
+	}
+	if !strings.Contains(recorder.Body.String(), "pong") || !strings.Contains(recorder.Body.String(), "test_complete") {
+		t.Fatalf("SSE response = %q, want successful content and completion", recorder.Body.String())
+	}
+	account.Mu().RLock()
+	accessToken, refreshToken := account.AccessToken, account.RefreshToken
+	account.Mu().RUnlock()
+	if accessToken != "trae-at" || refreshToken != "trae-rotated-rt" {
+		t.Fatalf("runtime credentials = %q/%q, want exchanged credentials", accessToken, refreshToken)
 	}
 }
 

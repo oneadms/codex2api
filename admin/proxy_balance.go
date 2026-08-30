@@ -15,7 +15,7 @@ import (
 )
 
 // autoBalanceProxiesReq 是代理均衡绑定的请求体。
-//   - Channel: grok/codex/空(全部 OAuth)。Grok 单 IP 号多会被上游 402,均衡绑定把号摊开。
+//   - Channel: grok/codex/antigravity/traecn/空(全部 OAuth)。Grok 单 IP 号多会被上游 402,均衡绑定把号摊开。
 //   - Mode: unbound(默认,只分配未绑定账号) / all(全量重排,但尽量保留现有绑定以减少换 IP)。
 //   - MaxPerProxy: 每条代理的账号数上限,0 表示不限。
 //   - ProxyIDs: 限定参与分配的代理,空表示所有启用且未测出错误的代理。
@@ -53,7 +53,7 @@ func isOAuthProxyBalanceTarget(row *database.AccountRow) bool {
 	switch upstreamType {
 	case "":
 		return strings.EqualFold(strings.TrimSpace(row.Type), "oauth")
-	case auth.UpstreamGrok, auth.UpstreamAntigravity:
+	case auth.UpstreamGrok, auth.UpstreamAntigravity, auth.UpstreamTraeCN:
 		return true
 	default:
 		return false
@@ -177,8 +177,8 @@ func (h *Handler) AutoBalanceProxies(c *gin.Context) {
 		return
 	}
 	channel := strings.ToLower(strings.TrimSpace(req.Channel))
-	if channel != "" && channel != database.UpstreamChannelGrok && channel != database.UpstreamChannelCodex && channel != database.UpstreamChannelAntigravity {
-		writeError(c, http.StatusBadRequest, "channel 仅支持 grok / codex / antigravity / 空")
+	if channel != "" && channel != database.UpstreamChannelGrok && channel != database.UpstreamChannelCodex && channel != database.UpstreamChannelAntigravity && channel != database.UpstreamChannelTraeCN {
+		writeError(c, http.StatusBadRequest, "channel 仅支持 grok / codex / antigravity / traecn / 空")
 		return
 	}
 	if req.MaxPerProxy < 0 {

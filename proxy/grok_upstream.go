@@ -469,6 +469,23 @@ func clampGrokReasoningEffort(body []byte) []byte {
 // ExecuteRelayStyleRequest 按账号类型分派 relay 风格执行器：grok 账号走 Grok
 // 上游，其余走 OpenAI Responses 中转。两者共享同一条下游 Responses 管道。
 func ExecuteRelayStyleRequest(ctx context.Context, account *auth.Account, requestBody []byte, proxyOverride string, headers http.Header) (*http.Response, error) {
+	return executeRelayStyleRequest(ctx, nil, account, requestBody, proxyOverride, headers)
+}
+
+// ExecuteRelayStyleRequestWithStore is the durable request-path variant for
+// admin probes and other Store-owned callers. The legacy wrapper above remains
+// useful for transient/recycle-bin probes that must not mutate the database.
+func ExecuteRelayStyleRequestWithStore(ctx context.Context, store *auth.Store, account *auth.Account, requestBody []byte, proxyOverride string, headers http.Header) (*http.Response, error) {
+	return executeRelayStyleRequest(ctx, store, account, requestBody, proxyOverride, headers)
+}
+
+func executeRelayStyleRequest(ctx context.Context, store *auth.Store, account *auth.Account, requestBody []byte, proxyOverride string, headers http.Header) (*http.Response, error) {
+	if account.IsTraeCNAPI() {
+		if store != nil {
+			return ExecuteTraeCNRequestWithStore(ctx, store, account, GrokProtocolResponses, requestBody, requestBody, proxyOverride, headers)
+		}
+		return ExecuteTraeCNRequest(ctx, account, GrokProtocolResponses, requestBody, requestBody, proxyOverride, headers)
+	}
 	if account.IsGrokAPI() {
 		return ExecuteGrokRequest(ctx, account, requestBody, proxyOverride, headers)
 	}
@@ -477,6 +494,10 @@ func ExecuteRelayStyleRequest(ctx context.Context, account *auth.Account, reques
 
 // relayUpstreamEndpointForAccount 返回 relay 风格账号的上游 /responses 端点（用于日志/记账）。
 func relayUpstreamEndpointForAccount(account *auth.Account) string {
+	if account.IsTraeCNAPI() {
+		host, _ := account.TraeCNCredentials()
+		return host + auth.TraeCNChatPath
+	}
 	if account.IsGrokAPI() {
 		baseURL, _ := account.GrokCredentials()
 		return grokResponsesEndpoint(baseURL)

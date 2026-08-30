@@ -1221,6 +1221,8 @@ func (db *DB) migrate(ctx context.Context) error {
 				max_concurrency    INT DEFAULT 2,
 			global_rpm         INT DEFAULT 0,
 			test_model         VARCHAR(100) DEFAULT 'gpt-5.4',
+			traecn_default_model VARCHAR(100) DEFAULT 'auto',
+			traecn_test_model    VARCHAR(100) DEFAULT 'auto',
 			test_content       TEXT DEFAULT 'hi',
 			test_concurrency   INT DEFAULT 50,
 			proxy_url          VARCHAR(500) DEFAULT '',
@@ -1269,6 +1271,8 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS antigravity_oauth_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS subscription_upgrades_enabled BOOLEAN;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS test_content TEXT DEFAULT 'hi';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS traecn_default_model VARCHAR(100) DEFAULT 'auto';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS traecn_test_model VARCHAR(100) DEFAULT 'auto';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS pg_max_conns INT DEFAULT 50;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS redis_pool_size INT DEFAULT 30;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_clean_unauthorized BOOLEAN DEFAULT FALSE;
@@ -1714,6 +1718,7 @@ const (
 	UpstreamChannelCodex       = "codex"
 	UpstreamChannelGrok        = "grok"
 	UpstreamChannelAntigravity = "antigravity"
+	UpstreamChannelTraeCN      = "traecn"
 )
 
 // ResolveUpstreamChannel 归一 Key 的上游渠道限定；未知值一律视为不限（auto）。
@@ -1725,6 +1730,8 @@ func (l APIKeyLimits) ResolveUpstreamChannel() string {
 		return UpstreamChannelGrok
 	case UpstreamChannelAntigravity:
 		return UpstreamChannelAntigravity
+	case UpstreamChannelTraeCN:
+		return UpstreamChannelTraeCN
 	}
 	return UpstreamChannelAuto
 }
@@ -1737,9 +1744,11 @@ func accountChannelFilterSQL(channel, upstreamTypeExpr string) string {
 		return ` AND ` + upstreamTypeExpr + ` = 'grok'`
 	case UpstreamChannelAntigravity:
 		return ` AND ` + upstreamTypeExpr + ` = 'antigravity'`
+	case UpstreamChannelTraeCN:
+		return ` AND ` + upstreamTypeExpr + ` = 'traecn'`
 	case UpstreamChannelCodex:
 		// Blank legacy rows and OpenAI Responses relays remain in the Codex view.
-		return ` AND ` + upstreamTypeExpr + ` NOT IN ('grok', 'antigravity')`
+		return ` AND ` + upstreamTypeExpr + ` NOT IN ('grok', 'antigravity', 'traecn')`
 	default:
 		return ""
 	}
@@ -2179,6 +2188,8 @@ type SystemSettings struct {
 	MaxConcurrency                     int
 	GlobalRPM                          int
 	TestModel                          string
+	TraeCNDefaultModel                 string
+	TraeCNTestModel                    string
 	TestContent                        string
 	TestConcurrency                    int
 	ProxyURL                           string
@@ -2426,7 +2437,9 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 	s := &SystemSettings{}
 	err := db.conn.QueryRowContext(ctx, `
 		SELECT COALESCE(site_name, 'CodexProxy'), COALESCE(site_logo, ''),
-		       max_concurrency, global_rpm, test_model, COALESCE(test_content, 'hi'), test_concurrency, proxy_url, pg_max_conns, redis_pool_size,
+		       max_concurrency, global_rpm, test_model,
+		       COALESCE(traecn_default_model, 'auto'), COALESCE(traecn_test_model, 'auto'),
+		       COALESCE(test_content, 'hi'), test_concurrency, proxy_url, pg_max_conns, redis_pool_size,
 		       auto_clean_unauthorized, auto_clean_rate_limited, COALESCE(admin_secret, ''), COALESCE(auto_clean_full_usage, false),
 		       COALESCE(proxy_pool_enabled, false),
 		       COALESCE(fast_scheduler_enabled, false),
@@ -2537,7 +2550,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 			FROM system_settings WHERE id = 1
 		`).Scan(
 		&s.SiteName, &s.SiteLogo,
-		&s.MaxConcurrency, &s.GlobalRPM, &s.TestModel, &s.TestContent, &s.TestConcurrency, &s.ProxyURL, &s.PgMaxConns, &s.RedisPoolSize,
+		&s.MaxConcurrency, &s.GlobalRPM, &s.TestModel, &s.TraeCNDefaultModel, &s.TraeCNTestModel, &s.TestContent, &s.TestConcurrency, &s.ProxyURL, &s.PgMaxConns, &s.RedisPoolSize,
 		&s.AutoCleanUnauthorized, &s.AutoCleanRateLimited, &s.AdminSecret, &s.AutoCleanFullUsage,
 		&s.ProxyPoolEnabled, &s.FastSchedulerEnabled, &s.SchedulerEngine, &s.MaxRetries, &s.MaxRateLimitRetries, &s.AllowRemoteMigration,
 		&s.AutoCleanError, &s.AutoCleanExpired, &s.LazyMode, &s.ModelMapping, &s.CodexModelMapping,
@@ -2623,6 +2636,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 	if s.TestContent == "" {
 		s.TestContent = "hi"
 	}
+	s.TraeCNDefaultModel = normalizeTraeCNModel(s.TraeCNDefaultModel)
+	s.TraeCNTestModel = normalizeTraeCNModel(s.TraeCNTestModel)
 	if strings.TrimSpace(s.ReasoningEffortModels) == "" {
 		s.ReasoningEffortModels = "[]"
 	}
@@ -2653,6 +2668,14 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 	s.SchedulerEngine = NormalizeSchedulerEngine(s.SchedulerEngine, s.FastSchedulerEnabled)
 	s.FastSchedulerEnabled = s.SchedulerEngine != "legacy"
 	return s, err
+}
+
+func normalizeTraeCNModel(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return "auto"
+	}
+	return model
 }
 
 // UpdateContinuousRetryPolicy atomically merges one admin partial update into
@@ -2774,6 +2797,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 	if payloadRules == "" {
 		payloadRules = "{}"
 	}
+	traeCNDefaultModel := normalizeTraeCNModel(s.TraeCNDefaultModel)
+	traeCNTestModel := normalizeTraeCNModel(s.TraeCNTestModel)
 	firstTokenMode := normalizeFirstTokenMode(s.FirstTokenMode)
 	billingTierPolicy := normalizeBillingTierPolicy(s.BillingTierPolicy)
 	testContent := strings.TrimSpace(s.TestContent)
@@ -2858,9 +2883,11 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					session_slot_buffer_seconds,
 					scheduler_engine,
 					codex_request_compression,
-					auto_activate_5h_window_enabled
+					auto_activate_5h_window_enabled,
+					traecn_default_model,
+					traecn_test_model
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107, $108, $109, $110, $111, $112, $113, $114, $115, $116, $117, $118, $119)
+							VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107, $108, $109, $110, $111, $112, $113, $114, $115, $116, $117, $118, $119, $120, $121)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -2900,10 +2927,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				prompt_filter_log_matches = EXCLUDED.prompt_filter_log_matches,
 				prompt_filter_max_text_length = EXCLUDED.prompt_filter_max_text_length,
 				prompt_filter_sensitive_words = EXCLUDED.prompt_filter_sensitive_words,
-				prompt_filter_custom_patterns = CASE WHEN $120 THEN system_settings.prompt_filter_custom_patterns ELSE EXCLUDED.prompt_filter_custom_patterns END,
+				prompt_filter_custom_patterns = CASE WHEN $122 THEN system_settings.prompt_filter_custom_patterns ELSE EXCLUDED.prompt_filter_custom_patterns END,
 				prompt_filter_disabled_patterns = EXCLUDED.prompt_filter_disabled_patterns,
 				prompt_filter_review_enabled = EXCLUDED.prompt_filter_review_enabled,
-				prompt_filter_review_api_key = CASE WHEN $121 THEN system_settings.prompt_filter_review_api_key ELSE EXCLUDED.prompt_filter_review_api_key END,
+				prompt_filter_review_api_key = CASE WHEN $123 THEN system_settings.prompt_filter_review_api_key ELSE EXCLUDED.prompt_filter_review_api_key END,
 				prompt_filter_review_base_url = EXCLUDED.prompt_filter_review_base_url,
 				prompt_filter_review_model = EXCLUDED.prompt_filter_review_model,
 				prompt_filter_review_timeout_seconds = EXCLUDED.prompt_filter_review_timeout_seconds,
@@ -2977,8 +3004,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					session_slot_buffer_enabled = EXCLUDED.session_slot_buffer_enabled,
 					session_slot_buffer_seconds = EXCLUDED.session_slot_buffer_seconds,
 					scheduler_engine = EXCLUDED.scheduler_engine,
-					auto_activate_5h_window_enabled = EXCLUDED.auto_activate_5h_window_enabled
-			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
+						auto_activate_5h_window_enabled = EXCLUDED.auto_activate_5h_window_enabled,
+						traecn_default_model = EXCLUDED.traecn_default_model,
+						traecn_test_model = EXCLUDED.traecn_test_model
+				`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.TestModel, testContent, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
 		s.FastSchedulerEnabled, s.MaxRetries, s.MaxRateLimitRetries, s.AllowRemoteMigration, s.AutoCleanError, s.AutoCleanExpired, s.LazyMode, s.ModelMapping, s.CodexModelMapping,
@@ -3027,6 +3056,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		NormalizeSchedulerEngine(s.SchedulerEngine, s.FastSchedulerEnabled),
 		s.CodexRequestCompression,
 		s.AutoActivate5hWindowEnabled,
+		traeCNDefaultModel,
+		traeCNTestModel,
 		s.PreservePromptFilterCustomPatterns,
 		s.PreservePromptFilterReviewAPIKey)
 	return err
@@ -7289,7 +7320,7 @@ var grokIdentityCredentialKeys = map[string]struct{}{
 	"access_token": {}, "refresh_token": {}, "api_key": {}, "upstream_type": {},
 	"base_url": {}, "grok_client_id": {}, "grok_token_endpoint": {},
 	"grok_oidc_issuer": {}, "grok_principal_type": {}, "grok_principal_id": {},
-	"account_id": {},
+	"account_id": {}, "traecn_user_id": {},
 }
 
 func grokIdentityUpdateKeysPresent(updates map[string]interface{}) bool {
@@ -7302,7 +7333,16 @@ func grokIdentityUpdateKeysPresent(updates map[string]interface{}) bool {
 }
 
 func grokIdentityCredentialChanged(before, after map[string]interface{}) bool {
-	if !strings.EqualFold(strings.TrimSpace(credentialStringFromMap(after, "upstream_type")), "grok") {
+	provider := strings.ToLower(strings.TrimSpace(credentialStringFromMap(after, "upstream_type")))
+	if provider == "traecn" {
+		for _, key := range []string{"access_token", "refresh_token", "upstream_type", "traecn_user_id", "account_id"} {
+			if strings.TrimSpace(credentialStringFromMap(before, key)) != strings.TrimSpace(credentialStringFromMap(after, key)) {
+				return true
+			}
+		}
+		return false
+	}
+	if provider != "grok" {
 		return false
 	}
 	for key := range grokIdentityCredentialKeys {
@@ -7930,6 +7970,114 @@ func (db *DB) InsertAccountWithUpstream(ctx context.Context, name, platform, acc
 		credentials,
 		name, platform, accountType, credJSON, proxyURL,
 	)
+}
+
+// InsertAccountWithUpstreamIfRefreshTokenAbsent reserves one refresh token and
+// inserts its account row atomically. The admin import path uses this before
+// contacting the provider, so concurrent imports cannot both create the same
+// RT and a failed/slow ExchangeToken call never leaves a consumed token with
+// no durable account row.
+func (db *DB) InsertAccountWithUpstreamIfRefreshTokenAbsent(ctx context.Context, name, platform, accountType, refreshToken string, credentials map[string]interface{}, proxyURL string) (id int64, inserted bool, err error) {
+	if db == nil || db.conn == nil {
+		return 0, false, errors.New("database is not initialized")
+	}
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		return 0, false, errors.New("refresh_token is required")
+	}
+	if credentials == nil {
+		credentials = map[string]interface{}{}
+	} else {
+		// Do not add the reservation metadata to the caller's map: the import
+		// goroutine continues enriching it after the row is created.
+		copy := make(map[string]interface{}, len(credentials)+2)
+		for key, value := range credentials {
+			copy[key] = value
+		}
+		credentials = copy
+	}
+	credentials["refresh_token"] = refreshToken
+	if strings.TrimSpace(platform) == "" {
+		platform = "xai"
+	}
+	if strings.TrimSpace(accountType) == "" {
+		accountType = "api"
+	}
+	familyID := credentialFamilyCandidate(credentials)
+	if familyID == "" {
+		familyID = "cf_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	}
+	credentials["credential_family_id"] = familyID
+	credJSON, err := json.Marshal(credentials)
+	if err != nil {
+		return 0, false, err
+	}
+
+	err = db.withSQLiteWriteLock(ctx, func() error {
+		tx, beginErr := db.conn.BeginTx(ctx, nil)
+		if beginErr != nil {
+			return beginErr
+		}
+		defer tx.Rollback()
+
+		// PostgreSQL transactions otherwise can both observe an absent token
+		// under READ COMMITTED. A transaction-scoped advisory lock serializes
+		// only imports for this RT without requiring a schema migration or a
+		// provider-specific unique-index expression.
+		if !db.isSQLite() {
+			if _, lockErr := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, refreshToken); lockErr != nil {
+				return lockErr
+			}
+		}
+		query := `SELECT credentials FROM accounts WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
+		if !db.isSQLite() {
+			query += ` FOR UPDATE`
+		}
+		rows, queryErr := tx.QueryContext(ctx, query)
+		if queryErr != nil {
+			return queryErr
+		}
+		duplicate := false
+		for rows.Next() {
+			var raw interface{}
+			if scanErr := rows.Scan(&raw); scanErr != nil {
+				_ = rows.Close()
+				return scanErr
+			}
+			if strings.TrimSpace(credentialString(raw, "refresh_token")) == refreshToken {
+				duplicate = true
+				break
+			}
+		}
+		if rowsErr := rows.Err(); rowsErr != nil {
+			_ = rows.Close()
+			return rowsErr
+		}
+		if closeErr := rows.Close(); closeErr != nil {
+			return closeErr
+		}
+		if duplicate {
+			inserted = false
+			return tx.Commit()
+		}
+
+		if db.isSQLite() {
+			if _, insertErr := tx.ExecContext(ctx, `INSERT INTO accounts (name, platform, type, credentials, proxy_url) VALUES ($1, $2, $3, $4, $5)`, name, platform, accountType, credJSON, proxyURL); insertErr != nil {
+				return insertErr
+			}
+			if scanErr := tx.QueryRowContext(ctx, `SELECT last_insert_rowid()`).Scan(&id); scanErr != nil {
+				return scanErr
+			}
+		} else if scanErr := tx.QueryRowContext(ctx, `INSERT INTO accounts (name, platform, type, credentials, proxy_url) VALUES ($1, $2, $3, $4::jsonb, $5) RETURNING id`, name, platform, accountType, credJSON, proxyURL).Scan(&id); scanErr != nil {
+			return scanErr
+		}
+		inserted = true
+		return tx.Commit()
+	})
+	if err != nil {
+		return 0, false, err
+	}
+	return id, inserted, nil
 }
 
 // insertAccountRowWithFamily keeps legacy insert SQL untouched while ensuring

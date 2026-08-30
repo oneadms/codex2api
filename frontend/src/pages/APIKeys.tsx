@@ -134,7 +134,7 @@ interface LimitsFormState {
 }
 
 type ImageGenerationPolicy = "allow" | "strip" | "block";
-type UpstreamChannel = "auto" | "codex" | "grok" | "antigravity";
+type UpstreamChannel = "auto" | "codex" | "grok" | "antigravity" | "traecn";
 
 // ScopeLimitFormState 是「该 Key × 某分组/账号」预算的一行表单（issue #439）。
 // 数值统一按字符串保存,空串表示不限,与其它限额字段一致。
@@ -326,6 +326,7 @@ export default function APIKeys() {
         models?: string[];
         grok_models?: string[];
         antigravity_models?: string[];
+        traecn_models?: string[];
       }>,
       api.getSettings().catch((): SystemSettings | null => null),
     ]);
@@ -335,6 +336,7 @@ export default function APIKeys() {
       modelOptions: modelsResponse.models ?? [],
       grokModelOptions: modelsResponse.grok_models ?? [],
       antigravityModelOptions: modelsResponse.antigravity_models ?? [],
+      traeModelOptions: modelsResponse.traecn_models ?? [],
       settings: settingsResponse,
     };
   }, []);
@@ -345,6 +347,7 @@ export default function APIKeys() {
     modelOptions: string[];
     grokModelOptions: string[];
     antigravityModelOptions: string[];
+    traeModelOptions: string[];
     settings: SystemSettings | null;
   }>({
     initialData: {
@@ -353,6 +356,7 @@ export default function APIKeys() {
       modelOptions: [],
       grokModelOptions: [],
       antigravityModelOptions: [],
+      traeModelOptions: [],
       settings: null,
     },
     load: loadKeys,
@@ -393,14 +397,25 @@ export default function APIKeys() {
     data.antigravityModelOptions.length > 0
       ? data.antigravityModelOptions
       : DEFAULT_ANTIGRAVITY_MODEL_OPTIONS;
+  const traeModelOptions =
+    data.traeModelOptions.length > 0 ? data.traeModelOptions : [
+      "claude-opus-4-7",
+      "claude-opus-4-6",
+      "claude-sonnet-4-6",
+      "deepseek-v4-pro",
+      "glm-5.2",
+      "qwen3-coder",
+      "auto",
+    ];
   const modelOptionsForChannel = useCallback(
     (channel: UpstreamChannel): string[] => {
       if (channel === "grok") return grokModelOptions;
       if (channel === "antigravity") return antigravityModelOptions;
+      if (channel === "traecn") return traeModelOptions;
       if (channel === "codex") return modelOptions;
       const seen = new Set(modelOptions.map((m) => m.toLowerCase()));
       const merged = [...modelOptions];
-      for (const candidate of [...grokModelOptions, ...antigravityModelOptions]) {
+      for (const candidate of [...grokModelOptions, ...antigravityModelOptions, ...traeModelOptions]) {
         if (!seen.has(candidate.toLowerCase())) {
           seen.add(candidate.toLowerCase());
           merged.push(candidate);
@@ -408,7 +423,7 @@ export default function APIKeys() {
       }
       return merged;
     },
-    [modelOptions, grokModelOptions, antigravityModelOptions],
+    [modelOptions, grokModelOptions, antigravityModelOptions, traeModelOptions],
   );
   const createSelectableGroups = useMemo(
     () =>
@@ -2675,6 +2690,7 @@ function limitsFromAPIKey(limits: APIKeyLimits | undefined): LimitsFormState {
       limits.upstream_channel === "codex" ||
       limits.upstream_channel === "grok" ||
       limits.upstream_channel === "antigravity"
+      || limits.upstream_channel === "traecn"
         ? limits.upstream_channel
         : "auto",
     scopeLimits: scopeLimitsFromAPIKey(limits.scope_limits),
@@ -2764,10 +2780,15 @@ function UpstreamChannelPicker({
       label: t("apiKeys.limits.upstreamChannelAntigravity"),
       icon: <ChannelLogo channel="antigravity" size={18} />,
     },
+    {
+      key: "traecn",
+      label: t("apiKeys.limits.upstreamChannelTraeCN"),
+      icon: <ChannelLogo channel="traecn" size={18} />,
+    },
   ];
   return (
     <div>
-      <div className="grid grid-cols-4 gap-1 rounded-xl border border-border bg-muted/30 p-1">
+      <div className="grid grid-cols-5 gap-1 rounded-xl border border-border bg-muted/30 p-1">
         {options.map(({ key, label, icon }) => (
           <button
             key={key}
@@ -3128,6 +3149,18 @@ function KeyChannelBadge({
       >
         <ChannelLogo channel="antigravity" size={12} />
         Antigravity
+      </Badge>
+    );
+  }
+  if (channel === "traecn") {
+    return (
+      <Badge
+        variant="outline"
+        title={t("apiKeys.limits.upstreamChannelTraeCN")}
+        className="gap-1 border-transparent bg-muted/70 px-1.5 py-0 text-[11px] font-semibold text-foreground"
+      >
+        <ChannelLogo channel="traecn" size={12} />
+        TRAECN
       </Badge>
     );
   }
@@ -3794,6 +3827,7 @@ const PLAN_FILTER_OPTIONS = [
 function planOptionsForChannel(channel: UpstreamChannel): readonly string[] {
   if (channel === "codex") return CODEX_PLAN_FILTER_OPTIONS;
   if (channel === "grok") return GROK_PLAN_FILTER_OPTIONS;
+  if (channel === "traecn") return ["traecn"];
   return PLAN_FILTER_OPTIONS;
 }
 

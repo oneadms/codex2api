@@ -52,7 +52,7 @@ func continueKeepAllEncrypted() bool {
 }
 
 // stripReasoningEncryptedContent 删除 reasoning item 的 encrypted_content 字段
-//（保留 summary 文本），非 reasoning item 原样返回。
+// （保留 summary 文本），非 reasoning item 原样返回。
 func stripReasoningEncryptedContent(item json.RawMessage) json.RawMessage {
 	if gjson.GetBytes(item, "type").String() != "reasoning" {
 		return item
@@ -204,7 +204,7 @@ func buildContinuationBody(baseBody []byte, replayTail []json.RawMessage) ([]byt
 // 保留完整 encrypted_content，更早各轮的 reasoning 剥离该字段。续想把每轮
 // reasoning 全量累加进 finalOutput（正常单响应只含 1 份）；不收敛会让客户端把
 // N 份账号绑定的加密载荷回传，逐轮把上下文顶爆窗口、并在跨账号换号时成批被拒
-//（issue #353）。早期各轮的加密上下文已在折叠时经 replayTail 回放并产出最终答案，
+// （issue #353）。早期各轮的加密上下文已在折叠时经 replayTail 回放并产出最终答案，
 // 使命已尽，无需再让客户端驱动一遍。逃生阀见 continueKeepAllEncrypted。
 func (st *foldState) clientFacingOutput() []json.RawMessage {
 	start := st.lastRoundReasoningStart

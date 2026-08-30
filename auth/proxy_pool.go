@@ -17,7 +17,7 @@ import (
 type ProxyHealthStatus int
 
 const (
-	ProxyStatusHealthy ProxyHealthStatus = iota // 健康
+	ProxyStatusHealthy   ProxyHealthStatus = iota // 健康
 	ProxyStatusUnhealthy                          // 不健康
 	ProxyStatusIsolated                           // 已隔离
 )
@@ -26,24 +26,24 @@ const (
 type ProxySelectionStrategy int
 
 const (
-	StrategyRoundRobin ProxySelectionStrategy = iota // 轮询
-	StrategyWeighted                                 // 加权选择
-	StrategyLeastConnections                         // 最少连接
+	StrategyRoundRobin       ProxySelectionStrategy = iota // 轮询
+	StrategyWeighted                                       // 加权选择
+	StrategyLeastConnections                               // 最少连接
 )
 
 // ProxyEntry 代理条目
 type ProxyEntry struct {
-	URL            string
-	Healthy        bool
-	LastCheck      time.Time
-	Latency        time.Duration
-	SuccessRate    float64
-	Weight         int64
-	ActiveConns    int64
-	TotalRequests  int64
-	FailedRequests int64
-	Status         ProxyHealthStatus
-	IsolatedAt     time.Time
+	URL                 string
+	Healthy             bool
+	LastCheck           time.Time
+	Latency             time.Duration
+	SuccessRate         float64
+	Weight              int64
+	ActiveConns         int64
+	TotalRequests       int64
+	FailedRequests      int64
+	Status              ProxyHealthStatus
+	IsolatedAt          time.Time
 	ConsecutiveFailures int
 
 	mu sync.RWMutex
@@ -51,18 +51,18 @@ type ProxyEntry struct {
 
 // ProxyStats 代理统计信息
 type ProxyStats struct {
-	URL              string            `json:"url"`
-	Healthy          bool              `json:"healthy"`
-	LastCheck        time.Time         `json:"last_check"`
-	Latency          time.Duration     `json:"latency"`
-	LatencyMs        float64           `json:"latency_ms"`
-	SuccessRate      float64           `json:"success_rate"`
-	Weight           int64             `json:"weight"`
-	ActiveConns      int64             `json:"active_conns"`
-	TotalRequests    int64             `json:"total_requests"`
-	FailedRequests   int64             `json:"failed_requests"`
-	Status           string            `json:"status"`
-	ConsecutiveFailures int            `json:"consecutive_failures"`
+	URL                 string        `json:"url"`
+	Healthy             bool          `json:"healthy"`
+	LastCheck           time.Time     `json:"last_check"`
+	Latency             time.Duration `json:"latency"`
+	LatencyMs           float64       `json:"latency_ms"`
+	SuccessRate         float64       `json:"success_rate"`
+	Weight              int64         `json:"weight"`
+	ActiveConns         int64         `json:"active_conns"`
+	TotalRequests       int64         `json:"total_requests"`
+	FailedRequests      int64         `json:"failed_requests"`
+	Status              string        `json:"status"`
+	ConsecutiveFailures int           `json:"consecutive_failures"`
 }
 
 // HealthCheckResult 健康检查结果
@@ -76,23 +76,23 @@ type HealthCheckResult struct {
 
 // ProxyPool 代理池管理器
 type ProxyPool struct {
-	proxies   []*ProxyEntry
-	stats     map[string]*ProxyStats
-	healthy   []*ProxyEntry
+	proxies []*ProxyEntry
+	stats   map[string]*ProxyStats
+	healthy []*ProxyEntry
 
-	mu              sync.RWMutex
-	strategy        ProxySelectionStrategy
-	roundRobinIdx   uint64
-	checkInterval   time.Duration
-	timeout         time.Duration
+	mu                 sync.RWMutex
+	strategy           ProxySelectionStrategy
+	roundRobinIdx      uint64
+	checkInterval      time.Duration
+	timeout            time.Duration
 	isolationThreshold int
 	isolationDuration  time.Duration
 	healthCheckURL     string
 
 	// 运行时状态
-	stopCh chan struct{}
+	stopCh   chan struct{}
 	stopOnce sync.Once
-	wg     sync.WaitGroup
+	wg       sync.WaitGroup
 
 	// 回调函数
 	onHealthCheck func(result *HealthCheckResult)
@@ -102,12 +102,12 @@ type ProxyPool struct {
 
 // ProxyPoolConfig 代理池配置
 type ProxyPoolConfig struct {
-	Strategy          ProxySelectionStrategy
-	CheckInterval     time.Duration
-	Timeout           time.Duration
+	Strategy           ProxySelectionStrategy
+	CheckInterval      time.Duration
+	Timeout            time.Duration
 	IsolationThreshold int           // 连续失败次数阈值
 	IsolationDuration  time.Duration // 隔离持续时间
-	HealthCheckURL    string
+	HealthCheckURL     string
 }
 
 // DefaultProxyPoolConfig 返回默认配置
@@ -129,16 +129,16 @@ func NewProxyPool(config *ProxyPoolConfig) *ProxyPool {
 	}
 
 	return &ProxyPool{
-		proxies:           make([]*ProxyEntry, 0),
-		stats:             make(map[string]*ProxyStats),
-		healthy:           make([]*ProxyEntry, 0),
-		strategy:          config.Strategy,
-		checkInterval:     config.CheckInterval,
-		timeout:           config.Timeout,
+		proxies:            make([]*ProxyEntry, 0),
+		stats:              make(map[string]*ProxyStats),
+		healthy:            make([]*ProxyEntry, 0),
+		strategy:           config.Strategy,
+		checkInterval:      config.CheckInterval,
+		timeout:            config.Timeout,
 		isolationThreshold: config.IsolationThreshold,
 		isolationDuration:  config.IsolationDuration,
 		healthCheckURL:     config.HealthCheckURL,
-		stopCh:            make(chan struct{}),
+		stopCh:             make(chan struct{}),
 	}
 }
 
@@ -395,7 +395,7 @@ func (p *ProxyPool) MarkFailure(url string) {
 	if entry.TotalRequests == 1 {
 		entry.SuccessRate = 0.0
 	} else {
-		entry.SuccessRate = entry.SuccessRate*0.9
+		entry.SuccessRate = entry.SuccessRate * 0.9
 	}
 
 	// 检查是否需要隔离

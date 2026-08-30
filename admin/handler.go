@@ -940,6 +940,8 @@ func parseUsageChannel(c *gin.Context) string {
 		return database.UpstreamChannelGrok
 	case database.UpstreamChannelAntigravity:
 		return database.UpstreamChannelAntigravity
+	case database.UpstreamChannelTraeCN:
+		return database.UpstreamChannelTraeCN
 	}
 	return ""
 }
@@ -1086,6 +1088,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/accounts/:id/antigravity/state", h.GetAntigravityAccountState)
 	api.POST("/accounts/:id/antigravity/sync", h.SyncAntigravityAccountState)
 	api.POST("/accounts/:id/antigravity/capabilities/probe", h.ProbeAntigravityAccountCapabilities)
+	api.POST("/accounts/traecn", h.AddTraeCNAccounts)
+	api.POST("/accounts/:id/traecn/refresh", h.RefreshTraeCNAccount)
+	api.PATCH("/accounts/:id/traecn", h.UpdateTraeCNAccount)
 	api.PATCH("/accounts/:id/grok", h.UpdateGrokAccount)
 	api.GET("/accounts/:id/grok/state", h.GetGrokAccountState)
 	api.POST("/accounts/:id/grok/sync", h.SyncGrokAccountState)
@@ -1395,6 +1400,7 @@ func summarizeDashboardAccounts(rows []*database.AccountRow, runtimeAccounts []*
 		database.UpstreamChannelCodex:       {},
 		database.UpstreamChannelGrok:        {},
 		database.UpstreamChannelAntigravity: {},
+		database.UpstreamChannelTraeCN:      {},
 	}
 	counts.total = len(rows)
 	for _, row := range rows {
@@ -1409,6 +1415,8 @@ func summarizeDashboardAccounts(rows []*database.AccountRow, runtimeAccounts []*
 			channel = database.UpstreamChannelGrok
 		} else if strings.EqualFold(upstreamType, auth.UpstreamAntigravity) {
 			channel = database.UpstreamChannelAntigravity
+		} else if strings.EqualFold(upstreamType, auth.UpstreamTraeCN) {
+			channel = database.UpstreamChannelTraeCN
 		}
 		usingCredits := false
 		acc := runtimeByID[row.ID]
@@ -1422,6 +1430,8 @@ func summarizeDashboardAccounts(rows []*database.AccountRow, runtimeAccounts []*
 			usingCredits = acc.UsingCredits()
 			if acc.IsGrokAPI() {
 				channel = database.UpstreamChannelGrok
+			} else if acc.IsTraeCNAPI() {
+				channel = database.UpstreamChannelTraeCN
 			}
 		}
 		perChannel := channelCounts[channel]
@@ -1455,7 +1465,7 @@ func isDashboardAbnormalAccount(status string) bool {
 
 func isDashboardUnsampledAccount(row *database.AccountRow, acc *auth.Account) bool {
 	if acc != nil {
-		if acc.IsGrokAPI() || acc.IsOpenAIResponsesAPI() || acc.IsAntigravityAPI() {
+		if acc.IsGrokAPI() || acc.IsOpenAIResponsesAPI() || acc.IsAntigravityAPI() || acc.IsTraeCNAPI() {
 			return false
 		}
 		snapshot := acc.GetAccountListRuntimeSnapshot()
@@ -1471,7 +1481,8 @@ func isDashboardUnsampledAccount(row *database.AccountRow, acc *auth.Account) bo
 	upstreamType := strings.TrimSpace(row.GetCredential("upstream_type"))
 	if strings.EqualFold(upstreamType, auth.UpstreamGrok) ||
 		strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses) ||
-		strings.EqualFold(upstreamType, auth.UpstreamAntigravity) {
+		strings.EqualFold(upstreamType, auth.UpstreamAntigravity) ||
+		strings.EqualFold(upstreamType, auth.UpstreamTraeCN) {
 		return false
 	}
 	status := strings.ToLower(strings.TrimSpace(row.Status))
@@ -1521,6 +1532,7 @@ type accountResponse struct {
 	OpenAIResponsesAPI            bool                        `json:"openai_responses_api,omitempty"`
 	GrokAPI                       bool                        `json:"grok_api,omitempty"`
 	AntigravityAPI                bool                        `json:"antigravity_api,omitempty"`
+	TraeCNAPI                     bool                        `json:"traecn_api,omitempty"`
 	AntigravityAuthKind           string                      `json:"antigravity_auth_kind,omitempty"`
 	AgentIdentity                 bool                        `json:"agent_identity,omitempty"`
 	GrokAuthKind                  string                      `json:"grok_auth_kind,omitempty"`
@@ -1535,6 +1547,7 @@ type accountResponse struct {
 	AntigravityPermissions        json.RawMessage             `json:"antigravity_permissions,omitempty"`
 	AntigravitySyncWarning        string                      `json:"antigravity_sync_warning,omitempty"`
 	BaseURL                       string                      `json:"base_url,omitempty"`
+	TraeCNHost                    string                      `json:"traecn_host,omitempty"`
 	BalanceQueryURL               string                      `json:"balance_query_url,omitempty"`
 	Models                        []string                    `json:"models,omitempty"`
 	ModelMapping                  string                      `json:"model_mapping,omitempty"`
@@ -1904,6 +1917,7 @@ type accountLiteResponse struct {
 	ATOnly             bool   `json:"at_only"`
 	OpenAIResponsesAPI bool   `json:"openai_responses_api"`
 	GrokAPI            bool   `json:"grok_api"`
+	TraeCNAPI          bool   `json:"traecn_api"`
 	AgentIdentity      bool   `json:"agent_identity"`
 	GrokAuthKind       string `json:"grok_auth_kind,omitempty"`
 }
@@ -1927,6 +1941,7 @@ func (h *Handler) listAccountsLite(c *gin.Context, ctx context.Context) {
 		upstreamType := strings.TrimSpace(row.GetCredential("upstream_type"))
 		isOpenAIResponsesAccount := strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses)
 		isGrokAccount := strings.EqualFold(upstreamType, auth.UpstreamGrok)
+		isTraeCNAccount := strings.EqualFold(upstreamType, auth.UpstreamTraeCN)
 		grokAuthKind := ""
 		if isGrokAccount {
 			if strings.TrimSpace(row.GetCredential("api_key")) != "" {
@@ -1939,9 +1954,15 @@ func (h *Handler) listAccountsLite(c *gin.Context, ctx context.Context) {
 		if isOpenAIResponsesAccount && email == "" {
 			email = row.GetCredential("base_url")
 		}
+		if isTraeCNAccount && email == "" {
+			email = row.GetCredential("traecn_user_id")
+		}
 		planType := row.GetCredential("plan_type")
 		if (isOpenAIResponsesAccount || (isGrokAccount && grokAuthKind == auth.GrokAuthKindAPIKey)) && planType == "" {
 			planType = "api"
+		}
+		if isTraeCNAccount && planType == "" {
+			planType = "traecn"
 		}
 		status := row.Status
 		if rt, ok := runtimeStatus[row.ID]; ok && rt != "" {
@@ -1955,9 +1976,10 @@ func (h *Handler) listAccountsLite(c *gin.Context, ctx context.Context) {
 			Status:             status,
 			Enabled:            row.Enabled,
 			ProxyURL:           row.ProxyURL,
-			ATOnly:             !isOpenAIResponsesAccount && !isGrokAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
+			ATOnly:             !isOpenAIResponsesAccount && !isGrokAccount && !isTraeCNAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
 			OpenAIResponsesAPI: isOpenAIResponsesAccount,
 			GrokAPI:            isGrokAccount,
+			TraeCNAPI:          isTraeCNAccount,
 			AgentIdentity:      isAgentIdentityCredentialRow(row),
 			GrokAuthKind:       grokAuthKind,
 		})
@@ -5565,7 +5587,12 @@ type batchUpdateAccountsReq struct {
 
 func (h *Handler) accountOperationIdentity(id int64) (string, string) {
 	h.accountListCacheMu.RLock()
-	for _, channel := range []string{database.UpstreamChannelCodex, database.UpstreamChannelGrok} {
+	for _, channel := range []string{
+		database.UpstreamChannelCodex,
+		database.UpstreamChannelGrok,
+		database.UpstreamChannelAntigravity,
+		database.UpstreamChannelTraeCN,
+	} {
 		snapshot := h.accountListCache[channel]
 		if snapshot == nil {
 			continue
@@ -5653,7 +5680,9 @@ func (h *Handler) ListRecycleBinAccounts(c *gin.Context) {
 
 	accounts := make([]recycleBinAccountResponse, 0, len(rows))
 	for _, row := range rows {
-		isOpenAIResponsesAccount := strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamOpenAIResponses)
+		upstreamType := strings.TrimSpace(row.GetCredential("upstream_type"))
+		isOpenAIResponsesAccount := strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses)
+		isTraeCNAccount := strings.EqualFold(upstreamType, auth.UpstreamTraeCN)
 		email := row.GetCredential("email")
 		baseURL := row.GetCredential("base_url")
 		if isOpenAIResponsesAccount && email == "" {
@@ -5663,12 +5692,15 @@ func (h *Handler) ListRecycleBinAccounts(c *gin.Context) {
 		if isOpenAIResponsesAccount && planType == "" {
 			planType = "api"
 		}
+		if isTraeCNAccount && planType == "" {
+			planType = "traecn"
+		}
 		resp := recycleBinAccountResponse{
 			ID:                 row.ID,
 			Name:               row.Name,
 			Email:              email,
 			PlanType:           planType,
-			ATOnly:             !isOpenAIResponsesAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
+			ATOnly:             !isOpenAIResponsesAccount && !isTraeCNAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
 			AccessTokenType:    accountAccessTokenType(row),
 			OpenAIResponsesAPI: isOpenAIResponsesAccount,
 			BaseURL:            baseURL,
@@ -8363,6 +8395,8 @@ type settingsResponse struct {
 	MaxConcurrency                      int    `json:"max_concurrency"`
 	GlobalRPM                           int    `json:"global_rpm"`
 	TestModel                           string `json:"test_model"`
+	TraeCNDefaultModel                  string `json:"traecn_default_model"`
+	TraeCNTestModel                     string `json:"traecn_test_model"`
 	TestContent                         string `json:"test_content"`
 	TestConcurrency                     int    `json:"test_concurrency"`
 	BackgroundRefreshIntervalMinutes    int    `json:"background_refresh_interval_minutes"`
@@ -8542,6 +8576,8 @@ type updateSettingsReq struct {
 	MaxConcurrency                      *int                             `json:"max_concurrency"`
 	GlobalRPM                           *int                             `json:"global_rpm"`
 	TestModel                           *string                          `json:"test_model"`
+	TraeCNDefaultModel                  *string                          `json:"traecn_default_model"`
+	TraeCNTestModel                     *string                          `json:"traecn_test_model"`
 	TestContent                         *string                          `json:"test_content"`
 	TestConcurrency                     *int                             `json:"test_concurrency"`
 	BackgroundRefreshIntervalMinutes    *int                             `json:"background_refresh_interval_minutes"`
@@ -9358,6 +9394,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		MaxConcurrency:                      h.store.GetMaxConcurrency(),
 		GlobalRPM:                           h.rateLimiter.GetRPM(),
 		TestModel:                           h.store.GetTestModel(),
+		TraeCNDefaultModel:                  h.store.GetTraeCNDefaultModel(),
+		TraeCNTestModel:                     h.store.GetTraeCNTestModel(),
 		TestContent:                         h.store.GetTestContent(),
 		TestConcurrency:                     h.store.GetTestConcurrency(),
 		ResponseCacheLocalMaxBytes:          responseCacheSettings.LocalMaxBytes,
@@ -9929,6 +9967,24 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	if req.TestModel != nil && *req.TestModel != "" {
 		h.store.SetTestModel(*req.TestModel)
 		log.Printf("设置已更新: test_model = %s", *req.TestModel)
+	}
+
+	if req.TraeCNDefaultModel != nil {
+		model := strings.TrimSpace(*req.TraeCNDefaultModel)
+		if model == "" {
+			model = "auto"
+		}
+		h.store.SetTraeCNDefaultModel(model)
+		log.Printf("设置已更新: traecn_default_model = %s", model)
+	}
+
+	if req.TraeCNTestModel != nil {
+		model := strings.TrimSpace(*req.TraeCNTestModel)
+		if model == "" {
+			model = "auto"
+		}
+		h.store.SetTraeCNTestModel(model)
+		log.Printf("设置已更新: traecn_test_model = %s", model)
 	}
 
 	if req.TestContent != nil {
@@ -10873,6 +10929,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		MaxConcurrency:                      h.store.GetMaxConcurrency(),
 		GlobalRPM:                           h.rateLimiter.GetRPM(),
 		TestModel:                           h.store.GetTestModel(),
+		TraeCNDefaultModel:                  h.store.GetTraeCNDefaultModel(),
+		TraeCNTestModel:                     h.store.GetTraeCNTestModel(),
 		TestContent:                         h.store.GetTestContent(),
 		TestConcurrency:                     h.store.GetTestConcurrency(),
 		BackgroundRefreshIntervalMinutes:    h.store.GetBackgroundRefreshIntervalMinutes(),
@@ -11174,6 +11232,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		MaxConcurrency:                      h.store.GetMaxConcurrency(),
 		GlobalRPM:                           h.rateLimiter.GetRPM(),
 		TestModel:                           h.store.GetTestModel(),
+		TraeCNDefaultModel:                  h.store.GetTraeCNDefaultModel(),
+		TraeCNTestModel:                     h.store.GetTraeCNTestModel(),
 		TestContent:                         h.store.GetTestContent(),
 		TestConcurrency:                     h.store.GetTestConcurrency(),
 		ResponseCacheLocalMaxBytes:          responseCacheSettings.LocalMaxBytes,
@@ -11720,7 +11780,44 @@ func (h *Handler) ListModels(c *gin.Context) {
 	catalog, _ := proxy.ListModelCatalog(c.Request.Context(), h.db)
 	catalog.GrokModels = h.grokChannelModels()
 	catalog.AntigravityModels = h.antigravityChannelModels()
+	catalog.TraeCNModels = h.traeCNChannelModels()
 	c.JSON(http.StatusOK, catalog)
+}
+
+// traeCNChannelModels returns the union of account-specific Trae model
+// allowlists, falling back to the built-in logical catalog when none is set.
+func (h *Handler) traeCNChannelModels() []string {
+	if h == nil || h.store == nil {
+		return auth.TraeCNDefaultModelIDs()
+	}
+	seen := make(map[string]struct{})
+	models := make([]string, 0)
+	for _, account := range h.store.Accounts() {
+		if account == nil || !account.IsTraeCNAPI() {
+			continue
+		}
+		declared := account.TraeCNModels()
+		if len(declared) == 0 {
+			declared = auth.TraeCNDefaultModelIDs()
+		}
+		for _, model := range declared {
+			model = strings.TrimSpace(model)
+			key := strings.ToLower(model)
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			models = append(models, model)
+		}
+	}
+	if len(models) == 0 {
+		models = auth.TraeCNDefaultModelIDs()
+	}
+	sort.Strings(models)
+	return models
 }
 
 // grokChannelModels 聚合全部 Grok 账号声明的模型（去重、排序），

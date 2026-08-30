@@ -165,7 +165,7 @@ Render 可以直接运行 GHCR 中已经构建好的镜像，适合放一个公�
 在 Render Dashboard 中创建 `Web Service`，选择 `Existing Image`，镜像地址填写：
 
 ```text
-ghcr.io/james-6-23/codex2api:latest
+ghcr.io/oneadms/codex2api:latest
 ```
 
 如果 GHCR Package 不是公开访问，需要先在 Render 的 Registry Credentials 中配置 GitHub Container Registry 凭据。
@@ -204,7 +204,7 @@ Render 的 image-backed 服务不会在 `latest` 标签更新后自动重新部�
 RENDER_DEPLOY_HOOK_URL=<Render Deploy Hook URL>
 ```
 
-之后 `.github/workflows/render-deploy.yml` 会在 `Build Docker Image` 工作流成功后自动请求该 Hook，让 Render 重新拉取 `ghcr.io/james-6-23/codex2api:latest` 并部署。
+之后 `.github/workflows/render-deploy.yml` 会在 `Build Docker Image` 工作流成功后自动请求该 Hook，让 Render 重新拉取 `ghcr.io/oneadms/codex2api:latest` 并部署。
 
 也可以手动触发镜像构建工作流，镜像推送成功后会自动进入 Render 部署工作流：
 
@@ -402,7 +402,7 @@ version: '3.8'
 
 services:
   codex2api:
-    image: ghcr.io/james-6-23/codex2api:latest
+    image: ghcr.io/oneadms/codex2api:latest
     container_name: codex2api
     restart: unless-stopped
     env_file:

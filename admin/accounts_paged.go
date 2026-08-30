@@ -100,6 +100,7 @@ type accountListSnapshotItem struct {
 	DynamicConcurrency  int64
 	OpenAIResponses     bool
 	Antigravity         bool
+	TraeCN              bool
 	SearchText          string
 }
 
@@ -213,8 +214,8 @@ func (h *Handler) resolveAccountOperationSelector(ctx context.Context, selector 
 		return nil, fmt.Errorf("selector is required")
 	}
 	channel := strings.ToLower(strings.TrimSpace(selector.Channel))
-	if channel != database.UpstreamChannelCodex && channel != database.UpstreamChannelGrok && channel != database.UpstreamChannelAntigravity {
-		return nil, fmt.Errorf("selector channel must be codex, grok, or antigravity")
+	if channel != database.UpstreamChannelCodex && channel != database.UpstreamChannelGrok && channel != database.UpstreamChannelAntigravity && channel != database.UpstreamChannelTraeCN {
+		return nil, fmt.Errorf("selector channel must be codex, grok, antigravity, or traecn")
 	}
 	snapshot, err := h.getAccountListSnapshot(ctx, channel)
 	if err != nil {
@@ -559,7 +560,9 @@ func isAccountListDeletePath(method, path string) bool {
 			"/api/admin/accounts/clean-rate-limited",
 			"/api/admin/accounts/clean-error",
 			"/api/admin/accounts/grok/clean-banned",
-			"/api/admin/accounts/grok/clean-error":
+			"/api/admin/accounts/grok/clean-error",
+			"/api/admin/accounts/traecn/clean-banned",
+			"/api/admin/accounts/traecn/clean-error":
 			return true
 		}
 		return false
@@ -680,14 +683,21 @@ func (h *Handler) buildAccountListSnapshotItem(row *database.AccountRow, request
 	upstreamType := strings.TrimSpace(row.GetCredential("upstream_type"))
 	isGrok := strings.EqualFold(upstreamType, auth.UpstreamGrok)
 	isAntigravity := strings.EqualFold(upstreamType, auth.UpstreamAntigravity)
+	isTraeCN := strings.EqualFold(upstreamType, auth.UpstreamTraeCN)
 	isOpenAIResponses := strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses)
 	email := row.GetCredential("email")
 	if isOpenAIResponses && email == "" {
 		email = row.GetCredential("base_url")
 	}
+	if isTraeCN && email == "" {
+		email = row.GetCredential("traecn_user_id")
+	}
 	planType := row.GetCredential("plan_type")
 	if isOpenAIResponses && planType == "" {
 		planType = "api"
+	}
+	if isTraeCN && planType == "" {
+		planType = "traecn"
 	}
 	grokAuthKind := ""
 	if isGrok {
@@ -708,6 +718,7 @@ func (h *Handler) buildAccountListSnapshotItem(row *database.AccountRow, request
 		Email: email, EmailDomain: accountEmailDomain(email), Tags: append([]string(nil), row.Tags...),
 		SchedulerPriority: valueOrZero(accountSchedulerPriority(row)), OpenAIResponses: isOpenAIResponses,
 		Antigravity: isAntigravity,
+		TraeCN:      isTraeCN,
 	}
 	if row.CooldownUntil.Valid {
 		item.CooldownUntil = row.CooldownUntil.Time
@@ -786,6 +797,8 @@ func (h *Handler) buildAccountListSnapshotItem(row *database.AccountRow, request
 			item.PlanType, item.GrokPlanCategory, row.ErrorMessage, row.ProxyURL, strings.Join(groupLabels, " "))
 	} else if isAntigravity {
 		searchParts = append(searchParts, item.PlanType, row.GetCredential("project_id"), row.GetCredential("antigravity_sync_error"), strings.Join(groupLabels, " "))
+	} else if isTraeCN {
+		searchParts = append(searchParts, item.PlanType, strings.Join(row.GetCredentialStringSlice("models"), " "), row.GetCredential("traecn_host"), row.GetCredential("traecn_user_id"), strings.Join(groupLabels, " "))
 	}
 	item.SearchText = strings.ToLower(strings.Join(searchParts, " "))
 	return item
@@ -1074,6 +1087,10 @@ func accountListItemMatches(item *accountListSnapshotItem, query accountPageQuer
 			if item.GrokAuthKind != query.AuthKind {
 				return false
 			}
+		} else if channel == database.UpstreamChannelTraeCN {
+			if query.AuthKind != auth.GrokAuthKindOAuth {
+				return false
+			}
 		} else if item.OpenAIResponses != (query.AuthKind == auth.GrokAuthKindAPIKey) {
 			// Codex 渠道复用 auth_kind：api_key=Responses API 中转账号，oauth=官方账号（issue #522）
 			return false
@@ -1178,7 +1195,7 @@ func accountListOverloadPaused(item *accountListSnapshotItem) bool {
 }
 
 func accountListUnsampled(item *accountListSnapshotItem) bool {
-	if item == nil || item.OpenAIResponses || item.GrokAuthKind != "" || item.Antigravity {
+	if item == nil || item.OpenAIResponses || item.GrokAuthKind != "" || item.Antigravity || item.TraeCN {
 		return false
 	}
 	if item.Status == "unauthorized" || item.Status == "error" {
@@ -1391,6 +1408,9 @@ func summarizeAccountList(items []*accountListSnapshotItem, channel string) (acc
 		}
 		if item.GrokAuthKind == auth.GrokAuthKindAPIKey {
 			summary.APIKey++
+		}
+		if item.TraeCN {
+			summary.OAuth++
 		}
 		if channel == database.UpstreamChannelCodex {
 			if item.OpenAIResponses {

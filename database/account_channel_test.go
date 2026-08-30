@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -16,6 +17,7 @@ func TestAPIKeyLimitsResolveUpstreamChannel(t *testing.T) {
 		{name: "codex", in: " CODEX ", want: UpstreamChannelCodex},
 		{name: "grok", in: "Grok", want: UpstreamChannelGrok},
 		{name: "antigravity", in: " Antigravity ", want: UpstreamChannelAntigravity},
+		{name: "traecn", in: " TRAECN ", want: UpstreamChannelTraeCN},
 		{name: "unknown", in: "other", want: UpstreamChannelAuto},
 	}
 	for _, tt := range tests {
@@ -27,6 +29,96 @@ func TestAPIKeyLimitsResolveUpstreamChannel(t *testing.T) {
 	}
 }
 
+func TestInsertAccountWithUpstreamIfRefreshTokenAbsentIsAtomic(t *testing.T) {
+	db, err := New("sqlite", filepath.Join(t.TempDir(), "traecn-rt-reservation.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	credentials := func() map[string]any {
+		return map[string]any{"upstream_type": "traecn", "refresh_token": "same-rt"}
+	}
+	type result struct {
+		id       int64
+		inserted bool
+		err      error
+	}
+	results := make(chan result, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			id, inserted, insertErr := db.InsertAccountWithUpstreamIfRefreshTokenAbsent(ctx, "trae", "trae", "traecn", "same-rt", credentials(), "")
+			results <- result{id: id, inserted: inserted, err: insertErr}
+		}()
+	}
+	wg.Wait()
+	close(results)
+	insertedCount := 0
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("atomic RT reservation: %v", result.err)
+		}
+		if result.inserted {
+			insertedCount++
+			if result.id <= 0 {
+				t.Fatalf("inserted reservation returned id %d", result.id)
+			}
+		}
+	}
+	if insertedCount != 1 {
+		t.Fatalf("inserted reservations = %d, want exactly one", insertedCount)
+	}
+	count, err := db.CountAll(ctx)
+	if err != nil || count != 1 {
+		t.Fatalf("account count = %d, err=%v, want 1", count, err)
+	}
+}
+
+func TestEnsureAccountCredentialFamilyIDInitializesLegacyTraeCNAccount(t *testing.T) {
+	db, err := New("sqlite", filepath.Join(t.TempDir(), "traecn-legacy-family.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	id, err := db.InsertAccountWithUpstream(ctx, "legacy-traecn", "trae", "traecn", map[string]any{
+		"upstream_type": "traecn",
+		"refresh_token": "legacy-refresh-token",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a row written before the canonical family column was introduced.
+	if _, err := db.conn.ExecContext(ctx, `UPDATE accounts SET credential_family_id='', credentials=json_remove(credentials, '$.credential_family_id') WHERE id=$1`, id); err != nil {
+		t.Fatalf("clear legacy family: %v", err)
+	}
+
+	family, err := db.EnsureAccountCredentialFamilyID(ctx, id, "")
+	if err != nil {
+		t.Fatalf("EnsureAccountCredentialFamilyID: %v", err)
+	}
+	if family == "" {
+		t.Fatal("legacy Trae CN account received an empty credential family")
+	}
+	row, err := db.GetAccountByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.CredentialFamilyID != family {
+		t.Fatalf("canonical family = %q, want %q", row.CredentialFamilyID, family)
+	}
+	// The compatibility JSON field is synchronized by the first credential CAS
+	// after the lease initialization; the initialization itself only owns the
+	// canonical column and must not mutate the RT reservation.
+	if row.GetCredential("refresh_token") != "legacy-refresh-token" {
+		t.Fatalf("legacy refresh token changed during family initialization")
+	}
+}
+
 func TestNormalizeAccountGroupChannel(t *testing.T) {
 	tests := []struct {
 		in   string
@@ -35,6 +127,7 @@ func TestNormalizeAccountGroupChannel(t *testing.T) {
 		{in: "codex", want: AccountGroupChannelCodex},
 		{in: " GROK ", want: AccountGroupChannelGrok},
 		{in: "Antigravity", want: AccountGroupChannelAntigravity},
+		{in: "TRAECN", want: AccountGroupChannelTraeCN},
 		{in: "", want: AccountGroupChannelCodex},
 		{in: "other", want: AccountGroupChannelCodex},
 	}
@@ -78,6 +171,16 @@ func TestSQLiteListAccountListProjectionByChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert antigravity account: %v", err)
 	}
+	traeID, err := db.InsertAccountWithUpstream(ctx, "traecn", "trae", "traecn", map[string]interface{}{
+		"upstream_type":  "traecn",
+		"refresh_token":  "trae-refresh",
+		"access_token":   "trae-access",
+		"traecn_host":    "https://trae.example",
+		"traecn_user_id": "trae-user",
+	}, "")
+	if err != nil {
+		t.Fatalf("insert traecn account: %v", err)
+	}
 
 	tests := []struct {
 		channel string
@@ -86,6 +189,7 @@ func TestSQLiteListAccountListProjectionByChannel(t *testing.T) {
 		{channel: UpstreamChannelCodex, wantID: codexID},
 		{channel: UpstreamChannelGrok, wantID: grokID},
 		{channel: UpstreamChannelAntigravity, wantID: antigravityID},
+		{channel: UpstreamChannelTraeCN, wantID: traeID},
 	}
 	for _, tt := range tests {
 		t.Run(tt.channel, func(t *testing.T) {
@@ -98,6 +202,9 @@ func TestSQLiteListAccountListProjectionByChannel(t *testing.T) {
 			}
 			if tt.channel == UpstreamChannelAntigravity && (rows[0].GetCredential("avatar_url") == "" || !rows[0].GetCredentialBool("verified_email") || rows[0].GetCredential("project_id") != "project-1" || rows[0].GetCredential("antigravity_sync_error") != "sync failed" || rows[0].GetCredential("antigravity_sync_warning") == "" || rows[0].GetCredential("antigravity_permissions") == "" || rows[0].GetCredential("antigravity_quota") == "") {
 				t.Fatalf("Antigravity projection omitted control-plane status fields: %#v", rows[0].Credentials)
+			}
+			if tt.channel == UpstreamChannelTraeCN && (rows[0].GetCredential("traecn_host") != "https://trae.example" || rows[0].GetCredential("traecn_user_id") != "trae-user") {
+				t.Fatalf("Trae CN projection omitted account fields: %#v", rows[0].Credentials)
 			}
 		})
 	}

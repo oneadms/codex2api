@@ -194,6 +194,8 @@ const getSettingsPatchValues = (settings: SystemSettings, keys: Array<keyof Syst
 
 const normalizeResponseCacheSettings = (settings: SystemSettings): SystemSettings => ({
   ...settings,
+  traecn_default_model: settings.traecn_default_model?.trim() || 'auto',
+  traecn_test_model: settings.traecn_test_model?.trim() || 'auto',
   response_cache_local_max_bytes: Number.isFinite(settings.response_cache_local_max_bytes)
     ? settings.response_cache_local_max_bytes
     : DEFAULT_RESPONSE_CACHE_TOTAL_BYTES,
@@ -1370,6 +1372,8 @@ export default function Settings() {
     max_concurrency: 2,
     global_rpm: 0,
     test_model: '',
+    traecn_default_model: 'auto',
+    traecn_test_model: 'auto',
     test_content: 'hi',
     test_concurrency: 50,
 	    background_refresh_interval_minutes: 2,
@@ -1541,6 +1545,7 @@ export default function Settings() {
   const [testingImageStorage, setTestingImageStorage] = useState(false)
   const [loadedAdminSecret, setLoadedAdminSecret] = useState('')
   const [modelList, setModelList] = useState<string[]>([])
+  const [traeCNModelList, setTraeCNModelList] = useState<string[]>([])
   const [modelItems, setModelItems] = useState<ModelInfo[]>([])
   const [modelsLastSyncedAt, setModelsLastSyncedAt] = useState<string | undefined>()
   const [modelsSourceURL, setModelsSourceURL] = useState('')
@@ -1808,6 +1813,7 @@ export default function Settings() {
     setLoadedAdminSecret(settings.admin_secret ?? '')
     setSyncedCliVersion(settings.codex_synced_cli_version ?? '')
     setModelList(modelsResp.models ?? [])
+    setTraeCNModelList(modelsResp.traecn_models ?? [])
     setModelItems(modelsResp.items ?? [])
     setModelsLastSyncedAt(modelsResp.last_synced_at)
     setModelsSourceURL(modelsResp.source_url ?? '')
@@ -2051,6 +2057,18 @@ export default function Settings() {
       !model.id.includes(')')
     )
     .map((model) => ({ label: model.id, value: model.id }))
+  const traeCNModelOptions = useMemo(() => {
+    const seen = new Set<string>()
+    const options: Array<{ label: string; value: string }> = []
+    for (const raw of ['auto', ...traeCNModelList]) {
+      const value = raw.trim()
+      const key = value.toLowerCase()
+      if (!value || seen.has(key)) continue
+      seen.add(key)
+      options.push({ label: value, value })
+    }
+    return options
+  }, [traeCNModelList])
   const enabledModelCount = visibleModelItems.filter((model) => model.enabled).length
   const modelsLastSyncedLabel = modelsLastSyncedAt ? formatBeijingTime(modelsLastSyncedAt) : t('settings.modelsNeverSynced')
   const modelsSourceLabel = modelsSourceURL || 'https://developers.openai.com/codex/models'
@@ -2880,6 +2898,35 @@ export default function Settings() {
                   className={cn(
                     'flex min-h-[88px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50',
                   )}
+                />
+              </SettingField>
+            </div>
+          </SettingsCard>
+
+          <SettingsCard
+            title={t('settings.traecnSettingsTitle')}
+            description={t('settings.traecnSettingsDesc')}
+            icon={<ChannelLogo channel="traecn" size={16} />}
+          >
+            <div className={SETTINGS_FIELD_GRID}>
+              <SettingField
+                label={t('settings.traecnDefaultModel')}
+                description={t('settings.traecnDefaultModelDesc')}
+              >
+                <Select
+                  value={settingsForm.traecn_default_model || 'auto'}
+                  onValueChange={(value) => autoSaveStringField('traecn_default_model', value)}
+                  options={traeCNModelOptions}
+                />
+              </SettingField>
+              <SettingField
+                label={t('settings.traecnTestModel')}
+                description={t('settings.traecnTestModelDesc')}
+              >
+                <Select
+                  value={settingsForm.traecn_test_model || 'auto'}
+                  onValueChange={(value) => autoSaveStringField('traecn_test_model', value)}
+                  options={traeCNModelOptions}
                 />
               </SettingField>
             </div>

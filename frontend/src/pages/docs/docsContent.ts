@@ -528,8 +528,8 @@ curl --request POST \\
       title: copy(locale, "列出账号", "List accounts"),
       description: copy(
         locale,
-        "列出账号的状态、用量、标签、账号分组和基础元数据。可选 query channel=codex|grok 仅返回对应上游（Grok 管理页用 channel=grok，避免拉全站账号）。",
-        "List accounts with status, usage, tags, account groups, and basic metadata. Optional query channel=codex|grok returns only that upstream (use channel=grok for the Grok admin page).",
+        "列出账号的状态、用量、标签、账号分组和基础元数据。可选 query channel=codex|grok|antigravity|traecn 仅返回对应上游（渠道管理页可用对应 channel，避免拉全站账号）。",
+        "List accounts with status, usage, tags, account groups, and basic metadata. Optional query channel=codex|grok|antigravity|traecn returns only that upstream (use the matching channel on provider pages to avoid loading every account).",
       ),
       curl: `curl --request GET \\
   --url ${baseUrl}/api/admin/accounts \\

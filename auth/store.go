@@ -136,6 +136,10 @@ type Account struct {
 	GrokOIDCIssuer    string
 	GrokPrincipalType string
 	GrokPrincipalID   string
+	// Trae CN OAuth metadata (upstream_type=traecn).
+	TraeCNHost    string
+	TraeCNUserID  string
+	traeRefreshMu sync.Mutex
 	// CredentialGeneration fences every asynchronous Grok observation and OAuth
 	// refresh result. CredentialFamilyID is stable across AT/RT rotation and is
 	// safe to use as a cross-instance lease key (it contains no credential).
@@ -452,6 +456,9 @@ func (a *Account) hasDispatchCredentialLocked() bool {
 			return true
 		}
 		return strings.TrimSpace(a.AccessToken) != "" && strings.TrimSpace(a.AntigravityProjectID) != ""
+	}
+	if a.isTraeCNAPILocked() {
+		return strings.TrimSpace(a.AccessToken) != "" || strings.TrimSpace(a.RefreshToken) != ""
 	}
 	if a.isGrokAPILocked() {
 		// API Key 直接可调度；OAuth 需等 AT 刷出（RT-only 由后台/lazy 刷新补齐）
@@ -3165,6 +3172,8 @@ type Store struct {
 	maxConcurrency                     int64        // 每账号最大并发数
 	testConcurrency                    int64        // 批量测试并发数
 	testModel                          atomic.Value // 测试连接使用的模型（string）
+	traeCNDefaultModel                 atomic.Value // TRAECN 请求未指定模型时的默认模型（string）
+	traeCNTestModel                    atomic.Value // TRAECN 测试连接使用的模型（string）
 	testContent                        atomic.Value // 测试连接使用的输入内容（string）
 	db                                 *database.DB
 	tokenCache                         cache.TokenCache
@@ -3745,6 +3754,8 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 			MaxConcurrency:                     2,
 			TestConcurrency:                    50,
 			TestModel:                          "gpt-5.4",
+			TraeCNDefaultModel:                 "auto",
+			TraeCNTestModel:                    "auto",
 			TestContent:                        DefaultTestContent,
 			BackgroundRefreshIntervalMinutes:   2,
 			UsageProbeMaxAgeMinutes:            10,
@@ -3800,6 +3811,8 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		s.proxyInventoryLoader = db.ListProxies
 	}
 	s.testModel.Store(settings.TestModel)
+	s.SetTraeCNDefaultModel(settings.TraeCNDefaultModel)
+	s.SetTraeCNTestModel(settings.TraeCNTestModel)
 	s.testContent.Store(NormalizeTestContent(settings.TestContent))
 	s.SetBackgroundRefreshInterval(time.Duration(settings.BackgroundRefreshIntervalMinutes) * time.Minute)
 	s.SetUsageProbeMaxAge(time.Duration(settings.UsageProbeMaxAgeMinutes) * time.Minute)
@@ -5059,11 +5072,12 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 	isOpenAIResponsesAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamOpenAIResponses) && strings.TrimSpace(baseURL) != "" && strings.TrimSpace(apiKey) != ""
 	isGrokAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamGrok) && (strings.TrimSpace(apiKey) != "" || rt != "" || at != "")
 	isAntigravityAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamAntigravity) && (strings.TrimSpace(apiKey) != "" || rt != "" || at != "")
+	isTraeCNAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamTraeCN) && (rt != "" || at != "")
 	// Agent Identity：无 AT/RT，凭 agent_private_key 动态签名，不能被下面的空凭据 guard 拒绝。
 	isAgentIdentityAccount := strings.EqualFold(strings.TrimSpace(row.GetCredential("auth_mode")), CodexAuthModeAgentIdentity) &&
 		strings.TrimSpace(row.GetCredential("agent_runtime_id")) != "" &&
 		strings.TrimSpace(row.GetCredential("agent_private_key")) != ""
-	if rt == "" && st == "" && at == "" && !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isAgentIdentityAccount {
+	if rt == "" && st == "" && at == "" && !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isTraeCNAccount && !isAgentIdentityAccount {
 		log.Printf("[账号 %d] 缺少 refresh_token、session_token 和 access_token，跳过", row.ID)
 		return nil
 	}
@@ -5080,6 +5094,8 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		AddedAt:                 row.CreatedAt.UnixNano(),
 		UpstreamType:            upstreamType,
 		AntigravityProjectID:    strings.TrimSpace(row.GetCredential("project_id")),
+		TraeCNHost:              strings.TrimSpace(row.GetCredential("traecn_host")),
+		TraeCNUserID:            strings.TrimSpace(row.GetCredential("traecn_user_id")),
 		BaseURL:                 strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		APIKey:                  strings.TrimSpace(apiKey),
 		Models:                  models,
@@ -5154,6 +5170,17 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 			if err := json.Unmarshal([]byte(raw), &snap); err == nil && !snap.UpdatedAt.IsZero() {
 				account.setGrokRateLimitSnapshot(snap, false)
 			}
+		}
+	}
+	if isTraeCNAccount {
+		account.AccountID = row.GetCredential("traecn_user_id")
+		account.Email = row.GetCredential("email")
+		account.PlanType = row.GetCredential("plan_type")
+		if account.PlanType == "" {
+			account.PlanType = "traecn"
+		}
+		if at != "" {
+			account.HealthTier = HealthTierHealthy
 		}
 	}
 	account.ScoreBiasOverride = reflectOptionalInt64Field(row, "ScoreBiasOverride")
@@ -7562,6 +7589,53 @@ func (s *Store) GetTestModel() string {
 	return "gpt-5.4"
 }
 
+// SetTraeCNDefaultModel dynamically updates the model used by TRAECN requests
+// that omit the model field.
+func (s *Store) SetTraeCNDefaultModel(model string) {
+	if s == nil {
+		return
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = "auto"
+	}
+	s.traeCNDefaultModel.Store(model)
+}
+
+// GetTraeCNDefaultModel returns the configured TRAECN request fallback model.
+func (s *Store) GetTraeCNDefaultModel() string {
+	if s == nil {
+		return "auto"
+	}
+	if value, ok := s.traeCNDefaultModel.Load().(string); ok && strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	return "auto"
+}
+
+// SetTraeCNTestModel dynamically updates the model used by TRAECN connection tests.
+func (s *Store) SetTraeCNTestModel(model string) {
+	if s == nil {
+		return
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = "auto"
+	}
+	s.traeCNTestModel.Store(model)
+}
+
+// GetTraeCNTestModel returns the configured TRAECN connection-test model.
+func (s *Store) GetTraeCNTestModel() string {
+	if s == nil {
+		return "auto"
+	}
+	if value, ok := s.traeCNTestModel.Load().(string); ok && strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	return "auto"
+}
+
 // SetTestContent dynamically updates connection test input text.
 func (s *Store) SetTestContent(content string) {
 	s.testContent.Store(NormalizeTestContent(content))
@@ -8704,7 +8778,7 @@ func (s *Store) SetAPIKeyUpstreamChannel(apiKeyID int64, channel string) {
 		return
 	}
 	channel = strings.ToLower(strings.TrimSpace(channel))
-	if channel != database.UpstreamChannelCodex && channel != database.UpstreamChannelGrok && channel != database.UpstreamChannelAntigravity {
+	if channel != database.UpstreamChannelCodex && channel != database.UpstreamChannelGrok && channel != database.UpstreamChannelAntigravity && channel != database.UpstreamChannelTraeCN {
 		channel = ""
 	}
 	s.apiKeyGroupsMu.Lock()
@@ -8794,11 +8868,15 @@ func (s *Store) APIKeyAllowsAccount(apiKeyID int64, acc *Account) bool {
 			return false
 		}
 	case database.UpstreamChannelCodex:
-		if acc.IsGrokAPI() || acc.IsAntigravityAPI() {
+		if acc.IsGrokAPI() || acc.IsAntigravityAPI() || acc.IsTraeCNAPI() {
 			return false
 		}
 	case database.UpstreamChannelAntigravity:
 		if !acc.IsAntigravityAPI() {
+			return false
+		}
+	case database.UpstreamChannelTraeCN:
+		if !acc.IsTraeCNAPI() {
 			return false
 		}
 	}
@@ -10938,6 +11016,9 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 	// Grok 账号走 auth.x.ai 的 OAuth 刷新流程，与 ChatGPT 的 RT 刷新完全不同。
 	if acc.IsGrokAPI() {
 		return s.refreshGrokAccount(ctx, acc, forceRefresh)
+	}
+	if acc.IsTraeCNAPI() {
+		return s.refreshTraeCNAccount(ctx, acc, forceRefresh)
 	}
 	acc.mu.RLock()
 	rt := acc.RefreshToken

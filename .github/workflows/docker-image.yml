@@ -21,7 +21,8 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # This fork publishes its runtime image to the owner's GHCR namespace.
+  IMAGE_NAME: oneadms/codex2api
 
 jobs:
   docker:
@@ -51,6 +52,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}},value=${{ inputs.build_version || github.ref_name }},enable=${{ inputs.build_version != '' || startsWith(github.ref, 'refs/tags/v') }}
             type=semver,pattern={{major}}.{{minor}},value=${{ inputs.build_version || github.ref_name }},enable=${{ inputs.build_version != '' || startsWith(github.ref, 'refs/tags/v') }}
+            type=sha,format=long
             type=raw,value=latest
 
       - name: Build and push Docker image

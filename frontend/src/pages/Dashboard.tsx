@@ -273,9 +273,9 @@ export default function Dashboard() {
   const errorCount = effectiveCounts?.error ?? 0
   const todayRequests = effectiveCounts?.today_requests ?? 0
   const channelBreakdown = !channel && stats?.channels
-    ? (['codex', 'grok', 'antigravity'] as const)
+    ? (['codex', 'grok', 'antigravity', 'traecn'] as const)
         .map((key) => ({ key, counts: stats.channels?.[key] }))
-        .filter((item): item is { key: 'codex' | 'grok' | 'antigravity'; counts: StatsChannelCounts } =>
+        .filter((item): item is { key: 'codex' | 'grok' | 'antigravity' | 'traecn'; counts: StatsChannelCounts } =>
           Boolean(item.counts && item.counts.total > 0))
     : []
 
@@ -379,7 +379,7 @@ export default function Dashboard() {
                     key={key}
                     className="inline-flex items-center gap-1.5 rounded-full bg-muted/80 px-3 py-1 font-semibold text-foreground ring-1 ring-border/50"
                     title={t('dashboard.heroChannelTitle', {
-                      channel: key === 'grok' ? 'Grok' : key === 'antigravity' ? 'Antigravity' : 'Codex',
+                      channel: key === 'grok' ? 'Grok' : key === 'antigravity' ? 'Antigravity' : key === 'traecn' ? 'TRAECN' : 'Codex',
                       available: counts.available,
                       total: counts.total,
                       requests: counts.today_requests,
