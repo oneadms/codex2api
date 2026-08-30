@@ -1273,10 +1273,9 @@ func TestPrepareOpenAIResponsesBody_NormalizesLegacyImageContentPart(t *testing.
 	}
 }
 
-// OpenAI's public Responses schema does not include Codex's internal
-// agent_message item type.  Relay requests must present those replayed
-// collaboration messages as ordinary assistant messages and omit the
-// collaboration-only routing metadata.
+// OpenAI 公共 Responses schema 不包含 Codex 内部的 agent_message 类型。
+// 中转请求必须将回放的协作消息表示为普通 assistant 消息，并去除仅供协作
+// 路由使用的元数据。
 func TestPrepareOpenAIResponsesBody_NormalizesAgentMessage(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.5",
@@ -1312,9 +1311,9 @@ func TestPrepareOpenAIResponsesBody_NormalizesAgentMessage(t *testing.T) {
 }
 
 func TestPrepareOpenAIResponsesBody_DropsAgentMessageEncryptedContent(t *testing.T) {
-	// A real Codex multi-agent replay contains a visible collaboration envelope
-	// plus an opaque encrypted_content part.  The latter is not a public
-	// Responses content discriminator and must not survive the relay conversion.
+	// 真实的 Codex 多代理回放包含可见的协作信封以及不透明的
+	// encrypted_content 部分。后者不是公开 Responses 内容类型，不能在中转
+	// 转换后继续保留。
 	raw := []byte(`{
 		"model":"gpt-5.5",
 		"input":[{
@@ -1364,9 +1363,8 @@ func TestPrepareOpenAIResponsesBody_EmptyAgentMessageEncryptedContentBecomesEmpt
 	}
 }
 
-// The native Codex Responses path still supports agent_message as a first
-// class item.  Keep its type and collaboration metadata intact there; only
-// the OpenAI relay adapter needs the compatibility conversion above.
+// 原生 Codex Responses 路径仍将 agent_message 作为一等项支持。在该路径中
+// 保持类型和协作元数据不变；只有 OpenAI 中转适配器需要执行上述兼容转换。
 func TestPrepareResponsesBody_PreservesNativeAgentMessage(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.5",

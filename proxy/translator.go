@@ -915,17 +915,15 @@ func normalizeResponsesSystemRoleMessages(body map[string]any) bool {
 	return modified
 }
 
-// normalizeResponsesAgentMessages lowers Codex multi-agent replay items to the
-// standard Responses message shape used by OpenAI-compatible relay endpoints.
+// normalizeResponsesAgentMessages 将 Codex 多代理回放项降级为
+// OpenAI 兼容中转端点使用的标准 Responses 消息格式。
 //
-// `agent_message` is a Codex/ChatGPT extension.  The native Codex endpoint can
-// route that item between agents, but ordinary OpenAI Responses relays reject
-// it while deserializing input[] ("unknown item type agent_message").  The
-// relay cannot reproduce the routing semantics, so retain the textual history
-// as an assistant message and discard the transport-only author/recipient
-// metadata.  This function is deliberately called only by
-// PrepareOpenAIResponsesBody; the native Codex path must continue to pass the
-// extension through unchanged.
+// `agent_message` 是 Codex/ChatGPT 的扩展类型。原生 Codex 端点可以在代理
+// 之间路由该项，但普通 OpenAI Responses 中转在反序列化 input[] 时会拒绝
+// 它（"unknown item type agent_message"）。中转无法复现代理路由语义，因此
+// 保留文本历史并改成 assistant 消息，同时丢弃仅用于传输的 author/recipient
+// 元数据。本函数只由 PrepareOpenAIResponsesBody 调用；原生 Codex 路径仍须
+// 原样透传该扩展类型。
 func normalizeResponsesAgentMessages(body map[string]any) bool {
 	if len(body) == 0 {
 		return false
@@ -942,9 +940,8 @@ func normalizeResponsesAgentMessages(body map[string]any) bool {
 			continue
 		}
 
-		// The collaboration envelope normally uses content.  A few client
-		// versions emitted text/output instead, so retain those fallbacks rather
-		// than turning an otherwise useful history item into an empty message.
+		// 协作信封通常使用 content 字段。部分客户端版本会改用 text/output，
+		// 因此保留这些回退字段，避免把有用的历史项变成空消息。
 		content, exists := item["content"]
 		if !exists || content == nil {
 			for _, key := range []string{"text", "output"} {
@@ -958,13 +955,11 @@ func normalizeResponsesAgentMessages(body map[string]any) bool {
 		if !exists || content == nil {
 			content = ""
 		}
-		// Codex collaboration messages commonly carry an opaque
-		// `encrypted_content` part alongside the visible envelope text.  That
-		// part is an internal transport value, not a public Responses content
-		// part, and forwarding it after changing the outer discriminator would
-		// simply move the deserialization failure one level deeper.  Remove it
-		// (and any nested encrypted_content fields) while retaining all visible
-		// content that can be represented by a standard message.
+		// Codex 协作消息通常会在可见信封文本旁携带不透明的
+		// `encrypted_content` 部分。该部分是内部传输值，不是公开 Responses
+		// 内容块；修改外层类型后继续转发它，只会让反序列化错误下沉一层。
+		// 这里移除它（以及嵌套的 encrypted_content 字段），同时保留标准消息
+		// 能表示的全部可见内容。
 		if cleaned, changed := normalizeResponsesAgentMessageContent(content); changed {
 			content = cleaned
 		}
@@ -982,12 +977,11 @@ func normalizeResponsesAgentMessages(body map[string]any) bool {
 	return modified
 }
 
-// normalizeResponsesAgentMessageContent removes Codex-only encrypted content
-// blocks from a converted agent message.  The helper intentionally handles
-// arbitrary nested arrays/maps because client versions have emitted both a
-// direct content-part array and wrapper objects around those parts.  The
-// returned value is always JSON-marshalable; an all-opaque content array is
-// represented by an empty string, which is accepted for an assistant message.
+// normalizeResponsesAgentMessageContent 从转换后的代理消息中移除 Codex 专用
+// 的加密内容块。该辅助函数有意处理任意嵌套数组/对象，因为不同客户端版本
+// 既可能直接发送内容块数组，也可能在外层对象中包装这些内容块。返回值始终
+// 可以进行 JSON 编码；如果内容数组全部是不透明数据，则用空字符串表示，
+// assistant 消息可以接受这种形式。
 func normalizeResponsesAgentMessageContent(content any) (any, bool) {
 	switch value := content.(type) {
 	case []any:
@@ -1019,9 +1013,9 @@ func normalizeResponsesAgentMessageContent(content any) (any, bool) {
 	}
 }
 
-// normalizeResponsesAgentMessageValue is the recursive implementation used by
-// normalizeResponsesAgentMessageContent.  keep=false marks a complete
-// encrypted_content part for omission from its containing array.
+// normalizeResponsesAgentMessageValue 是
+// normalizeResponsesAgentMessageContent 使用的递归实现。keep=false 表示
+// 当前项是完整的 encrypted_content 内容块，应从所属数组中省略。
 func normalizeResponsesAgentMessageValue(value any) (cleaned any, keep bool, changed bool) {
 	switch typed := value.(type) {
 	case []any:
@@ -2625,10 +2619,9 @@ func PrepareOpenAIResponsesBody(rawBody []byte) []byte {
 	normalizeResponsesStructuredOutputFormat(body)
 	normalizeResponsesFunctionTools(body)
 	normalizeResponsesToolChoice(body)
-	// Codex multi-agent replay uses the non-standard agent_message item.  An
-	// OpenAI-compatible relay does not know that discriminator, so lower it
-	// before normalizing its content parts (input_text -> output_text for the
-	// assistant role).
+	// Codex 多代理回放使用非标准的 agent_message 项。OpenAI 兼容中转不识别
+	// 该类型，因此先将其降级，再归一化内容块（assistant 角色下
+	// input_text -> output_text）。
 	normalizeResponsesAgentMessages(body)
 	normalizeResponsesContentPartTypes(body)
 	normalizeResponsesInputMessageContent(body)
