@@ -1507,6 +1507,8 @@ curl -X DELETE "http://localhost:8080/api/admin/account-groups/1?force=true" \
   "test_content": "hi",
   "test_concurrency": 50,
   "proxy_url": "",
+  "resin_url": "",
+  "resin_platform_name": "",
   "pg_max_conns": 50,
   "redis_pool_size": 30,
   "auto_clean_unauthorized": false,
@@ -1556,6 +1558,8 @@ curl -X DELETE "http://localhost:8080/api/admin/account-groups/1?force=true" \
   "test_content": "say pong",
   "test_concurrency": 50,
   "proxy_url": "http://proxy.example.com:8080",
+  "resin_url": "http://127.0.0.1:2260/my-token",
+  "resin_platform_name": "p1,p2,p3",
   "auto_clean_unauthorized": true,
   "auto_clean_rate_limited": false,
   "fast_scheduler_enabled": true,
@@ -1571,6 +1575,8 @@ curl -X DELETE "http://localhost:8080/api/admin/account-groups/1?force=true" \
 ```
 
 **响应:** 更新后的完整设置对象
+
+`resin_url` 与 `resin_platform_name` 同时包含有效值时启用 Resin。`resin_platform_name` 支持逗号分隔的全局平台列表；请求在完成账号调度后，使用同一条本地会话亲和键对列表做稳定哈希选择平台。一个平台保持原有单出口行为，清空任一字段立即关闭 Resin 并回退到原有路径。没有稳定会话键的旁路请求使用列表第一个平台。
 
 `codex_fingerprint_default_mode`（`off`/`device`/`session`/`full`，默认 `off`）是新导入或新建 Codex 账号默认盖上的设备指纹收敛档位，只影响之后新加入的账号；已有账号档位不变，入库后仍可在账号级单独调整。非法取值返回 HTTP 400。
 

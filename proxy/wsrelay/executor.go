@@ -139,7 +139,20 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 
 	// Resin 反向代理：改写 WS URL 为 Resin 反代地址
 	if proxy.IsResinEnabled() {
-		wsURL = proxy.BuildWebSocketURL(wsURL)
+		resinPlatform := proxy.ResinPlatformFromContext(ctx)
+		if resinPlatform == "" {
+			// Direct callers may not have gone through ExecuteRequest.  Reuse the
+			// same header/body/session fallback there, including the rule that a
+			// stateless per-request connection ID is not a routing key.
+			resinPlatform = proxy.ResinPlatformForRequest(ctx, sessionID, ginHeaders, requestBody, apiKey)
+		}
+		if resinPlatform != "" && proxy.ResinPlatformFromContext(ctx) == "" {
+			// Carry the decision into the manager's dial context as well. This
+			// keeps a hot Resin update or a retry from accidentally enabling the
+			// account-level proxy for a URL that was already rewritten to Resin.
+			ctx = proxy.WithResinPlatform(ctx, resinPlatform)
+		}
+		wsURL = proxy.BuildWebSocketURLForPlatform(wsURL, resinPlatform)
 	}
 
 	// 准备请求头
@@ -178,7 +191,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	var err2 error
 	acquireStart := time.Now()
 	if prevRespID := strings.TrimSpace(gjson.GetBytes(wsBody, "previous_response_id").String()); prevRespID != "" {
-		if pwc, ppr, slotKey := e.manager.AcquirePreferredConnection(prevRespID, account.ID(), apiKey); pwc != nil {
+		if pwc, ppr, slotKey := e.manager.AcquirePreferredConnectionForURL(prevRespID, account.ID(), apiKey, wsURL); pwc != nil {
 			wc, pr, poolSessionID = pwc, ppr, slotKey
 		}
 	}

@@ -3,6 +3,8 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net/http"
@@ -19,20 +21,102 @@ import (
 // ResinConfig 保存 Resin 代理池连接配置
 type ResinConfig struct {
 	BaseURL      string // 完整基础地址，例如 http://127.0.0.1:2260/my-token
-	PlatformName string // 平台标识，例如 codex2api
+	PlatformName string // 全局平台标识；支持逗号分隔，例如 codex2api 或 p1,p2,p3
+}
+
+// resinPlatformContextKey carries the platform selected for one request.  It
+// is deliberately request-scoped: the global config may be hot-updated while
+// an in-flight request (or retry) must continue using the same egress.
+type resinPlatformContextKey struct{}
+
+// WithResinPlatform pins a selected Resin platform to ctx.  A nil context is
+// normalized to context.Background so callers can use it in small helpers and
+// tests without special casing.
+func WithResinPlatform(ctx context.Context, platform string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, resinPlatformContextKey{}, strings.TrimSpace(platform))
+}
+
+// ResinPlatformFromContext returns the request-scoped platform, if one was
+// pinned by the ingress handler.
+func ResinPlatformFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	platform, _ := ctx.Value(resinPlatformContextKey{}).(string)
+	return strings.TrimSpace(platform)
+}
+
+// parseResinPlatforms normalizes the legacy single string field into a global
+// ordered platform set.  Commas are the documented separator; newlines and
+// semicolons are accepted as a convenience for environment/config files.
+// Empty entries are ignored and duplicates are removed while preserving the
+// first occurrence, so a malformed list cannot make one platform count twice.
+func parseResinPlatforms(raw string) []string {
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		switch r {
+		case ',', ';', '\n', '\r':
+			return true
+		default:
+			return false
+		}
+	})
+	if len(parts) == 0 {
+		return nil
+	}
+	platforms := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		platform := strings.TrimSpace(part)
+		if platform == "" {
+			continue
+		}
+		if _, exists := seen[platform]; exists {
+			continue
+		}
+		seen[platform] = struct{}{}
+		platforms = append(platforms, platform)
+	}
+	return platforms
+}
+
+func (cfg *ResinConfig) platformList() []string {
+	if cfg == nil {
+		return nil
+	}
+	return parseResinPlatforms(cfg.PlatformName)
 }
 
 // 全局 Resin 配置（原子指针，支持热更新）
 var resinCfg atomic.Pointer[ResinConfig]
 
-// SetResinConfig 设置全局 Resin 配置；cfg 为 nil 或 BaseURL 为空时禁用 Resin
+// SetResinConfig 设置全局 Resin 配置；cfg 为 nil、BaseURL 为空或平台列表为空时禁用 Resin。
+// PlatformName 继续使用原有字段承载多个全局平台（逗号分隔），从而兼容
+// 既有单平台配置和数据库 schema。
 func SetResinConfig(cfg *ResinConfig) {
-	if cfg != nil && strings.TrimSpace(cfg.BaseURL) != "" && strings.TrimSpace(cfg.PlatformName) != "" {
-		resinCfg.Store(cfg)
-		log.Printf("[Resin] 已启用: platform=%s url=%s", cfg.PlatformName, cfg.BaseURL)
-	} else {
+	if cfg == nil {
 		resinCfg.Store(nil)
+		return
 	}
+	baseURL := strings.TrimSpace(cfg.BaseURL)
+	platforms := parseResinPlatforms(cfg.PlatformName)
+	if baseURL == "" || len(platforms) == 0 {
+		resinCfg.Store(nil)
+		return
+	}
+
+	// Store an immutable snapshot rather than the caller-owned pointer. Keep the
+	// public struct's original two-field shape for source compatibility with
+	// external keyed and positional literals; the canonical comma-separated
+	// string is immutable and parsed on demand.
+	normalized := &ResinConfig{
+		BaseURL:      baseURL,
+		PlatformName: strings.Join(platforms, ","),
+	}
+	resinCfg.Store(normalized)
+	log.Printf("[Resin] 已启用: platforms=%s url=%s", strings.Join(platforms, ","), baseURL)
 }
 
 // GetResinConfig 获取当前 Resin 配置，未配置时返回 nil
@@ -43,6 +127,52 @@ func GetResinConfig() *ResinConfig {
 // IsResinEnabled 检查 Resin 代理池是否已启用
 func IsResinEnabled() bool {
 	return GetResinConfig() != nil
+}
+
+// ResinPlatformForSession returns the deterministic global platform assigned
+// to sessionKey.  With one platform it is exactly the legacy behavior.  An
+// empty key intentionally falls back to the first configured platform so
+// maintenance/anonymous requests do not hash a per-request random identity.
+func ResinPlatformForSession(sessionKey string) string {
+	cfg := GetResinConfig()
+	if cfg == nil {
+		return ""
+	}
+	platforms := cfg.platformList()
+	if len(platforms) == 0 {
+		return ""
+	}
+	if len(platforms) == 1 || strings.TrimSpace(sessionKey) == "" {
+		return platforms[0]
+	}
+
+	// SHA-256 is stable across processes/platforms and gives a sufficiently
+	// even distribution for the small platform sets this setting targets.
+	// Prefix the input to keep this routing hash domain-separated from other
+	// session derivations in the gateway.
+	sum := sha256.Sum256([]byte("codex2api:resin-platform:" + strings.TrimSpace(sessionKey)))
+	index := binary.BigEndian.Uint64(sum[:8]) % uint64(len(platforms))
+	return platforms[index]
+}
+
+// ResinPlatformForCredential maps a downstream credential to the same
+// deterministic seed used by ResolveSessionID when no explicit session key is
+// supplied.  It is useful to embedded HTTP/WS executors that receive the
+// credential as an argument rather than in the ingress header map.
+func ResinPlatformForCredential(credential string) string {
+	credential = strings.TrimSpace(credential)
+	if credential == "" {
+		return ResinPlatformForSession("")
+	}
+	return ResinPlatformForSession(DeriveStableSessionUUIDv7("codex2api:prompt-cache:" + credential))
+}
+
+func defaultResinPlatform(cfg *ResinConfig) string {
+	platforms := cfg.platformList()
+	if len(platforms) == 0 {
+		return ""
+	}
+	return platforms[0]
 }
 
 // resinMaintenanceTarget 为账号维护类旁路请求（wham 用量/重置券/订阅到期查询）
@@ -65,6 +195,13 @@ func resinMaintenanceTarget(account *auth.Account, targetURL string) (finalURL s
 //
 //	→ http://127.0.0.1:2260/my-token/codex2api/https/chatgpt.com/backend-api/codex/responses
 func BuildReverseProxyURL(targetURL string) string {
+	return BuildReverseProxyURLForPlatform(targetURL, "")
+}
+
+// BuildReverseProxyURLForPlatform is the platform-pinned URL builder used by
+// request paths.  An empty platform selects the first configured platform,
+// preserving the old single-platform helper semantics.
+func BuildReverseProxyURLForPlatform(targetURL, platformName string) string {
 	cfg := GetResinConfig()
 	if cfg == nil {
 		return targetURL
@@ -73,11 +210,17 @@ func BuildReverseProxyURL(targetURL string) string {
 	if err != nil {
 		return targetURL
 	}
+	if platformName = strings.TrimSpace(platformName); platformName == "" {
+		platformName = defaultResinPlatform(cfg)
+	}
+	if platformName == "" {
+		return targetURL
+	}
 	// <resin_base>/<platform>/<protocol>/<host><path+query>
 	base := strings.TrimRight(cfg.BaseURL, "/")
 	return fmt.Sprintf("%s/%s/%s/%s%s",
 		base,
-		cfg.PlatformName,
+		platformName,
 		parsed.Scheme,
 		parsed.Host,
 		parsed.RequestURI(),
@@ -91,12 +234,23 @@ func BuildReverseProxyURL(targetURL string) string {
 //
 // Resin 约定: 客户端到 Resin 只支持 ws://；路径中 protocol 填 http/https 对应目标 ws/wss
 func BuildWebSocketURL(targetURL string) string {
+	return BuildWebSocketURLForPlatform(targetURL, "")
+}
+
+// BuildWebSocketURLForPlatform is the platform-pinned WebSocket URL builder.
+func BuildWebSocketURLForPlatform(targetURL, platformName string) string {
 	cfg := GetResinConfig()
 	if cfg == nil {
 		return targetURL
 	}
 	parsed, err := url.Parse(targetURL)
 	if err != nil {
+		return targetURL
+	}
+	if platformName = strings.TrimSpace(platformName); platformName == "" {
+		platformName = defaultResinPlatform(cfg)
+	}
+	if platformName == "" {
 		return targetURL
 	}
 	resinParsed, err := url.Parse(cfg.BaseURL)
@@ -113,7 +267,7 @@ func BuildWebSocketURL(targetURL string) string {
 	return fmt.Sprintf("ws://%s%s/%s/%s/%s%s",
 		resinParsed.Host,
 		resinParsed.Path,
-		cfg.PlatformName,
+		platformName,
 		protocol,
 		parsed.Host,
 		parsed.RequestURI(),
@@ -139,7 +293,7 @@ func InheritLease(tempAccount, newAccount string) {
 
 	inheritURL := fmt.Sprintf("%s/api/v1/%s/actions/inherit-lease",
 		strings.TrimRight(cfg.BaseURL, "/"),
-		cfg.PlatformName,
+		defaultResinPlatform(cfg),
 	)
 
 	body := fmt.Sprintf(`{"parent_account":%q,"new_account":%q}`, tempAccount, newAccount)

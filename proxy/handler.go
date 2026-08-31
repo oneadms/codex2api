@@ -240,6 +240,18 @@ func sessionAffinityKey(sessionID string, apiKeyID int64) string {
 	return fmt.Sprintf("%s::api-key:%d", sessionID, apiKeyID)
 }
 
+// resinPlatformForSessionIdentity mirrors the account scheduler's affinity
+// scope.  Explicit/content/API-key-derived identities are stable and may be
+// hashed across the global Resin platform set.  The final random identity
+// fallback is deliberately collapsed to the default platform so a truly
+// anonymous request does not churn platforms on every attempt.
+func resinPlatformForSessionIdentity(identity requestSessionIdentity, apiKeyID int64) string {
+	if !identity.hasStableAffinity {
+		return ResinPlatformForSession("")
+	}
+	return ResinPlatformForSession(sessionAffinityKey(identity.affinityID, apiKeyID))
+}
+
 const codexTurnStateHeader = "X-Codex-Turn-State"
 
 // codexTurnContinuationToken follows the official Codex per-turn contract:
@@ -3711,6 +3723,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
+	resinPlatform := resinPlatformForSessionIdentity(sessionIdentity, apiKeyID)
 	turnContinuation := codexTurnContinuationToken(c.Request.Header, rawBody) != ""
 	_, turnHasBinding := h.store.SessionAffinityAccountID(affinityKey)
 	turnContinuationPinned := turnContinuation && turnHasBinding
@@ -3948,6 +3961,11 @@ func (h *Handler) Responses(c *gin.Context) {
 				lastUpstreamCancel()
 			}
 			upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
+			// Keep the platform chosen from the ingress affinity key for relay-style
+			// adapters too (notably Trae CN).  Their executors can otherwise derive a
+			// second platform from the translated body and lose the API-key-scoped
+			// hash used by this handler.
+			upstreamCtx = WithResinPlatform(upstreamCtx, resinPlatform)
 			lastUpstreamCancel = upstreamCancel
 			ttftGuard := (*firstTokenTimeoutGuard)(nil)
 			if isStream {
@@ -4721,6 +4739,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			lastUpstreamCancel()
 		}
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
+		upstreamCtx = WithResinPlatform(upstreamCtx, resinPlatform)
 		// 身份按 attempt 附加实际选中账号维度：account_* 门随重试换号重新匹配（issue #410）。
 		attemptIdentity := ruleIdentity.WithSelectedAccount(account, h.store)
 		upstreamCtx = WithPayloadRuleIdentity(upstreamCtx, attemptIdentity)
@@ -5242,6 +5261,7 @@ func (h *Handler) Responses(c *gin.Context) {
 							lastUpstreamCancel()
 						}
 						rctx, rcancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
+						rctx = WithResinPlatform(rctx, resinPlatform)
 						// A hidden round gets exactly one request on this account. Failures
 						// stay inside the fold and become a synthetic response.incomplete;
 						// encrypted reasoning must never participate in account rotation.
@@ -5705,6 +5725,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
+	resinPlatform := resinPlatformForSessionIdentity(sessionIdentity, apiKeyID)
 	reasoningEffort := extractReasoningEffort(rawBody)
 	serviceTier := extractServiceTier(rawBody)
 	if serviceTier != "" {
@@ -6094,11 +6115,12 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		upstreamEndpointLabel := "/v1/responses/compact"
 		var resp *http.Response
 		var reqErr error
+		requestCtx := WithResinPlatform(c.Request.Context(), resinPlatform)
 		if compactViaResponses {
 			upstreamEndpointLabel = "/v1/responses"
-			resp, reqErr = ExecuteRequest(c.Request.Context(), account, appendCompactionTriggerToResponsesBody(codexBody), upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, false)
+			resp, reqErr = ExecuteRequest(requestCtx, account, appendCompactionTriggerToResponsesBody(codexBody), upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, false)
 		} else {
-			resp, reqErr = ExecuteCompactRequest(c.Request.Context(), account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders)
+			resp, reqErr = ExecuteCompactRequest(requestCtx, account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders)
 		}
 		durationMs := int(time.Since(start).Milliseconds())
 
@@ -6579,6 +6601,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
+	resinPlatform := resinPlatformForSessionIdentity(sessionIdentity, apiKeyID)
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -6706,6 +6729,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			lastUpstreamCancel()
 		}
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
+		upstreamCtx = WithResinPlatform(upstreamCtx, resinPlatform)
 		upstreamCtx = WithPayloadRuleIdentity(upstreamCtx, attemptIdentity)
 		lastUpstreamCancel = upstreamCancel
 		ttftGuard := newFirstTokenTimeoutGuard(currentFirstTokenTimeout(), upstreamCancel)

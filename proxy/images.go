@@ -1438,6 +1438,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 
 	apiKeyID := requestAPIKeyID(c)
 	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, responsesBody)
+	resinPlatform := resinPlatformForSessionIdentity(sessionIdentity, apiKeyID)
 	// scope 并发位在选中账号后才能占，请求退出时统一释放（issue #439 v2）。
 	defer h.ReleaseAPIKeyScopeConcurrency(c)
 	continuousRetryPolicy := continuousRetryPolicyForCall(nil)
@@ -1551,8 +1552,9 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			deviceCfg = &DeviceProfileConfig{StabilizeDeviceProfile: false}
 		}
 
-		resp, reqErr := executeHTTPWithContinuousRetryKeepalive(c.Request.Context(), func() (*http.Response, error) {
-			return ExecuteRequest(c.Request.Context(), account, responsesBody, "", proxyURL, apiKey, deviceCfg, c.Request.Header.Clone(), false)
+		requestCtx := WithResinPlatform(c.Request.Context(), resinPlatform)
+		resp, reqErr := executeHTTPWithContinuousRetryKeepalive(requestCtx, func() (*http.Response, error) {
+			return ExecuteRequest(requestCtx, account, responsesBody, "", proxyURL, apiKey, deviceCfg, c.Request.Header.Clone(), false)
 		})
 		durationMs := int(time.Since(start).Milliseconds())
 		if reqErr != nil {

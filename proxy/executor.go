@@ -512,6 +512,44 @@ func resolveUpstreamSessionID(apiKeyID int64, upstreamSeed, explicitSessionID st
 	return IsolateCodexSessionID(apiKeyID, upstreamSeed)
 }
 
+// resinPlatformForExecutor resolves a platform for callers that invoke the
+// executor directly (outside the main Gin handlers).  Production handlers pin
+// the platform in ctx using the exact affinity key used by account dispatch;
+// the fallback here keeps tests, admin probes, and embedded callers compatible.
+func resinPlatformForExecutor(ctx context.Context, sessionID string, headers http.Header, body []byte, fallbackCredentials ...string) string {
+	if platform := ResinPlatformFromContext(ctx); platform != "" {
+		return platform
+	}
+	identity := resolveRequestSessionIdentity(headers, body)
+	if identity.hasStableAffinity {
+		return ResinPlatformForSession(identity.affinityID)
+	}
+	// A caller may provide an explicit upstream session directly without the
+	// original ingress headers.  Reuse it unless it is the one-shot WS ID that
+	// is generated solely for connection-pool isolation.
+	if candidate := strings.TrimSpace(sessionID); candidate != "" && !IsStatelessWebsocketSessionID(candidate) {
+		return ResinPlatformForSession(candidate)
+	}
+	// Embedded callers sometimes pass the downstream credential as the
+	// executor argument but do not copy it into headers.  Mirror the normal
+	// API-key fallback derivation so those calls do not collapse onto the
+	// default platform merely because their header map is nil.
+	if len(fallbackCredentials) > 0 {
+		if credential := strings.TrimSpace(fallbackCredentials[0]); credential != "" {
+			return ResinPlatformForCredential(credential)
+		}
+	}
+	return ResinPlatformForSession("")
+}
+
+// ResinPlatformForRequest exposes the executor fallback for integrations such
+// as the WS relay that sit outside this package's HTTP handlers.  The optional
+// credential is used only when the request has no stable session/affinity key;
+// an explicit context pin or request identity always wins.
+func ResinPlatformForRequest(ctx context.Context, sessionID string, headers http.Header, body []byte, fallbackCredential string) string {
+	return resinPlatformForExecutor(ctx, sessionID, headers, body, fallbackCredential)
+}
+
 // ExecuteRequest 向 Codex 上游发送请求
 // sessionID 可选，用于 prompt cache 会话绑定
 // useWebsocket 可选：未传时遵循全局强制 WS；传 true/false 时由调用方显式控制。
@@ -525,6 +563,15 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	resinPlatform := ""
+	if IsResinEnabled() {
+		resinPlatform = resinPlatformForExecutor(ctx, sessionID, headers, requestBody, apiKey)
+		if resinPlatform != "" && ResinPlatformFromContext(ctx) == "" {
+			// Pin the selection for the complete request, including retries and a
+			// possible WS→HTTP fallback.
+			ctx = WithResinPlatform(ctx, resinPlatform)
+		}
 	}
 	resetUpstreamUserAgentAudit(ctx)
 	resetWsAcquireAudit(ctx)
@@ -666,7 +713,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// Resin 反向代理模式：改写 URL，使用标准 HTTP 客户端
 	var client *http.Client
 	if IsResinEnabled() {
-		endpoint = BuildReverseProxyURL(endpoint)
+		endpoint = BuildReverseProxyURLForPlatform(endpoint, resinPlatform)
 		client = getResinHTTPClient(account)
 	} else {
 		client = getPooledClient(account, proxyURL)
@@ -912,6 +959,13 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	resinPlatform := ""
+	if IsResinEnabled() {
+		resinPlatform = resinPlatformForExecutor(ctx, sessionID, headers, requestBody, apiKey)
+		if resinPlatform != "" && ResinPlatformFromContext(ctx) == "" {
+			ctx = WithResinPlatform(ctx, resinPlatform)
+		}
+	}
 	resetUpstreamUserAgentAudit(ctx)
 	resetWsAcquireAudit(ctx)
 	responsesLite := gateResponsesLiteForModel(codexResponsesLiteRequested(requestBody, headers), requestBody)
@@ -961,7 +1015,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	// Resin 反向代理模式
 	var client *http.Client
 	if IsResinEnabled() {
-		endpoint = BuildReverseProxyURL(endpoint)
+		endpoint = BuildReverseProxyURLForPlatform(endpoint, resinPlatform)
 		client = getResinHTTPClient(account)
 	} else {
 		client = getPooledClient(account, proxyURL)
@@ -1226,6 +1280,10 @@ type requestSessionIdentity struct {
 	explicitUpstreamID    string
 	hasDownstreamAffinity bool
 	hasRequestFingerprint bool
+	// hasStableAffinity reports whether affinityID came from an explicit or
+	// deterministic source.  The final random fallback still lets the account
+	// scheduler serve the request, but must not be used to pin a Resin platform.
+	hasStableAffinity bool
 }
 
 // ResolveSessionID 从下游请求提取或生成 session ID
@@ -1251,20 +1309,20 @@ func resolveRequestSessionIdentity(headers http.Header, body []byte) requestSess
 	hasEngineFingerprint := EvaluateEngineFingerprint(headers, body, nil)
 	explicitID := ResolveExplicitSessionID(headers, body)
 	upstreamSeed := explicitID
+	contentSeed := ""
 	if upstreamSeed == "" {
-		upstreamSeed = deriveContentSessionSeed(body)
+		contentSeed = deriveContentSessionSeed(body)
+		upstreamSeed = contentSeed
 	}
+	apiKey := downstreamCredentialKey(headers)
+	apiKeyFallback := false
 	if upstreamSeed == "" {
 		// 基于下游用户的 API Key 生成确定性 cache key（参考 CLIProxyAPI codex_executor.go:621）
-		authHeader := ""
-		if headers != nil {
-			authHeader = headers.Get("Authorization")
-		}
-		apiKey := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
 		if apiKey != "" {
 			// 必须与 deterministicPromptCacheKey 用同一条派生：两处共享种子字符串，
 			// 产出不同就会让 HTTP 与 WS 路径对同一个 API Key 算出两个上游身份。
 			upstreamSeed = DeriveStableSessionUUIDv7("codex2api:prompt-cache:" + apiKey)
+			apiKeyFallback = true
 		}
 	}
 	if upstreamSeed == "" {
@@ -1274,6 +1332,7 @@ func resolveRequestSessionIdentity(headers http.Header, body []byte) requestSess
 	}
 
 	affinityID := upstreamSeed
+	hasStableAffinity := explicitID != "" || contentSeed != "" || apiKeyFallback
 	if localAffinityID := resolveDownstreamAffinityID(headers); localAffinityID != "" {
 		affinityID = localAffinityID
 		return requestSessionIdentity{
@@ -1282,6 +1341,7 @@ func resolveRequestSessionIdentity(headers http.Header, body []byte) requestSess
 			explicitUpstreamID:    explicitID,
 			hasDownstreamAffinity: true,
 			hasRequestFingerprint: true,
+			hasStableAffinity:     true,
 		}
 	}
 	return requestSessionIdentity{
@@ -1289,7 +1349,42 @@ func resolveRequestSessionIdentity(headers http.Header, body []byte) requestSess
 		upstreamSeed:          upstreamSeed,
 		explicitUpstreamID:    explicitID,
 		hasRequestFingerprint: hasEngineFingerprint,
+		hasStableAffinity:     hasStableAffinity,
 	}
+}
+
+// downstreamCredentialKey returns the stable credential presented by common
+// OpenAI/Anthropic ingress headers.  The authentication middleware accepts the
+// latter two forms as aliases for Authorization, so session/platform affinity
+// should do the same when a client omits an explicit session key.
+func downstreamCredentialKey(headers http.Header) string {
+	if headers == nil {
+		return ""
+	}
+	if raw := strings.TrimSpace(headers.Get("Authorization")); raw != "" {
+		if len(raw) >= len("Bearer ") && strings.EqualFold(raw[:len("Bearer ")], "Bearer ") {
+			if key := strings.TrimSpace(raw[len("Bearer "):]); key != "" {
+				return key
+			}
+		} else {
+			// Preserve the old behavior for non-Bearer Authorization values:
+			// they are still a deterministic credential candidate.
+			return raw
+		}
+	}
+	for _, name := range []string{"X-API-Key", "Anthropic-Auth-Token"} {
+		if key := strings.TrimSpace(headers.Get(name)); key != "" {
+			return key
+		}
+	}
+	// OpenAI's realtime/WebSocket clients may carry the credential in the
+	// subprotocol list instead of Authorization.  Authentication accepts this
+	// exact form on upgrade requests, so use the same stable value for platform
+	// affinity when no explicit session key is present.
+	if key := apiKeyFromWebSocketSubprotocol(headers.Get("Sec-WebSocket-Protocol")); key != "" {
+		return key
+	}
+	return ""
 }
 
 func resolveDownstreamAffinityID(headers http.Header) string {

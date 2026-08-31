@@ -10965,7 +10965,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			BaseURL:      resinURL,
 			PlatformName: resinPlatformName,
 		})
-		if strings.TrimSpace(resinURL) != "" && strings.TrimSpace(resinPlatformName) != "" {
+		// Use the normalized runtime state rather than raw field non-emptiness:
+		// a value such as ", ," contains text but has no usable platform and must
+		// leave OAuth refreshes on the direct path just like the inference path.
+		if proxy.IsResinEnabled() {
 			auth.ResinRequestDecorator = func(targetURL, accountID string) string {
 				return proxy.BuildReverseProxyURL(targetURL)
 			}

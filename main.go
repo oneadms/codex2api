@@ -296,16 +296,19 @@ func main() {
 		log.Printf("图片存储后端: %s", imgCfg.Backend)
 	}
 
-	// 4c. 初始化 Resin 粘性代理池
-	if strings.TrimSpace(settings.ResinURL) != "" && strings.TrimSpace(settings.ResinPlatformName) != "" {
-		proxy.SetResinConfig(&proxy.ResinConfig{
-			BaseURL:      settings.ResinURL,
-			PlatformName: settings.ResinPlatformName,
-		})
+	// 4c. 初始化 Resin 粘性代理池。始终应用一次规范化配置，确保历史上
+	// 只包含分隔符的 platform 字段不会把 OAuth 装饰器误留在启用状态。
+	proxy.SetResinConfig(&proxy.ResinConfig{
+		BaseURL:      settings.ResinURL,
+		PlatformName: settings.ResinPlatformName,
+	})
+	if proxy.IsResinEnabled() {
 		// 注入 Resin URL 装饰器到 auth 包（避免 auth → proxy 循环依赖）
 		auth.ResinRequestDecorator = func(targetURL, accountID string) string {
 			return proxy.BuildReverseProxyURL(targetURL)
 		}
+	} else {
+		auth.ResinRequestDecorator = nil
 	}
 
 	// 5. 初始化账号管理器

@@ -746,6 +746,26 @@ func TestAcquirePreferredConnection(t *testing.T) {
 	}
 }
 
+func TestAcquirePreferredConnectionForURLRejectsDifferentUpstream(t *testing.T) {
+	manager := NewManager()
+	t.Cleanup(manager.Stop)
+	manager.probeFunc = func(wc *WsConnection) bool { return true }
+
+	wc := newBoundTestConn(t, manager, 7, "base#0")
+	manager.BindResponseConn("resp_platform", wc, "base#0", 7, "key-A")
+
+	// A response_id bound on one Resin platform must not be reused when the
+	// current request resolves to another platform URL.
+	if got, pending, _ := manager.AcquirePreferredConnectionForURL("resp_platform", 7, "key-A", "ws://resin/token/p2/https/chatgpt.com/responses"); got != nil || pending != nil {
+		t.Fatal("preferred connection on a different upstream URL must be rejected")
+	}
+	got, pending, slot := manager.AcquirePreferredConnectionForURL("resp_platform", 7, "key-A", wc.URL)
+	if got != wc || pending == nil || slot != "base#0" {
+		t.Fatalf("preferred connection on the same upstream URL = (%p, %v, %q), want bound connection", got, pending, slot)
+	}
+	wc.session.RemovePendingRequest(pending.RequestID)
+}
+
 func TestAcquirePreferredConnectionProbeDoesNotBlockDifferentPoolKey(t *testing.T) {
 	manager := NewManager()
 	t.Cleanup(manager.Stop)

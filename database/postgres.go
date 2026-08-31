@@ -2226,7 +2226,7 @@ type SystemSettings struct {
 	SessionSlotBufferSeconds           int    // 会话并发槽缓冲时间，默认 10 秒，范围 1..60
 	ModelsListReadMaxBytes             int64  // 上游 /models 与 Codex 模型清单的最大读取字节数，默认 8 MiB
 	ResinURL                           string // Resin 代理池地址（含 Token），例如 http://127.0.0.1:2260/my-token
-	ResinPlatformName                  string // Resin 平台标识，例如 codex2api
+	ResinPlatformName                  string // Resin 全局平台标识（支持逗号分隔），例如 codex2api 或 p1,p2,p3
 	PromptFilterEnabled                bool
 	PromptFilterMode                   string
 	PromptFilterThreshold              int

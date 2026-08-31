@@ -398,11 +398,15 @@ func fetchTraeCNModels(ctx context.Context, store *auth.Store, account *auth.Acc
 	}
 
 	viaResin := IsResinEnabled() && account.ID() > 0
+	resinPlatform := ResinPlatformFromContext(ctx)
+	if viaResin && resinPlatform == "" {
+		resinPlatform = ResinPlatformForSession("")
+	}
 	client := getPooledClient(account, proxyOverride)
 	buildEndpoint := func(path string) string {
 		endpoint := strings.TrimRight(host, "/") + path
 		if viaResin {
-			return BuildReverseProxyURL(endpoint)
+			return BuildReverseProxyURLForPlatform(endpoint, resinPlatform)
 		}
 		return endpoint
 	}
@@ -1415,9 +1419,22 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 	// Store-independent fixtures with DBID=0 stay on their explicit proxy/direct
 	// route instead of collapsing unrelated identities into one shared "0" lease.
 	viaResin := IsResinEnabled() && account.ID() > 0
+	resinPlatform := ResinPlatformFromContext(ctx)
+	if viaResin && resinPlatform == "" {
+		sessionBody := inboundBody
+		if len(sessionBody) == 0 {
+			sessionBody = responsesBody
+		}
+		identity := resolveRequestSessionIdentity(downstreamHeaders, sessionBody)
+		if identity.hasStableAffinity {
+			resinPlatform = ResinPlatformForSession(identity.affinityID)
+		} else {
+			resinPlatform = ResinPlatformForSession("")
+		}
+	}
 	var client *http.Client
 	if viaResin {
-		endpoint = BuildReverseProxyURL(endpoint)
+		endpoint = BuildReverseProxyURLForPlatform(endpoint, resinPlatform)
 		client = getResinHTTPClient(account)
 	} else {
 		client = getPooledClient(account, proxyURL)

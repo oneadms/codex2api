@@ -1104,10 +1104,12 @@ func (m *Manager) createConnection(
 	dialerCopy := *m.dialer
 	dialer := &dialerCopy
 
-	// 配置代理（Resin 反代模式下跳过，URL 已包含 Resin 地址）
+	// 配置代理（Resin 反代模式下跳过，URL 已包含 Resin 地址）。请求上下文
+	// 里的平台标记比此刻再次读取全局开关更可靠：热更新可能正好发生在握手
+	// 期间，但本次请求的 URL 已经固定为 Resin 出口。
 	proxyURL := effectiveProxyURL(account, proxyOverride)
 
-	if !proxy.IsResinEnabled() && proxyURL != "" {
+	if proxy.ResinPlatformFromContext(ctx) == "" && !proxy.IsResinEnabled() && proxyURL != "" {
 		proxyURLParsed, err := url.Parse(proxyURL)
 		if err != nil {
 			return nil, fmt.Errorf("parse proxy URL failed: %w", err)
@@ -1231,8 +1233,9 @@ func (m *Manager) BindResponseConn(responseID string, wc *WsConnection, sessionK
 
 // lookupResponseConn 返回 response_id 绑定的连接及其池内 sessionKey。
 // 绑定过期、账号/API Key 不匹配、连接已断开/被重建（池内同 key 已非同一指针）
-// 时返回 nil。
-func (m *Manager) lookupResponseConn(responseID string, accountID int64, apiKey string) (*WsConnection, string) {
+// 时返回 nil。expectedURL 非空时还要求绑定连接就是当前请求要使用的上游 URL；
+// Resin 多平台分流会把平台编码进 URL，续链不能误取另一平台的连接。
+func (m *Manager) lookupResponseConn(responseID string, accountID int64, apiKey string, expectedURLs ...string) (*WsConnection, string) {
 	responseID = strings.TrimSpace(responseID)
 	if m == nil || responseID == "" {
 		return nil, ""
@@ -1250,6 +1253,13 @@ func (m *Manager) lookupResponseConn(responseID string, accountID int64, apiKey 
 	if !ok || binding.conn == nil {
 		return nil, ""
 	}
+	expectedURL := ""
+	if len(expectedURLs) > 0 {
+		expectedURL = strings.TrimSpace(expectedURLs[0])
+	}
+	if expectedURL != "" && binding.conn.URL != expectedURL {
+		return nil, ""
+	}
 	// 指针级校验：连接必须仍在池中且是同一条（防止复用已重建槽位的陈旧绑定）。
 	if v, exists := m.connections.Load(binding.conn.PoolKey); !exists || v != binding.conn {
 		return nil, ""
@@ -1265,7 +1275,19 @@ func (m *Manager) lookupResponseConn(responseID string, accountID int64, apiKey 
 // 调用方回退到常规 acquire 路径。忙时不等待：续链上下文虽在原连接，但排队会
 // 阻塞在前一个长响应后面，且该场景（同会话并发续链）极少，退化为缓存 miss 更稳。
 func (m *Manager) AcquirePreferredConnection(responseID string, accountID int64, apiKey string) (*WsConnection, *PendingRequest, string) {
-	wc, sessionKey := m.lookupResponseConn(responseID, accountID, apiKey)
+	return m.acquirePreferredConnection(responseID, accountID, apiKey, "")
+}
+
+// AcquirePreferredConnectionForURL is the URL-aware continuation variant.
+// It keeps the legacy AcquirePreferredConnection API intact for embedded callers
+// while preventing a response_id binding from crossing Resin platform/proxy
+// boundaries when a request has a different effective upstream URL.
+func (m *Manager) AcquirePreferredConnectionForURL(responseID string, accountID int64, apiKey, expectedURL string) (*WsConnection, *PendingRequest, string) {
+	return m.acquirePreferredConnection(responseID, accountID, apiKey, expectedURL)
+}
+
+func (m *Manager) acquirePreferredConnection(responseID string, accountID int64, apiKey, expectedURL string) (*WsConnection, *PendingRequest, string) {
+	wc, sessionKey := m.lookupResponseConn(responseID, accountID, apiKey, expectedURL)
 	if wc == nil {
 		return nil, nil, ""
 	}
