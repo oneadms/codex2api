@@ -355,8 +355,8 @@ func accountFilterForModel(model string) auth.AccountFilter {
 	}
 }
 
-// requestUpstreamChannel 返回当前请求下游 Key 的上游渠道限定（空=自动；TRAECN
-// 仅在显式 traecn 渠道下参与调度）。
+// requestUpstreamChannel 返回当前请求下游 Key 的上游渠道限定（空=自动；自动
+// 渠道按模型能力在各上游账号之间路由）。
 func requestUpstreamChannel(c *gin.Context) string {
 	row := apiKeyRowFromContext(c)
 	if row == nil {
@@ -389,12 +389,13 @@ func (h *Handler) applyUpstreamChannelFilter(c *gin.Context, effectiveModel stri
 			return filter == nil || filter(account)
 		}
 	}
-	// The automatic channel is intentionally limited to the providers that
-	// implement the shared Codex/Responses contract.  TRAECN is a separate
-	// provider surface and its adapter cannot represent several Codex input
-	// items (for example `additional_tools`).  Leaving it in the generic relay
-	// pool turns an exhausted Codex pool into a misleading 400 conversion error.
-	return excludeTraeCNAccountsFilter(filter)
+	// Automatic routing is already model-aware in the resolver that built
+	// `filter`. Do not add a second provider-specific gate here: doing so made
+	// the Trae `auto` sentinel behave differently from the explicit TRAECN
+	// channel and allowed the two admission paths to drift.  The resolver uses
+	// traeCNChannelAccountFilter for Trae accounts, so this branch only keeps
+	// the caller's existing endpoint/filter constraints intact.
+	return filter
 }
 
 // grokChannelAccountFilter 是 grok 渠道 Key 的账号过滤器：仅 Grok 账号；
@@ -439,10 +440,17 @@ func traeCNChannelAccountFilter(model string) auth.AccountFilter {
 		if account == nil || !account.IsTraeCNAPI() {
 			return false
 		}
+		routedModel := model
+		if mappedModel, ok := resolveAccountModelMapping(account, model); ok && mappedModel != "" {
+			routedModel = mappedModel
+		}
 		if model != "" && account.IsModelRateLimited(model) {
 			return false
 		}
-		return account.TraeCNSupportsModel(model)
+		if routedModel != "" && !strings.EqualFold(routedModel, model) && account.IsModelRateLimited(routedModel) {
+			return false
+		}
+		return account.TraeCNSupportsModel(routedModel)
 	}
 }
 
@@ -488,6 +496,13 @@ func accountFilterForResponsesModelResolver(effectiveModel string, allowCodexAcc
 			}
 			wireModel, supported := antigravityResolvePublicModelForAccount(account, effectiveModel)
 			return supported && !account.IsModelRateLimited(effectiveModel) && !account.IsModelRateLimited(wireModel)
+		}
+		if account.IsTraeCNAPI() {
+			// Keep TRAECN admission on the same channel filter used by an
+			// explicitly pinned TRAECN key. Account mappings are resolved inside
+			// the filter, and `auto` is intentionally treated as a valid Trae
+			// model sentinel.
+			return traeCNChannelAccountFilter(effectiveModel)(account)
 		}
 		if account.IsRelayStyle() {
 			routedModel := effectiveModel
@@ -1762,19 +1777,6 @@ func relayOnlyAccountFilter(inner auth.AccountFilter) auth.AccountFilter {
 func excludeAntigravityAccountsFilter(inner auth.AccountFilter) auth.AccountFilter {
 	return func(account *auth.Account) bool {
 		if account == nil || account.IsAntigravityAPI() {
-			return false
-		}
-		return inner == nil || inner(account)
-	}
-}
-
-// excludeTraeCNAccountsFilter keeps the automatic/Codex-compatible pool from
-// selecting TRAECN.  TRAECN requests must opt in through the explicit
-// `upstream_channel=traecn` API-key setting, where the dedicated adapter and
-// model validation are applied.
-func excludeTraeCNAccountsFilter(inner auth.AccountFilter) auth.AccountFilter {
-	return func(account *auth.Account) bool {
-		if account == nil || account.IsTraeCNAPI() {
 			return false
 		}
 		return inner == nil || inner(account)
@@ -8497,7 +8499,7 @@ func (h *Handler) supportedModelIDs(ctx context.Context) []string {
 			}
 			if account.IsTraeCNAPI() {
 				if len(declared) == 0 {
-					declared = auth.TraeCNDefaultModelIDs()
+					declared = account.TraeCNEffectiveModels()
 				}
 			}
 			for _, model := range declared {
@@ -8558,10 +8560,7 @@ func (h *Handler) traeCNChannelModels() []string {
 		if account == nil || !account.IsTraeCNAPI() {
 			continue
 		}
-		declared := account.TraeCNModels()
-		if len(declared) == 0 {
-			declared = auth.TraeCNDefaultModelIDs()
-		}
+		declared := account.TraeCNEffectiveModels()
 		for _, model := range declared {
 			model = strings.TrimSpace(model)
 			key := strings.ToLower(model)

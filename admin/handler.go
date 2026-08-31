@@ -1552,6 +1552,9 @@ type accountResponse struct {
 	AntigravitySyncWarning        string                      `json:"antigravity_sync_warning,omitempty"`
 	BaseURL                       string                      `json:"base_url,omitempty"`
 	TraeCNHost                    string                      `json:"traecn_host,omitempty"`
+	TraeCNUpstreamModels          []string                    `json:"traecn_upstream_models,omitempty"`
+	TraeCNModelAllowlist          []string                    `json:"traecn_model_allowlist,omitempty"`
+	TraeCNModelsSyncedAt          string                      `json:"traecn_models_synced_at,omitempty"`
 	BalanceQueryURL               string                      `json:"balance_query_url,omitempty"`
 	Models                        []string                    `json:"models,omitempty"`
 	ModelMapping                  string                      `json:"model_mapping,omitempty"`
@@ -4113,6 +4116,10 @@ type updateAccountModelsRequest struct {
 	Models []string `json:"models"`
 }
 
+func intersectTraeCNModelIDs(catalog, allowlist []string) []string {
+	return auth.TraeCNIntersectModelIDs(catalog, allowlist)
+}
+
 // UpdateAccountModels 设置 Codex OAuth 账号的支持模型白名单。
 // 空数组 = 清空白名单，放行全部模型；非空时调度器只会把白名单内模型的请求派给该账号。
 func (h *Handler) UpdateAccountModels(c *gin.Context) {
@@ -4159,8 +4166,8 @@ func (h *Handler) UpdateAccountModels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"models": models})
 }
 
-// SyncAccountUpstreamModels 用账号自身凭据实时拉取上游模型清单，
-// 返回该账号真实可用的模型 slug 列表。只读不落库，由管理端确认后再保存为白名单。
+// SyncAccountUpstreamModels 用账号自身凭据实时拉取并缓存上游模型清单，
+// 返回该账号真实可用的模型 slug 列表，供路由和测试模型选择使用。
 func (h *Handler) SyncAccountUpstreamModels(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
@@ -4174,6 +4181,40 @@ func (h *Handler) SyncAccountUpstreamModels(c *gin.Context) {
 	}
 	if account.IsAntigravityAPI() {
 		writeError(c, http.StatusBadRequest, "Antigravity 账号请使用专用配额刷新")
+		return
+	}
+	if account.IsTraeCNAPI() {
+		// TRAECN exposes an OpenAI-compatible /v1/models surface through the
+		// integrated trae-local-api wrapper (with a direct Trae detail endpoint
+		// fallback). Cache the provider catalog separately from the optional
+		// account allowlist, then publish the effective intersection immediately.
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
+		defer cancel()
+		models, fetchErr := proxy.FetchTraeCNModelsWithStore(ctx, h.store, account, h.store.ResolveProxyForAccount(account))
+		if fetchErr != nil {
+			writeError(c, http.StatusBadGateway, fmt.Sprintf("拉取 TRAECN 上游模型目录失败: %s", fetchErr.Error()))
+			return
+		}
+		allowlist := account.TraeCNConfiguredModelAllowlist()
+		// Always calculate against the freshly fetched catalog. Using the
+		// account's previous effective projection here could retain stale models
+		// when an upstream removes a config, and could race a concurrent refresh.
+		effective := intersectTraeCNModelIDs(models, allowlist)
+		syncedAt := time.Now().UTC()
+		updates := map[string]interface{}{
+			auth.TraeCNUpstreamModelsCredentialKey:    models,
+			auth.TraeCNModelAllowlistCredentialKey:    allowlist,
+			auth.TraeCNModelAllowlistSetCredentialKey: true,
+			auth.TraeCNModelsSyncedAtCredentialKey:    syncedAt.Format(time.RFC3339Nano),
+			"models":                                  effective,
+		}
+		if err := h.db.UpdateCredentials(ctx, id, updates); err != nil {
+			writeInternalError(c, err)
+			return
+		}
+		h.store.ApplyTraeCNUpstreamModelsWithAllowlist(id, models, syncedAt, allowlist)
+		h.db.InsertAccountEventAsync(id, "updated", "traecn_models_sync")
+		c.JSON(http.StatusOK, gin.H{"models": models, "effective_models": effective, "synced_at": syncedAt})
 		return
 	}
 	if account.IsGrokAPI() {
@@ -11858,10 +11899,7 @@ func (h *Handler) traeCNChannelModels() []string {
 		if account == nil || !account.IsTraeCNAPI() {
 			continue
 		}
-		declared := account.TraeCNModels()
-		if len(declared) == 0 {
-			declared = auth.TraeCNDefaultModelIDs()
-		}
+		declared := account.TraeCNEffectiveModels()
 		for _, model := range declared {
 			model = strings.TrimSpace(model)
 			key := strings.ToLower(model)

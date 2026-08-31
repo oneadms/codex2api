@@ -16,6 +16,120 @@ import (
 	"github.com/codex2api/database"
 )
 
+func TestTraeCNSupportsModelUsesDefaultCatalogWhenModelsAreUnset(t *testing.T) {
+	t.Parallel()
+	account := &Account{
+		UpstreamType: UpstreamTraeCN,
+		AccessToken:  "at",
+		RefreshToken: "rt",
+	}
+	if !account.TraeCNSupportsModel("deepseek-v3") {
+		t.Fatal("unset Models should use the built-in Trae CN catalog")
+	}
+	if account.TraeCNSupportsModel("gpt-5.6-sol") {
+		t.Fatal("unset Models must not act as a wildcard for Codex-only models")
+	}
+}
+
+func TestTraeCNSupportsModelHonorsExplicitModelsAllowlist(t *testing.T) {
+	t.Parallel()
+	account := &Account{
+		UpstreamType: UpstreamTraeCN,
+		AccessToken:  "at",
+		RefreshToken: "rt",
+		Models:       []string{"deepseek-v3"},
+	}
+	if !account.TraeCNSupportsModel("deepseek-v3") {
+		t.Fatal("declared Trae model should be accepted")
+	}
+	if account.TraeCNSupportsModel("glm-5.2") {
+		t.Fatal("explicit Models list should narrow the Trae catalog")
+	}
+	if account.TraeCNSupportsModel("deepseek-v4-pro") {
+		t.Fatal("a distinct public alias must not bypass the explicit deepseek-v3 allowlist")
+	}
+}
+
+func TestTraeCNSupportsModelMatchesPublicAliasToWireCatalog(t *testing.T) {
+	t.Parallel()
+	account := &Account{
+		UpstreamType:               UpstreamTraeCN,
+		AccessToken:                "at",
+		RefreshToken:               "rt",
+		TraeCNUpstreamModelCatalog: []string{"DeepSeek-V4-Pro", "auto"},
+	}
+	if !account.TraeCNSupportsModel("deepseek-v3") {
+		t.Fatal("public deepseek-v3 alias should match the synchronized wire catalog")
+	}
+	if !account.TraeCNSupportsModel("auto") {
+		t.Fatal("Trae auto sentinel should remain routable")
+	}
+	if account.TraeCNSupportsModel("gpt-5.6-sol") {
+		t.Fatal("Codex-only model must not match a Trae wire catalog")
+	}
+}
+
+func TestTraeCNAllowlistIntersectsByWireModel(t *testing.T) {
+	t.Parallel()
+	account := &Account{
+		UpstreamType:               UpstreamTraeCN,
+		AccessToken:                "at",
+		RefreshToken:               "rt",
+		TraeCNUpstreamModelCatalog: []string{"DeepSeek-V4-Pro", "glm-5.2"},
+	}
+	got := account.TraeCNModelsForAllowlist([]string{"deepseek-v3"})
+	if len(got) != 1 || got[0] != "DeepSeek-V4-Pro" {
+		t.Fatalf("wire-aware allowlist intersection = %#v", got)
+	}
+}
+
+func TestApplyTraeCNConfigCanClearLegacyAllowlist(t *testing.T) {
+	t.Parallel()
+	store := NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1})
+	defer store.Stop()
+	account := &Account{
+		DBID:         77,
+		UpstreamType: UpstreamTraeCN,
+		AccessToken:  "at",
+		RefreshToken: "rt",
+		Models:       []string{"deepseek-v3"},
+	}
+	store.AddAccount(account)
+	if !store.ApplyTraeCNConfig(account.DBID, TraeCNDefaultHost, nil, "") {
+		t.Fatal("ApplyTraeCNConfig returned false")
+	}
+	if got := account.TraeCNEffectiveModels(); len(got) != len(TraeCNDefaultModelIDs()) {
+		t.Fatalf("cleared allowlist still narrowed catalog: got %d models, want %d (%#v)", len(got), len(TraeCNDefaultModelIDs()), got)
+	}
+}
+
+func TestTraeCNExplicitEmptyAllowlistSurvivesFirstCatalogSync(t *testing.T) {
+	t.Parallel()
+	store := NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1})
+	defer store.Stop()
+	account := &Account{
+		DBID:         78,
+		UpstreamType: UpstreamTraeCN,
+		AccessToken:  "at",
+		RefreshToken: "rt",
+		// Legacy rows may still have the old effective projection.
+		Models: []string{"deepseek-v3"},
+	}
+	store.AddAccount(account)
+	if !store.ApplyTraeCNConfig(account.DBID, TraeCNDefaultHost, nil, "") {
+		t.Fatal("ApplyTraeCNConfig returned false")
+	}
+	if configured := account.TraeCNConfiguredModelAllowlist(); len(configured) != 0 {
+		t.Fatalf("explicit empty allowlist = %#v, want empty", configured)
+	}
+	if !store.ApplyTraeCNUpstreamModels(account.DBID, []string{"new-provider-model"}, time.Now().UTC()) {
+		t.Fatal("ApplyTraeCNUpstreamModels returned false")
+	}
+	if got := account.TraeCNEffectiveModels(); len(got) != 1 || got[0] != "new-provider-model" {
+		t.Fatalf("catalog after explicit clear = %#v, want new-provider-model", got)
+	}
+}
+
 func TestNormalizeTraeCNHost(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

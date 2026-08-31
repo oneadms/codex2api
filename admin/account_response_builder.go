@@ -160,6 +160,16 @@ func (h *Handler) buildAccountResponse(
 		customHeaders = headers
 		allowedAPIKeyIDs = row.GetCredentialInt64Slice("allowed_api_key_ids")
 	}
+	traeCNUpstreamModels := row.GetCredentialStringSlice(auth.TraeCNUpstreamModelsCredentialKey)
+	traeCNModelAllowlist := row.GetCredentialStringSlice(auth.TraeCNModelAllowlistCredentialKey)
+	// Pre-catalog rows stored the optional Trae narrowing list in the generic
+	// `models` field. Preserve it for the editor only when the dedicated fields
+	// have never been initialized; a synchronized catalog (or an explicit empty
+	// marker) must not be mistaken for a whitelist.
+	if isTraeCNAccount && !row.GetCredentialBool(auth.TraeCNModelAllowlistSetCredentialKey) &&
+		len(traeCNUpstreamModels) == 0 && len(traeCNModelAllowlist) == 0 {
+		traeCNModelAllowlist = row.GetCredentialStringSlice("models")
+	}
 	resp := accountResponse{
 		DetailLoaded:             includeDetails,
 		ID:                       row.ID,
@@ -197,6 +207,9 @@ func (h *Handler) buildAccountResponse(
 		AntigravitySyncWarning:   row.GetCredential("antigravity_sync_warning"),
 		BaseURL:                  baseURL,
 		TraeCNHost:               row.GetCredential("traecn_host"),
+		TraeCNUpstreamModels:     traeCNUpstreamModels,
+		TraeCNModelAllowlist:     traeCNModelAllowlist,
+		TraeCNModelsSyncedAt:     row.GetCredential(auth.TraeCNModelsSyncedAtCredentialKey),
 		BalanceQueryURL:          balanceQueryURL,
 		Models:                   row.GetCredentialStringSlice("models"),
 		ModelMapping:             modelMapping,

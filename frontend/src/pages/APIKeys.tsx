@@ -388,9 +388,9 @@ export default function APIKeys() {
     };
   }, [anyScopeBudget, keys.length]);
   // 模型下拉跟随渠道选择：grok / antigravity / traecn 只列各自上游目录，
-  // codex 只列 Codex 目录；auto 与后端自动路由保持一致，仅合并可由通用
-  // Responses 路径调度的 Codex、Grok 和 Antigravity 模型。TRAECN 是显式
-  // 渠道，必须选择 traecn 后才展示，避免模型下拉暗示 auto 会落到 TRAECN。
+  // codex 只列 Codex 目录；auto 与后端自动路由保持一致，合并各上游账号
+  // 声明/同步到的模型。`auto` 是 Trae CN 的模型哨兵，自动渠道会按模型
+  // 能力把它送入 TRAECN；Codex 专用模型仍只会匹配 Codex 账号。
   const grokModelOptions =
     data.grokModelOptions.length > 0
       ? data.grokModelOptions
@@ -417,7 +417,11 @@ export default function APIKeys() {
       if (channel === "codex") return modelOptions;
       const seen = new Set(modelOptions.map((m) => m.toLowerCase()));
       const merged = [...modelOptions];
-      for (const candidate of [...grokModelOptions, ...antigravityModelOptions]) {
+      for (const candidate of [
+        ...grokModelOptions,
+        ...antigravityModelOptions,
+        ...traeModelOptions,
+      ]) {
         if (!seen.has(candidate.toLowerCase())) {
           seen.add(candidate.toLowerCase());
           merged.push(candidate);

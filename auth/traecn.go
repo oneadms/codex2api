@@ -29,6 +29,21 @@ import (
 // ExchangeToken endpoint.
 const UpstreamTraeCN = "traecn"
 
+// Trae CN model credentials are kept separate from the generic `models`
+// field. `traecn_upstream_models` is the last catalog returned by the
+// provider; `traecn_model_allowlist` is an optional account-level narrowing
+// configured by an administrator. The generic `models` projection continues
+// to contain the effective routable intersection for older callers.
+const (
+	TraeCNUpstreamModelsCredentialKey = "traecn_upstream_models"
+	TraeCNModelAllowlistCredentialKey = "traecn_model_allowlist"
+	// TraeCNModelAllowlistSetCredentialKey distinguishes an administrator's
+	// explicit empty allowlist (follow the whole upstream catalog) from a
+	// legacy row that has never been migrated to the dedicated fields.
+	TraeCNModelAllowlistSetCredentialKey = "traecn_model_allowlist_set"
+	TraeCNModelsSyncedAtCredentialKey    = "traecn_models_synced_at"
+)
+
 const (
 	TraeCNDefaultHost = "https://trae-api-cn.mchost.guru"
 	// TraeCNAuthHost is the current Trae CN account/authentication domain.
@@ -126,8 +141,9 @@ func (a *Account) TraeCNUser() string {
 	return strings.TrimSpace(a.TraeCNUserID)
 }
 
-// TraeCNModels returns an optional per-account model whitelist. An empty list
-// deliberately means "provider decides" because Trae model catalogs change.
+// TraeCNModels returns the optional per-account model whitelist. An empty list
+// means that the account has not narrowed the provider catalog; callers that
+// need the effective routable catalog should use TraeCNEffectiveModels.
 func (a *Account) TraeCNModels() []string {
 	if a == nil {
 		return nil
@@ -138,6 +154,233 @@ func (a *Account) TraeCNModels() []string {
 		return nil
 	}
 	return cloneStringSlice(a.Models)
+}
+
+// TraeCNUpstreamModelIDs returns the last provider model catalog fetched for
+// this account. It is intentionally distinct from the administrator's
+// allowlist so a refresh can update provider capabilities without erasing a
+// local narrowing rule.
+func (a *Account) TraeCNUpstreamModelIDs() []string {
+	if a == nil {
+		return nil
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if !a.isTraeCNAPILocked() {
+		return nil
+	}
+	return cloneStringSlice(a.TraeCNUpstreamModelCatalog)
+}
+
+// TraeCNConfiguredModelAllowlist returns the optional administrator override.
+func (a *Account) TraeCNConfiguredModelAllowlist() []string {
+	if a == nil {
+		return nil
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if !a.isTraeCNAPILocked() {
+		return nil
+	}
+	if a.TraeCNModelAllowlistSet || len(a.TraeCNModelAllowlist) > 0 {
+		return cloneStringSlice(a.TraeCNModelAllowlist)
+	}
+	// Rows written by versions before the separate catalog fields used the
+	// generic Models value for the optional Trae narrowing list. Keep those rows
+	// compatible when no fetched catalog is present yet.
+	if len(a.TraeCNUpstreamModelCatalog) == 0 {
+		return traeCNLegacyModelAllowlist(a.Models)
+	}
+	return nil
+}
+
+// TraeCNModelCatalogSyncedAt returns the last successful upstream catalog
+// refresh timestamp.
+func (a *Account) TraeCNModelCatalogSyncedAt() time.Time {
+	if a == nil {
+		return time.Time{}
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.TraeCNModelCatalogSyncedAtValue
+}
+
+func traeCNModelIntersection(catalog, allowlist []string) []string {
+	catalog = normalizeModelList(catalog)
+	if len(allowlist) == 0 {
+		return catalog
+	}
+	allowlist = normalizeModelList(allowlist)
+	result := make([]string, 0, len(catalog))
+	for _, model := range catalog {
+		for _, allowed := range allowlist {
+			if traeCNModelsEquivalent(model, allowed) {
+				result = append(result, model)
+				break
+			}
+		}
+	}
+	return result
+}
+
+// traeCNModelListsEqual compares normalized model lists while treating nil
+// and empty slices as the same value. Catalogs are persisted in normalized
+// order, but normalizing here also makes cross-instance reloads insensitive to
+// casing/order differences produced by older rows.
+func traeCNModelListsEqual(left, right []string) bool {
+	left = normalizeModelList(left)
+	right = normalizeModelList(right)
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if !strings.EqualFold(left[index], right[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+// traeCNLegacyModelAllowlist recovers the optional allowlist used by rows
+// written before the dedicated Trae catalog fields existed. An untouched row
+// may have had the built-in catalog materialized into `models`; that projection
+// is not an administrator restriction and must not freeze future upstream
+// models after the first cross-instance reload.
+func traeCNLegacyModelAllowlist(models []string) []string {
+	models = normalizeModelList(models)
+	if len(models) == 0 || traeCNModelListsEqual(models, TraeCNDefaultModelIDs()) {
+		return nil
+	}
+	return models
+}
+
+// TraeCNIntersectModelIDs applies an optional Trae account allowlist to a
+// fetched provider catalog. It is exported for admin/API layers so they use
+// the same public-alias and wire-name matching rules as runtime routing.
+func TraeCNIntersectModelIDs(catalog, allowlist []string) []string {
+	return traeCNModelIntersection(catalog, allowlist)
+}
+
+// traeCNIsCanonicalPublicModelID distinguishes IDs emitted by the local
+// compatibility surface from provider config names.  The distinction matters
+// when applying an allowlist: selecting deepseek-v4-pro must not implicitly
+// enable every Claude alias that happens to share its wire config, while a
+// raw provider value such as DeepSeek-V4-Pro should still match that alias.
+func traeCNIsCanonicalPublicModelID(model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+	// Prefer an exact public spelling. Some provider wire IDs differ only by
+	// case from a public alias (for example DeepSeek-V4-Pro vs
+	// deepseek-v4-pro); checking exact public IDs first keeps the lower-case
+	// compatibility ID canonical while allowing the provider's exact casing to
+	// be recognized as a raw wire value below.
+	for publicID := range traeCNWireModels {
+		if publicID == model {
+			return true
+		}
+	}
+	for _, publicID := range TraeCNDefaultModelIDs() {
+		if publicID == model {
+			return true
+		}
+	}
+	// A synchronized catalog normally preserves the provider's casing. Treat
+	// an exact wire value as provider-owned even when its lower-case form is
+	// also a public compatibility ID.
+	for _, wire := range traeCNWireModels {
+		if wire == model {
+			return false
+		}
+	}
+	// Be lenient about casing for public IDs that do not collide with an exact
+	// provider spelling.
+	for publicID := range traeCNWireModels {
+		if strings.EqualFold(publicID, model) {
+			return true
+		}
+	}
+	for _, publicID := range TraeCNDefaultModelIDs() {
+		if strings.EqualFold(publicID, model) {
+			return true
+		}
+	}
+	return false
+}
+
+// traeCNModelsEquivalent compares a public compatibility ID and a provider
+// wire/config ID.  A synchronized catalog may contain either form depending
+// on which upstream endpoint answered; routing must remain stable across both.
+func traeCNModelsEquivalent(left, right string) bool {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if left == "" || right == "" {
+		return false
+	}
+	if strings.EqualFold(left, right) {
+		return true
+	}
+	// Two distinct public aliases may intentionally point at the same provider
+	// wire model. Treating them as interchangeable would let a narrow allowlist
+	// for one alias silently expose its siblings; only compare by wire name when
+	// at least one side is a raw/provider identifier.
+	if traeCNIsCanonicalPublicModelID(left) && traeCNIsCanonicalPublicModelID(right) {
+		return false
+	}
+	return strings.EqualFold(TraeCNWireModel(left), right) ||
+		strings.EqualFold(left, TraeCNWireModel(right))
+}
+
+// traeCNEffectiveModelsLocked computes the routable logical catalog. The
+// caller must hold a.mu for reading or writing.
+func traeCNEffectiveModelsLocked(a *Account) []string {
+	if a == nil || !a.isTraeCNAPILocked() {
+		return nil
+	}
+	catalog := cloneStringSlice(a.TraeCNUpstreamModelCatalog)
+	if len(catalog) == 0 {
+		catalog = TraeCNDefaultModelIDs()
+	}
+	allowlist := cloneStringSlice(a.TraeCNModelAllowlist)
+	if !a.TraeCNModelAllowlistSet && len(allowlist) == 0 && len(a.TraeCNUpstreamModelCatalog) == 0 {
+		// Backward compatibility for pre-catalog rows and in-memory fixtures.
+		allowlist = cloneStringSlice(a.Models)
+	}
+	return traeCNModelIntersection(catalog, allowlist)
+}
+
+// TraeCNEffectiveModels returns the logical model catalog used for dispatch.
+// It is the provider catalog (fetched from /v1/models when available, with a
+// built-in compatibility catalog as a cold-start fallback) narrowed by the
+// optional account allowlist.
+func (a *Account) TraeCNEffectiveModels() []string {
+	if a == nil {
+		return nil
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return traeCNEffectiveModelsLocked(a)
+}
+
+// TraeCNModelsForAllowlist calculates the effective catalog with a proposed
+// administrator allowlist without mutating the account. It is used by admin
+// handlers when persisting the legacy `models` projection alongside the new
+// Trae-specific catalog fields.
+func (a *Account) TraeCNModelsForAllowlist(allowlist []string) []string {
+	if a == nil {
+		return nil
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if !a.isTraeCNAPILocked() {
+		return nil
+	}
+	catalog := cloneStringSlice(a.TraeCNUpstreamModelCatalog)
+	if len(catalog) == 0 {
+		catalog = TraeCNDefaultModelIDs()
+	}
+	return traeCNModelIntersection(catalog, allowlist)
 }
 
 // EnsureTraeCNAccessToken refreshes an account lazily when its AT is missing
@@ -198,12 +441,9 @@ func (a *Account) TraeCNSupportsModel(model string) bool {
 	if model == "" {
 		return false
 	}
-	models := a.TraeCNModels()
-	if len(models) == 0 {
-		return true
-	}
+	models := a.TraeCNEffectiveModels()
 	for _, candidate := range models {
-		if strings.EqualFold(strings.TrimSpace(candidate), model) {
+		if traeCNModelsEquivalent(candidate, model) {
 			return true
 		}
 	}
@@ -226,8 +466,60 @@ func (s *Store) ApplyTraeCNConfig(dbID int64, host string, models []string, prox
 	}
 	account.mu.Lock()
 	account.TraeCNHost = normalizedHost
-	account.Models = normalizeModelList(models)
+	account.TraeCNModelAllowlist = normalizeModelList(models)
+	account.TraeCNModelAllowlistSet = true
+	// This is an explicit administrator update. Do not reuse the legacy
+	// `Models` projection as an implicit allowlist when the user clears it.
+	// Legacy fallback is only needed while loading an untouched pre-catalog row.
+	catalog := cloneStringSlice(account.TraeCNUpstreamModelCatalog)
+	if len(catalog) == 0 {
+		catalog = TraeCNDefaultModelIDs()
+	}
+	account.Models = traeCNModelIntersection(catalog, account.TraeCNModelAllowlist)
 	account.ProxyURL = strings.TrimSpace(proxyURL)
+	account.mu.Unlock()
+	return true
+}
+
+// ApplyTraeCNUpstreamModels publishes a freshly fetched provider catalog to
+// the in-memory account. The effective `Models` projection is recomputed so
+// routing and /v1/models observe the same catalog immediately.
+func (s *Store) ApplyTraeCNUpstreamModels(dbID int64, models []string, syncedAt time.Time) bool {
+	return s.applyTraeCNUpstreamModels(dbID, models, syncedAt, nil, false)
+}
+
+// ApplyTraeCNUpstreamModelsWithAllowlist publishes a provider catalog and an
+// explicit account allowlist atomically. The explicit setter is used during a
+// sync to migrate legacy rows whose generic `models` field represented the
+// allowlist before the Trae-specific credential fields were introduced.
+func (s *Store) ApplyTraeCNUpstreamModelsWithAllowlist(dbID int64, models []string, syncedAt time.Time, allowlist []string) bool {
+	return s.applyTraeCNUpstreamModels(dbID, models, syncedAt, allowlist, true)
+}
+
+func (s *Store) applyTraeCNUpstreamModels(dbID int64, models []string, syncedAt time.Time, allowlist []string, setAllowlist bool) bool {
+	if s == nil {
+		return false
+	}
+	account := s.FindByID(dbID)
+	if account == nil {
+		return false
+	}
+	normalized := normalizeModelList(models)
+	if len(normalized) == 0 {
+		return false
+	}
+	account.mu.Lock()
+	if !account.isTraeCNAPILocked() {
+		account.mu.Unlock()
+		return false
+	}
+	account.TraeCNUpstreamModelCatalog = normalized
+	if setAllowlist {
+		account.TraeCNModelAllowlist = normalizeModelList(allowlist)
+		account.TraeCNModelAllowlistSet = true
+	}
+	account.TraeCNModelCatalogSyncedAtValue = syncedAt.UTC()
+	account.Models = traeCNEffectiveModelsLocked(account)
 	account.mu.Unlock()
 	return true
 }
@@ -886,9 +1178,53 @@ func (s *Store) reloadTraeCNCredentialsAfterFamilyLease(ctx context.Context, acc
 	}
 	refreshToken := strings.TrimSpace(row.GetCredential("refresh_token"))
 	accessToken := strings.TrimSpace(row.GetCredential("access_token"))
+	rowHost := strings.TrimSpace(row.GetCredential("traecn_host"))
+	rowUserID := strings.TrimSpace(row.GetCredential("traecn_user_id"))
+	rowAccountID := strings.TrimSpace(row.GetCredential("account_id"))
+	if rowAccountID == "" {
+		rowAccountID = rowUserID
+	}
+	rowEmail := strings.TrimSpace(row.GetCredential("email"))
+	rowPlanType := strings.TrimSpace(row.GetCredential("plan_type"))
+	if rowPlanType == "" {
+		rowPlanType = "traecn"
+	}
+	rowModels := normalizeModelList(row.GetCredentialStringSlice("models"))
+	rowUpstreamModels := normalizeModelList(row.GetCredentialStringSlice(TraeCNUpstreamModelsCredentialKey))
+	rowAllowlist := normalizeModelList(row.GetCredentialStringSlice(TraeCNModelAllowlistCredentialKey))
+	rowAllowlistSet := row.GetCredentialBool(TraeCNModelAllowlistSetCredentialKey) || len(rowAllowlist) > 0
+	rowSyncedAt := time.Time{}
+	if raw := strings.TrimSpace(row.GetCredential(TraeCNModelsSyncedAtCredentialKey)); raw != "" {
+		if parsed, parseErr := time.Parse(time.RFC3339Nano, raw); parseErr == nil {
+			rowSyncedAt = parsed.UTC()
+		}
+	}
+	// Rows written before the dedicated Trae catalog fields existed used the
+	// generic models field as an optional allowlist. Keep that migration rule in
+	// the cross-instance reload path too; otherwise a lease hand-off could
+	// silently widen or empty the account's effective model catalog.
+	if !rowAllowlistSet && len(rowUpstreamModels) == 0 && len(rowAllowlist) == 0 {
+		rowAllowlist = traeCNLegacyModelAllowlist(rowModels)
+	}
+	rowEffectiveModels := rowUpstreamModels
+	if len(rowEffectiveModels) == 0 {
+		rowEffectiveModels = TraeCNDefaultModelIDs()
+	}
+	rowEffectiveModels = traeCNModelIntersection(rowEffectiveModels, rowAllowlist)
 	account.mu.RLock()
 	currentGeneration := account.CredentialGeneration
 	currentFamilyID := strings.TrimSpace(account.CredentialFamilyID)
+	currentHost := strings.TrimSpace(account.TraeCNHost)
+	currentUserID := strings.TrimSpace(account.TraeCNUserID)
+	currentAccountID := strings.TrimSpace(account.AccountID)
+	currentEmail := strings.TrimSpace(account.Email)
+	currentPlanType := strings.TrimSpace(account.PlanType)
+	currentModels := cloneStringSlice(account.Models)
+	currentUpstreamModels := cloneStringSlice(account.TraeCNUpstreamModelCatalog)
+	currentAllowlist := cloneStringSlice(account.TraeCNModelAllowlist)
+	currentAllowlistSet := account.TraeCNModelAllowlistSet
+	currentSyncedAt := account.TraeCNModelCatalogSyncedAtValue
+	currentProxyURL := strings.TrimSpace(account.ProxyURL)
 	account.mu.RUnlock()
 	rowGeneration := row.CredentialGeneration
 	if rowGeneration <= 0 {
@@ -899,7 +1235,18 @@ func (s *Store) reloadTraeCNCredentialsAfterFamilyLease(ctx context.Context, acc
 		accessToken != strings.TrimSpace(lockedAccessToken) ||
 		rowGeneration != currentGeneration ||
 		(rowFamilyID != "" && rowFamilyID != currentFamilyID)
-	if !changed {
+	projectionChanged := rowHost != currentHost ||
+		rowUserID != currentUserID ||
+		rowAccountID != currentAccountID ||
+		rowEmail != currentEmail ||
+		rowPlanType != currentPlanType ||
+		!traeCNModelListsEqual(rowEffectiveModels, currentModels) ||
+		!traeCNModelListsEqual(rowUpstreamModels, currentUpstreamModels) ||
+		!traeCNModelListsEqual(rowAllowlist, currentAllowlist) ||
+		rowAllowlistSet != currentAllowlistSet ||
+		!rowSyncedAt.Equal(currentSyncedAt) ||
+		strings.TrimSpace(row.ProxyURL) != currentProxyURL
+	if !changed && !projectionChanged {
 		return false, false, nil
 	}
 	expiresAt := parseOAuthCredentialExpiry(row.GetCredential("expires_at"))
@@ -911,18 +1258,23 @@ func (s *Store) reloadTraeCNCredentialsAfterFamilyLease(ctx context.Context, acc
 	account.RefreshToken = refreshToken
 	account.AccessToken = accessToken
 	account.ExpiresAt = expiresAt
-	account.TraeCNHost = strings.TrimSpace(row.GetCredential("traecn_host"))
-	account.TraeCNUserID = strings.TrimSpace(row.GetCredential("traecn_user_id"))
-	account.AccountID = strings.TrimSpace(row.GetCredential("account_id"))
+	account.TraeCNHost = rowHost
+	account.TraeCNUserID = rowUserID
+	account.AccountID = rowAccountID
 	if account.AccountID == "" {
 		account.AccountID = account.TraeCNUserID
 	}
-	account.Email = strings.TrimSpace(row.GetCredential("email"))
-	account.PlanType = strings.TrimSpace(row.GetCredential("plan_type"))
-	if account.PlanType == "" {
-		account.PlanType = "traecn"
-	}
-	account.Models = normalizeModelList(row.GetCredentialStringSlice("models"))
+	account.Email = rowEmail
+	account.PlanType = rowPlanType
+	account.TraeCNUpstreamModelCatalog = rowUpstreamModels
+	account.TraeCNModelAllowlist = rowAllowlist
+	account.TraeCNModelAllowlistSet = rowAllowlistSet
+	account.TraeCNModelCatalogSyncedAtValue = rowSyncedAt
+	account.Models = rowModels
+	// Recompute the legacy projection from the same catalog/allowlist pair used
+	// by normal account construction. This keeps routing and admin output in
+	// sync after a lease owner updates the catalog in another process.
+	account.Models = traeCNEffectiveModelsLocked(account)
 	account.ProxyURL = strings.TrimSpace(row.ProxyURL)
 	account.CredentialGeneration = rowGeneration
 	if rowFamilyID != "" {
@@ -930,7 +1282,7 @@ func (s *Store) reloadTraeCNCredentialsAfterFamilyLease(ctx context.Context, acc
 	}
 	account.mu.Unlock()
 	usable = accessToken != "" && (expiresAt.IsZero() || time.Until(expiresAt) > TraeCNAccessTokenGrace)
-	return true, usable, nil
+	return changed, usable, nil
 }
 
 // ensureTraeCNFamilyLease obtains the stable credential-family lease used to

@@ -470,6 +470,10 @@ func (s *Store) applyPersistentAccountSnapshot(dst, src *Account, enabled bool) 
 	routingChanged := dst.PlanType != src.PlanType ||
 		dst.UpstreamType != src.UpstreamType ||
 		dst.GrokLivePlan != src.GrokLivePlan ||
+		!slices.Equal(dst.Models, src.Models) ||
+		!slices.Equal(dst.TraeCNUpstreamModelCatalog, src.TraeCNUpstreamModelCatalog) ||
+		!slices.Equal(dst.TraeCNModelAllowlist, src.TraeCNModelAllowlist) ||
+		dst.TraeCNModelAllowlistSet != src.TraeCNModelAllowlistSet ||
 		!slices.Equal(dst.GroupIDs, src.GroupIDs) ||
 		!slices.Equal(dst.AllowedAPIKeyIDs, src.AllowedAPIKeyIDs)
 	dst.RefreshToken = src.RefreshToken
@@ -479,12 +483,18 @@ func (s *Store) applyPersistentAccountSnapshot(dst, src *Account, enabled bool) 
 	dst.AccountID = src.AccountID
 	dst.Email = src.Email
 	dst.PlanType = src.PlanType
+	dst.TraeCNHost = src.TraeCNHost
+	dst.TraeCNUserID = src.TraeCNUserID
 	dst.ProxyURL = src.ProxyURL
 	dst.CustomHeaders = cloneStringMap(src.CustomHeaders)
 	dst.UpstreamType = src.UpstreamType
 	dst.BaseURL = src.BaseURL
 	dst.APIKey = src.APIKey
 	dst.Models = cloneStringSlice(src.Models)
+	dst.TraeCNUpstreamModelCatalog = cloneStringSlice(src.TraeCNUpstreamModelCatalog)
+	dst.TraeCNModelAllowlist = cloneStringSlice(src.TraeCNModelAllowlist)
+	dst.TraeCNModelAllowlistSet = src.TraeCNModelAllowlistSet
+	dst.TraeCNModelCatalogSyncedAtValue = src.TraeCNModelCatalogSyncedAtValue
 	dst.ModelMapping = src.ModelMapping
 	dst.CodexClientMetadataMode = src.CodexClientMetadataMode
 	dst.CodexFingerprintMode = src.CodexFingerprintMode

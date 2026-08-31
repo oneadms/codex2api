@@ -1,6 +1,9 @@
 package auth
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // traeCNWireModels mirrors the current Trae desktop model catalog. Public
 // compatibility aliases stay visible to clients, while llm_utils_chat receives
@@ -49,6 +52,33 @@ func TraeCNWireModel(model string) string {
 		return mapped
 	}
 	return model
+}
+
+// TraeCNPublicModelIDsForWire returns the public compatibility IDs that map to
+// a concrete Trae config/model name.  The upstream detail endpoint exposes
+// config_name values, while clients use the IDs from the local OpenAI surface;
+// keeping this reverse lookup next to TraeCNWireModel prevents those two
+// catalogs from drifting apart.
+func TraeCNPublicModelIDsForWire(wire string) []string {
+	wire = strings.TrimSpace(wire)
+	if wire == "" {
+		return nil
+	}
+	ids := make([]string, 0)
+	seen := make(map[string]struct{})
+	for publicID, mappedWire := range traeCNWireModels {
+		if !strings.EqualFold(strings.TrimSpace(mappedWire), wire) {
+			continue
+		}
+		key := strings.ToLower(publicID)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		ids = append(ids, publicID)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // TraeCNDefaultModelIDs is the built-in logical model catalog exposed by the

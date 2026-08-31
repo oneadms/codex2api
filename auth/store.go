@@ -137,9 +137,16 @@ type Account struct {
 	GrokPrincipalType string
 	GrokPrincipalID   string
 	// Trae CN OAuth metadata (upstream_type=traecn).
-	TraeCNHost    string
-	TraeCNUserID  string
-	traeRefreshMu sync.Mutex
+	TraeCNHost   string
+	TraeCNUserID string
+	// TraeCNUpstreamModels is the last model catalog fetched from the Trae
+	// upstream. TraeCNModelAllowlist is an optional per-account narrowing list;
+	// Models is kept as the effective (routable) projection for legacy callers.
+	TraeCNUpstreamModelCatalog      []string
+	TraeCNModelAllowlist            []string
+	TraeCNModelAllowlistSet         bool
+	TraeCNModelCatalogSyncedAtValue time.Time
+	traeRefreshMu                   sync.Mutex
 	// CredentialGeneration fences every asynchronous Grok observation and OAuth
 	// refresh result. CredentialFamilyID is stable across AT/RT rotation and is
 	// safe to use as a cross-instance lease key (it contains no credential).
@@ -5179,6 +5186,17 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		if account.PlanType == "" {
 			account.PlanType = "traecn"
 		}
+		account.TraeCNUpstreamModelCatalog = normalizeModelList(row.GetCredentialStringSlice(TraeCNUpstreamModelsCredentialKey))
+		account.TraeCNModelAllowlist = normalizeModelList(row.GetCredentialStringSlice(TraeCNModelAllowlistCredentialKey))
+		account.TraeCNModelAllowlistSet = row.GetCredentialBool(TraeCNModelAllowlistSetCredentialKey) || len(account.TraeCNModelAllowlist) > 0
+		if synced := strings.TrimSpace(row.GetCredential(TraeCNModelsSyncedAtCredentialKey)); synced != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, synced); err == nil {
+				account.TraeCNModelCatalogSyncedAtValue = parsed.UTC()
+			}
+		}
+		account.mu.Lock()
+		account.Models = traeCNEffectiveModelsLocked(account)
+		account.mu.Unlock()
 		if at != "" {
 			account.HealthTier = HealthTierHealthy
 		}
@@ -8771,7 +8789,7 @@ func (s *Store) GetAPIKeyAllowedGroups(apiKeyID int64) []int64 {
 	return cloneInt64Slice(s.apiKeyAllowedGroups[apiKeyID])
 }
 
-// SetAPIKeyUpstreamChannel 设置某 API Key 的上游渠道限定（codex/grok/antigravity/traecn，空=自动；TRAECN 不参与自动路由）。
+// SetAPIKeyUpstreamChannel 设置某 API Key 的上游渠道限定（codex/grok/antigravity/traecn，空=自动；自动按模型能力路由）。
 // 仅在取值真正变化时重建调度器。
 func (s *Store) SetAPIKeyUpstreamChannel(apiKeyID int64, channel string) {
 	if apiKeyID <= 0 {
@@ -8798,8 +8816,7 @@ func (s *Store) SetAPIKeyUpstreamChannel(apiKeyID int64, channel string) {
 	s.rebuildFastScheduler()
 }
 
-// APIKeyUpstreamChannel 返回某 API Key 的上游渠道限定（空=自动；TRAECN
-// 需显式选择 traecn）。
+// APIKeyUpstreamChannel 返回某 API Key 的上游渠道限定（空=自动，按模型能力路由）。
 func (s *Store) APIKeyUpstreamChannel(apiKeyID int64) string {
 	if s == nil || apiKeyID <= 0 {
 		return ""
@@ -8863,7 +8880,7 @@ func (s *Store) APIKeyAllowsAccount(apiKeyID int64, acc *Account) bool {
 	channel := s.apiKeyUpstreamChannels[apiKeyID]
 	s.apiKeyGroupsMu.RUnlock()
 	// 渠道限定是硬门：每个显式渠道只允许对应上游账号；codex 还排除 Grok、
-	// Antigravity 与 TRAECN。空渠道由 proxy 层按模型路由，TRAECN 不参与自动池。
+	// Antigravity 与 TRAECN。空渠道由 proxy 层按模型能力路由。
 	switch channel {
 	case database.UpstreamChannelGrok:
 		if !acc.IsGrokAPI() {

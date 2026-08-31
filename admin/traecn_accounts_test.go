@@ -153,3 +153,100 @@ func TestAddTraeCNAccountFirstExchangeUsesInsertedIDForResin(t *testing.T) {
 		t.Fatalf("persisted credentials = %q/%q", row.GetCredential("access_token"), row.GetCredential("refresh_token"))
 	}
 }
+
+func TestSyncTraeCNUpstreamModelsPersistsCatalogAndLegacyAllowlist(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
+			// Direct Trae hosts do not expose the wrapper's OpenAI model endpoint.
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/models/detail":
+			// This fixture emulates a raw Trae host; the wrapper-compatible
+			// detail route is intentionally unavailable and should fall back.
+			http.NotFound(w, r)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/ide/v1/get_detail_param":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+  "config_info_list": [
+    {"config_name":"DeepSeek-V4-Pro","usage":"chat_completion","config_switch":true},
+    {"config_name":"glm-5.2_advisor_doubao","usage":"chat_completion","config_switch":true},
+    {"config_name":"summary","usage":"summary","config_switch":true}
+  ]
+}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+
+	db := newTestAdminDB(t)
+	ctx := context.Background()
+	id, err := db.InsertAccountWithUpstream(ctx, "trae-sync", "trae", auth.UpstreamTraeCN, map[string]any{
+		"upstream_type": auth.UpstreamTraeCN,
+		"access_token":  "AT",
+		"refresh_token": "RT",
+		"expires_at":    time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		"traecn_host":   provider.URL,
+		// This emulates a row created before the dedicated allowlist field.
+		"models": []string{"deepseek-v3"},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 1})
+	t.Cleanup(store.Stop)
+	if err := store.LoadAccountByID(ctx, id); err != nil {
+		t.Fatalf("LoadAccountByID: %v", err)
+	}
+	handler := &Handler{db: db, store: store}
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Params = gin.Params{{Key: "id", Value: strconv.FormatInt(id, 10)}}
+	ginContext.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/"+strconv.FormatInt(id, 10)+"/models/sync-upstream", nil)
+	handler.SyncAccountUpstreamModels(ginContext)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Models          []string `json:"models"`
+		EffectiveModels []string `json:"effective_models"`
+		SyncedAt        string   `json:"synced_at"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !containsStringFold(response.Models, "deepseek-v3") || !containsStringFold(response.Models, "auto") {
+		t.Fatalf("synced catalog = %#v", response.Models)
+	}
+	if len(response.EffectiveModels) != 1 || !containsStringFold(response.EffectiveModels, "deepseek-v3") {
+		t.Fatalf("effective models = %#v, want legacy allowlist intersection", response.EffectiveModels)
+	}
+	if response.SyncedAt == "" {
+		t.Fatal("sync response omitted synced_at")
+	}
+	row, err := db.GetAccountByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsStringFold(row.GetCredentialStringSlice(auth.TraeCNUpstreamModelsCredentialKey), "deepseek-v3") {
+		t.Fatalf("persisted upstream catalog = %#v", row.GetCredentialStringSlice(auth.TraeCNUpstreamModelsCredentialKey))
+	}
+	if allowlist := row.GetCredentialStringSlice(auth.TraeCNModelAllowlistCredentialKey); len(allowlist) != 1 || !containsStringFold(allowlist, "deepseek-v3") {
+		t.Fatalf("persisted allowlist = %#v", allowlist)
+	}
+	runtime := store.FindByID(id)
+	if runtime == nil || !runtime.TraeCNSupportsModel("deepseek-v3") || runtime.TraeCNSupportsModel("glm-5.2") {
+		t.Fatalf("runtime catalog/allowlist mismatch: %#v", runtime)
+	}
+}
+
+func containsStringFold(values []string, want string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(want)) {
+			return true
+		}
+	}
+	return false
+}

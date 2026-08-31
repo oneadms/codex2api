@@ -94,6 +94,47 @@ func TestIsTraeCNRateLimitErrorRecognizesApplicationLevel4011(t *testing.T) {
 	}
 }
 
+func TestFetchTraeCNModelsUsesWrapperDetailEndpoint(t *testing.T) {
+	t.Parallel()
+	var detailCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			http.NotFound(w, r)
+		case "/v1/models/detail":
+			detailCalls++
+			if r.URL.Query().Get("function") != "chat_v3" {
+				t.Errorf("detail function = %q, want chat_v3", r.URL.Query().Get("function"))
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer wrapper-key" {
+				t.Errorf("detail authorization = %q, want wrapper key", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"config_info_list":[{"config_name":"DeepSeek-V4-Pro","usage":"chat_completion","config_switch":true}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	account := &auth.Account{
+		DBID:         0,
+		UpstreamType: auth.UpstreamTraeCN,
+		AccessToken:  "wrapper-key",
+		ExpiresAt:    time.Now().Add(time.Hour),
+		TraeCNHost:   server.URL,
+	}
+	models, err := FetchTraeCNModels(t.Context(), account, "")
+	if err != nil {
+		t.Fatalf("FetchTraeCNModels() error = %v", err)
+	}
+	if detailCalls != 1 {
+		t.Fatalf("detail calls = %d, want 1", detailCalls)
+	}
+	if len(models) != 3 || !containsFold(models, "deepseek-v3") || !containsFold(models, "deepseek-v4-pro") || !containsFold(models, "auto") {
+		t.Fatalf("models = %#v, want public aliases plus auto", models)
+	}
+}
+
 func canonicalSSEEvents(t *testing.T, raw []byte) []gjson.Result {
 	t.Helper()
 	lines := strings.Split(string(raw), "\n")
@@ -312,6 +353,45 @@ func TestTraeCNWireModelCatalogMatchesExpectedAliases(t *testing.T) {
 	body, _, err := buildTraeCNRequestBody([]byte(`{"model":"auto","input":"hi"}`))
 	if err != nil || !json.Valid(body) {
 		t.Fatalf("auto request = %s, err=%v", body, err)
+	}
+}
+
+func TestExtractTraeCNModelIDsFromConfigInfoList(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{
+  "config_info_list": [
+    {"config_name":"DeepSeek-V4-Pro","usage":"chat_completion","config_switch":true},
+    {"config_name":"Doubao_1_6","usage":"chat_completion","config_switch":true},
+    {"config_name":"Doubao-Seed-Code","usage":"chat_completion","config_switch":true},
+    {"config_name":"custom_model_gpt-5","usage":"custom_model","config_switch":true},
+    {"config_name":"glm-5.2_advisor_doubao","usage":"chat_completion","config_switch":true},
+    {"config_name":"summary","usage":"summary","config_switch":true},
+    {"config_name":"fast_apply","usage":"fast_apply","config_switch":true},
+    {"config_name":"disabled-model","usage":"chat_completion","config_switch":false},
+    {"config_name":"new-provider-model","usage":"chat_completion","config_switch":true},
+    {"config_name":"custom_model_unknown","usage":"custom_model","config_switch":true}
+  ]
+}`)
+	got := extractTraeCNModelIDs(body)
+	joined := strings.Join(got, "\n")
+	for _, want := range []string{"deepseek-v3", "deepseek-v4-pro", "doubao-1-6", "doubao-seed-code", "gpt-4o", "gpt-4o-mini", "new-provider-model", "auto"} {
+		if !modelIDInList(want, got) {
+			t.Errorf("catalog missing %q: %v", want, got)
+		}
+	}
+	for _, unwanted := range []string{"glm-5.2_advisor_doubao", "summary", "fast_apply", "disabled-model", "custom_model_unknown"} {
+		if modelIDInList(unwanted, got) {
+			t.Errorf("catalog unexpectedly contains %q: %s", unwanted, joined)
+		}
+	}
+}
+
+func TestExtractTraeCNModelIDsFromOpenAIModelsPayload(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"object":"list","data":[{"id":"deepseek-v3","object":"model"},{"id":"glm-5.2","object":"model"}]}`)
+	got := extractTraeCNModelIDs(body)
+	if !modelIDInList("deepseek-v3", got) || !modelIDInList("glm-5.2", got) || !modelIDInList("auto", got) {
+		t.Fatalf("unexpected OpenAI catalog: %v", got)
 	}
 }
 

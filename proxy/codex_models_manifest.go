@@ -152,7 +152,7 @@ func (h *Handler) extraRelayManifestModels(ctx context.Context, row *database.AP
 		if record == nil {
 			continue
 		}
-		if record.backing&(modelBackingRelay|modelBackingGrok|modelBackingAntigravity) == 0 {
+		if record.backing&(modelBackingRelay|modelBackingGrok|modelBackingAntigravity|modelBackingTraeCN) == 0 {
 			continue
 		}
 		extras = append(extras, api.Model{ID: record.id, Object: "model", OwnedBy: scopedModelOwner(record)})

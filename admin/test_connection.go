@@ -660,10 +660,7 @@ func (h *Handler) connectionTestModelForAccount(ctx context.Context, account *au
 		return requested, nil
 	}
 	if account.IsTraeCNAPI() {
-		models := account.TraeCNModels()
-		if len(models) == 0 {
-			models = auth.TraeCNDefaultModelIDs()
-		}
+		models := account.TraeCNEffectiveModels()
 		textModels := make([]string, 0, len(models))
 		for _, model := range models {
 			if isTextConnectionModel(model) {

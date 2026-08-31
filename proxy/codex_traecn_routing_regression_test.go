@@ -88,9 +88,10 @@ func TestDefaultChannelCodexRequestDoesNotFallbackToTraeCN(t *testing.T) {
 }
 
 // Keep the regression close to the account resolver as well as the endpoint:
-// an auto-channel key's normal Responses filter must reject Trae for a model
-// belonging to the Codex catalog, while the explicit Trae channel remains a
-// separate opt-in path.
+// automatic routing is selected by the requested model's provider catalog.
+// A Codex-only model must not enter Trae, while a Trae model may use Trae
+// without requiring an account-level Models declaration. Explicit channel
+// settings remain hard provider fences.
 func TestResponsesResolverSeparatesCodexAndTraeCNChannels(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	trae := &auth.Account{
@@ -107,8 +108,15 @@ func TestResponsesResolverSeparatesCodexAndTraeCNChannels(t *testing.T) {
 	if autoFilter(trae) {
 		t.Fatal("default/auto Responses routing admitted Trae CN for a Codex model")
 	}
-	if (&Handler{}).applyUpstreamChannelFilter(autoCtx, "auto", accountFilterForResponsesModel("auto", false))(trae) {
-		t.Fatal("default/auto Responses routing admitted Trae CN for the auto model")
+	traeModelFilter := (&Handler{}).applyUpstreamChannelFilter(autoCtx, "deepseek-v3", accountFilterForResponsesModel("deepseek-v3", false))
+	if !traeModelFilter(trae) {
+		t.Fatal("default/auto Responses routing rejected a model in the Trae CN catalog")
+	}
+	if (&Handler{}).applyUpstreamChannelFilter(autoCtx, "gpt-5.6-sol", accountFilterForResponsesModel("gpt-5.6-sol", true))(trae) {
+		t.Fatal("default/auto Responses routing admitted Trae CN for gpt-5.6-sol")
+	}
+	if !(&Handler{}).applyUpstreamChannelFilter(autoCtx, "auto", accountFilterForResponsesModel("auto", false))(trae) {
+		t.Fatal("default/auto Responses routing rejected Trae CN's auto model sentinel")
 	}
 
 	codexCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -124,9 +132,13 @@ func TestResponsesResolverSeparatesCodexAndTraeCNChannels(t *testing.T) {
 	if !traeFilter(trae) {
 		t.Fatal("explicit Trae CN channel rejected a supported Trae model")
 	}
+	traeAutoFilter := (&Handler{}).applyUpstreamChannelFilter(traeCtx, "auto", accountFilterForResponsesModel("auto", false))
+	if !traeAutoFilter(trae) {
+		t.Fatal("explicit Trae CN channel rejected the auto model sentinel")
+	}
 }
 
-func TestScopedModelsHideTraeCNFromDefaultChannel(t *testing.T) {
+func TestScopedModelsIncludeTraeCNByDefaultAndRespectCatalog(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1})
 	defer store.Stop()
 	store.AddAccount(&auth.Account{
@@ -139,8 +151,11 @@ func TestScopedModelsHideTraeCNFromDefaultChannel(t *testing.T) {
 	handler := NewHandler(store, nil, nil, nil)
 
 	auto := listScopedModelsForTest(t, handler, &database.APIKeyRow{ID: 91017})
-	if _, _, ok := scopedModelByID(auto, "deepseek-v3"); ok {
-		t.Fatalf("default-channel model catalog advertised a TRAECN-only model: %+v", auto)
+	if owner, _, ok := scopedModelByID(auto, "deepseek-v3"); !ok || owner != "trae" {
+		t.Fatalf("default-channel model catalog did not advertise the Trae model: %+v", auto)
+	}
+	if _, _, ok := scopedModelByID(auto, "gpt-5.6-sol"); ok {
+		t.Fatalf("default-channel model catalog advertised a Codex-only model from Trae: %+v", auto)
 	}
 
 	trae := listScopedModelsForTest(t, handler, &database.APIKeyRow{

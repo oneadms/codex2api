@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
+	"unicode"
 
 	"github.com/codex2api/auth"
 	"github.com/google/uuid"
@@ -343,6 +346,376 @@ func traeProviderError(root gjson.Result) (string, string) {
 	code := traeFirstText(root, "error.code", "error.type", "code", "error_code", "errorCode")
 	message := traeFirstText(root, "error.message", "error", "message", "msg", "extra.message", "detail")
 	return strings.TrimSpace(code), strings.TrimSpace(message)
+}
+
+const (
+	traeCNModelsPath             = "/v1/models"
+	traeCNModelsDetailCompatPath = "/v1/models/detail?function=chat_v3"
+	traeCNModelsDetailPath       = "/api/ide/v1/get_detail_param"
+)
+
+// FetchTraeCNModels fetches the logical model IDs exposed by a Trae-compatible
+// upstream. The preferred endpoint is the OpenAI-compatible GET /v1/models
+// exposed by trae-local-api; direct Trae deployments are supported through
+// the desktop get_detail_param endpoint as a fallback. No static model list is
+// returned on success: callers can decide whether to cache it or use their
+// compatibility catalog when the provider endpoint is unavailable.
+func FetchTraeCNModels(ctx context.Context, account *auth.Account, proxyOverride string) ([]string, error) {
+	return fetchTraeCNModels(ctx, nil, account, proxyOverride)
+}
+
+// FetchTraeCNModelsWithStore is the durable request-path variant. A rotating
+// Trae RT is refreshed and persisted before model discovery, and discovery
+// requests use the same Resin/proxy egress selected for inference.
+func FetchTraeCNModelsWithStore(ctx context.Context, store *auth.Store, account *auth.Account, proxyOverride string) ([]string, error) {
+	return fetchTraeCNModels(ctx, store, account, proxyOverride)
+}
+
+func fetchTraeCNModels(ctx context.Context, store *auth.Store, account *auth.Account, proxyOverride string) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if account == nil || !account.IsTraeCNAPI() {
+		return nil, fmt.Errorf("traecn account is unavailable")
+	}
+	if proxyOverride = strings.TrimSpace(proxyOverride); proxyOverride == "" {
+		account.Mu().RLock()
+		proxyOverride = strings.TrimSpace(account.ProxyURL)
+		account.Mu().RUnlock()
+	}
+	var err error
+	if store != nil {
+		err = store.EnsureTraeCNAccountWithProxy(ctx, account, proxyOverride)
+	} else {
+		err = account.EnsureTraeCNAccessToken(ctx, proxyOverride, false)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("refresh Trae CN token: %w", err)
+	}
+	host, accessToken := account.TraeCNCredentials()
+	if host == "" || accessToken == "" {
+		return nil, fmt.Errorf("traecn credentials are incomplete")
+	}
+
+	viaResin := IsResinEnabled() && account.ID() > 0
+	client := getPooledClient(account, proxyOverride)
+	buildEndpoint := func(path string) string {
+		endpoint := strings.TrimRight(host, "/") + path
+		if viaResin {
+			return BuildReverseProxyURL(endpoint)
+		}
+		return endpoint
+	}
+	doRequest := func(method, path string, body []byte, providerAuth bool) ([]byte, int, error) {
+		requestCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		req, requestErr := http.NewRequestWithContext(requestCtx, method, buildEndpoint(path), bytes.NewReader(body))
+		if requestErr != nil {
+			return nil, 0, requestErr
+		}
+		var headers http.Header
+		if providerAuth {
+			headers = auth.TraeCNRequestHeaders(account, accessToken, uuid.NewString())
+		} else {
+			headers = auth.TraeCNRequestHeaders(account, accessToken, uuid.NewString())
+			apiKey := strings.TrimSpace(accessToken)
+			account.Mu().RLock()
+			if strings.TrimSpace(account.APIKey) != "" {
+				apiKey = strings.TrimSpace(account.APIKey)
+			}
+			account.Mu().RUnlock()
+			headers.Set("Authorization", "Bearer "+apiKey)
+			headers.Set("X-API-Key", apiKey)
+		}
+		headers.Set("Accept", "application/json")
+		if method == http.MethodPost {
+			headers.Set("Content-Type", "application/json")
+		}
+		if viaResin {
+			headers.Set("X-Resin-Account", ResinAccountID(account))
+		}
+		req.Header = headers
+		resp, requestErr := func() (*http.Response, error) {
+			if viaResin {
+				return getResinHTTPClient(account).Do(req)
+			}
+			return client.Do(req)
+		}()
+		if requestErr != nil {
+			return nil, 0, requestErr
+		}
+		defer resp.Body.Close()
+		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		if readErr != nil {
+			return nil, resp.StatusCode, readErr
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			message := strings.TrimSpace(string(raw))
+			if len(message) > 512 {
+				message = message[:512]
+			}
+			return raw, resp.StatusCode, fmt.Errorf("HTTP %d %s", resp.StatusCode, message)
+		}
+		return raw, resp.StatusCode, nil
+	}
+
+	var failures []string
+	// First try the OpenAI-compatible surface. It is the canonical endpoint
+	// exposed by the integrated trae-local-api project.
+	for _, providerAuth := range []bool{false, true} {
+		raw, _, requestErr := doRequest(http.MethodGet, traeCNModelsPath, nil, providerAuth)
+		if requestErr == nil {
+			if models := extractTraeCNModelIDs(raw); len(models) > 0 {
+				return models, nil
+			}
+			failures = append(failures, "GET /v1/models returned no model IDs")
+		} else {
+			failures = append(failures, fmt.Sprintf("GET /v1/models: %v", requestErr))
+		}
+	}
+
+	// trae-local-api also exposes the direct Trae detail response through a
+	// normalized GET endpoint. Prefer it before contacting a raw Trae host so
+	// the integration follows the target project's public API contract.
+	for _, providerAuth := range []bool{false, true} {
+		raw, _, requestErr := doRequest(http.MethodGet, traeCNModelsDetailCompatPath, nil, providerAuth)
+		if requestErr == nil {
+			if models := extractTraeCNModelIDs(raw); len(models) > 0 {
+				return models, nil
+			}
+			failures = append(failures, "GET /v1/models/detail returned no model IDs")
+		} else {
+			failures = append(failures, fmt.Sprintf("GET /v1/models/detail: %v", requestErr))
+		}
+	}
+
+	// Direct Trae hosts expose model capabilities through get_detail_param.
+	detailBody, _ := json.Marshal(map[string]any{
+		"function":            "chat_v3",
+		"config_names":        nil,
+		"need_prompt":         false,
+		"current_config_info": nil,
+		"poly_prompt":         true,
+		"mode_type":           nil,
+		"agent_type":          nil,
+	})
+	raw, _, requestErr := doRequest(http.MethodPost, traeCNModelsDetailPath, detailBody, true)
+	if requestErr == nil {
+		if models := extractTraeCNModelIDs(raw); len(models) > 0 {
+			return models, nil
+		}
+		failures = append(failures, "POST /api/ide/v1/get_detail_param returned no model IDs")
+	} else {
+		failures = append(failures, fmt.Sprintf("POST /api/ide/v1/get_detail_param: %v", requestErr))
+	}
+	return nil, fmt.Errorf("Trae CN model catalog unavailable (%s)", strings.Join(failures, "; "))
+}
+
+// traeCNModelTokenKey is used only for matching a provider config name to a
+// known public alias.  It deliberately drops punctuation so names such as
+// Doubao_1_6 and doubao-1-6 can share the same compatibility ID.
+func traeCNModelTokenKey(value string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(value)) {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func traeCNDetailConfigIsInternal(configName, usage string) bool {
+	name := strings.ToLower(strings.TrimSpace(configName))
+	if name == "" {
+		return true
+	}
+	switch name {
+	case "summary", "fast_apply", "fast_apply_new", "title_generation", "input_optimization":
+		return true
+	}
+	// Advisor configs and utility configs can share a model_name with a real
+	// chat config, but are not selectable models themselves.
+	if strings.Contains(name, "advisor") || strings.HasPrefix(name, "fast_") || strings.HasPrefix(name, "title_") || strings.HasPrefix(name, "input_") {
+		return true
+	}
+	if usage = strings.ToLower(strings.TrimSpace(usage)); usage != "" && usage != "chat_completion" && usage != "custom_model" && usage != "chat" {
+		return true
+	}
+	return false
+}
+
+// traeCNPublicIDsForConfig converts a config_name from get_detail_param into
+// IDs that clients can send to this gateway.  Known configs use the aliases
+// shared with TraeCNWireModel; unknown non-custom configs remain selectable by
+// their exact provider name so a newly introduced model is not discarded.
+func traeCNPublicIDsForConfig(configName string) []string {
+	configName = strings.TrimSpace(configName)
+	if configName == "" {
+		return nil
+	}
+	if aliases := auth.TraeCNPublicModelIDsForWire(configName); len(aliases) > 0 {
+		return aliases
+	}
+	configKey := traeCNModelTokenKey(configName)
+	if configKey != "" {
+		for _, publicID := range auth.TraeCNDefaultModelIDs() {
+			if strings.EqualFold(publicID, "auto") {
+				continue
+			}
+			if configKey == traeCNModelTokenKey(publicID) || configKey == traeCNModelTokenKey(auth.TraeCNWireModel(publicID)) {
+				return []string{publicID}
+			}
+		}
+	}
+	name := strings.ToLower(configName)
+	// Generic custom_model_* entries are implementation placeholders.  Only
+	// the stable aliases in traeCNWireModels are exposed (for example gpt-4o or
+	// deepseek-r1); leaking arbitrary placeholders makes them appear routable
+	// while their provider identity is account-specific.
+	if strings.HasPrefix(name, "custom_model_") {
+		return nil
+	}
+	return []string{configName}
+}
+
+func traeCNConfigInfoList(root gjson.Result) gjson.Result {
+	if !root.Exists() || root.Type == gjson.Null {
+		return gjson.Result{}
+	}
+	if root.IsObject() {
+		for _, key := range []string{"config_info_list", "configInfoList"} {
+			if child := root.Get(key); child.Exists() && child.IsArray() {
+				return child
+			}
+		}
+		// Different desktop builds wrap the detail payload under one of these
+		// envelopes. Keep the search bounded to avoid walking encrypted metadata.
+		for _, key := range []string{"data", "response", "result", "payload"} {
+			if child := root.Get(key); child.Exists() {
+				if found := traeCNConfigInfoList(child); found.Exists() {
+					return found
+				}
+			}
+		}
+	}
+	return gjson.Result{}
+}
+
+// extractTraeCNModelIDs accepts both OpenAI /v1/models payloads and the
+// several get_detail_param envelopes observed across Trae desktop versions.
+func extractTraeCNModelIDs(body []byte) []string {
+	if len(bytes.TrimSpace(body)) == 0 || !gjson.ValidBytes(body) {
+		return nil
+	}
+	root := gjson.ParseBytes(body)
+	seen := make(map[string]struct{})
+	result := make([]string, 0)
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || strings.ContainsAny(value, "\r\n\t") {
+			return
+		}
+		lower := strings.ToLower(value)
+		switch lower {
+		case "chat_v3", "inline_chat", "builder_v3", "solo_coder", "system_diagnosis":
+			return
+		}
+		if _, ok := seen[lower]; ok {
+			return
+		}
+		seen[lower] = struct{}{}
+		result = append(result, value)
+	}
+
+	// The direct Trae endpoint is authoritative when this field is present.
+	// Parse it structurally so utility configs and encrypted model_name fields
+	// cannot accidentally become advertised models.
+	if configList := traeCNConfigInfoList(root); configList.Exists() {
+		configList.ForEach(func(_, entry gjson.Result) bool {
+			if !entry.IsObject() {
+				return true
+			}
+			configName := strings.TrimSpace(entry.Get("config_name").String())
+			if configName == "" {
+				configName = strings.TrimSpace(entry.Get("configName").String())
+			}
+			usage := entry.Get("usage").String()
+			if traeCNDetailConfigIsInternal(configName, usage) {
+				return true
+			}
+			if switchValue := entry.Get("config_switch"); switchValue.Exists() && switchValue.Type != gjson.Null && !switchValue.Bool() {
+				return true
+			}
+			if switchValue := entry.Get("configSwitch"); switchValue.Exists() && switchValue.Type != gjson.Null && !switchValue.Bool() {
+				return true
+			}
+			for _, publicID := range traeCNPublicIDsForConfig(configName) {
+				add(publicID)
+			}
+			return true
+		})
+		if len(result) > 0 {
+			add("auto")
+			sort.Strings(result)
+			return result
+		}
+		// A valid but empty detail list is authoritative; do not infer model IDs
+		// from unrelated metadata in that response.
+		return nil
+	}
+
+	var walk func(gjson.Result, string)
+	walk = func(value gjson.Result, keyHint string) {
+		if !value.Exists() || value.Type == gjson.Null {
+			return
+		}
+		if value.Type == gjson.String {
+			if keyHint == "id" || keyHint == "model" || keyHint == "model_id" || keyHint == "modelid" || keyHint == "slug" || keyHint == "name" {
+				add(value.String())
+			}
+			return
+		}
+		if value.IsArray() {
+			value.ForEach(func(_, item gjson.Result) bool {
+				if item.IsObject() {
+					for _, key := range []string{"id", "model", "model_id", "modelId", "slug", "name"} {
+						walk(item.Get(key), strings.ToLower(key))
+					}
+					// Some model endpoints use an object keyed by the model ID.
+					item.ForEach(func(k, v gjson.Result) bool {
+						if k.String() != "" && (v.IsObject() || v.IsArray()) {
+							add(k.String())
+						}
+						return true
+					})
+				} else {
+					walk(item, keyHint)
+				}
+				return true
+			})
+			return
+		}
+		if value.IsObject() {
+			for _, key := range []string{"data", "models", "model_list", "modelList", "config_infos", "configInfos", "configs", "model_ids", "modelIds"} {
+				if child := value.Get(key); child.Exists() {
+					walk(child, strings.ToLower(key))
+				}
+			}
+			value.ForEach(func(k, v gjson.Result) bool {
+				key := strings.ToLower(strings.TrimSpace(k.String()))
+				if key == "id" || key == "model" || key == "model_id" || key == "modelid" || key == "slug" || key == "name" {
+					walk(v, key)
+				}
+				return true
+			})
+		}
+	}
+	walk(root, "")
+	if len(result) > 0 {
+		add("auto")
+	}
+	sort.Strings(result)
+	return result
 }
 
 // IsTraeCNRateLimitError recognizes Trae's application-level throttling. The

@@ -209,10 +209,15 @@ func TestApplyPersistentAccountSnapshotPreservesRuntimeState(t *testing.T) {
 	dst.SuccessStreak = 5
 	src := newFastSchedulerTestAccount(1, HealthTierHealthy, 100, 1)
 	src.CredentialGeneration = dst.CredentialGeneration
+	src.TraeCNHost = "https://trae-new.example"
+	src.TraeCNUserID = "trae-user-new"
 
 	store.applyPersistentAccountSnapshot(dst, src, true)
 	if atomic.LoadInt64(&dst.ActiveRequests) != 3 || dst.SuccessStreak != 5 {
 		t.Fatalf("runtime state clobbered: active=%d streak=%d", atomic.LoadInt64(&dst.ActiveRequests), dst.SuccessStreak)
+	}
+	if dst.TraeCNHost != src.TraeCNHost || dst.TraeCNUserID != src.TraeCNUserID {
+		t.Fatalf("Trae CN identity projection not refreshed: host=%q user=%q", dst.TraeCNHost, dst.TraeCNUserID)
 	}
 
 	rotated := newFastSchedulerTestAccount(1, HealthTierHealthy, 100, 1)

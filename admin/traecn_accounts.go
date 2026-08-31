@@ -31,9 +31,12 @@ type traeCNAccountsRequest struct {
 }
 
 type updateTraeCNAccountRequest struct {
-	Name     string          `json:"name"`
-	Host     string          `json:"host"`
-	Models   []string        `json:"models"`
+	Name string `json:"name"`
+	Host string `json:"host"`
+	// Models is a pointer so an edit that only changes host/name/proxy does not
+	// accidentally clear a legacy account allowlist. An explicit empty array
+	// still means "follow the whole upstream catalog".
+	Models   *[]string       `json:"models"`
 	ProxyURL string          `json:"proxy_url"`
 	GroupIDs json.RawMessage `json:"group_ids"`
 }
@@ -208,6 +211,11 @@ func (h *Handler) AddTraeCNAccounts(c *gin.Context) {
 			if len(models) > 0 {
 				credentials["models"] = models
 			}
+			// Record the setting even when the administrator leaves the list
+			// empty. This is distinct from an old row whose generic `models`
+			// field still needs to be treated as a legacy allowlist.
+			credentials[auth.TraeCNModelAllowlistCredentialKey] = models
+			credentials[auth.TraeCNModelAllowlistSetCredentialKey] = true
 			id, inserted, insertErr := h.db.InsertAccountWithUpstreamIfRefreshTokenAbsent(ctx, accountName, "trae", auth.UpstreamTraeCN, refreshToken, credentials, proxyURL)
 			if insertErr != nil {
 				item.Error = insertErr.Error()
@@ -345,7 +353,10 @@ func (h *Handler) UpdateTraeCNAccount(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	models := auth.NormalizeAccountModels(req.Models)
+	var models []string
+	if req.Models != nil {
+		models = auth.NormalizeAccountModels(*req.Models)
+	}
 	if len(models) > 200 {
 		writeError(c, http.StatusBadRequest, "模型数量不能超过 200")
 		return
@@ -371,16 +382,43 @@ func (h *Handler) UpdateTraeCNAccount(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "仅 Trae CN 账号支持该设置")
 		return
 	}
+	if req.Models == nil {
+		// The current UI no longer exposes a hand-maintained model field. Keep
+		// any existing allowlist when editing unrelated account settings; the
+		// upstream catalog is refreshed separately by the sync action.
+		if h.store != nil {
+			if account := h.store.FindByID(id); account != nil {
+				models = account.TraeCNConfiguredModelAllowlist()
+			}
+		}
+		if models == nil {
+			models = auth.NormalizeAccountModels(row.GetCredentialStringSlice(auth.TraeCNModelAllowlistCredentialKey))
+			if len(models) == 0 && !row.GetCredentialBool(auth.TraeCNModelAllowlistSetCredentialKey) &&
+				len(row.GetCredentialStringSlice(auth.TraeCNUpstreamModelsCredentialKey)) == 0 {
+				// Pre-catalog rows stored the optional narrowing list in the
+				// generic models field.
+				models = auth.NormalizeAccountModels(row.GetCredentialStringSlice("models"))
+			}
+		}
+	}
 	groupIDs, err := h.resolveTraeCNGroupIDs(ctx, req.GroupIDs)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	effectiveModels := models
+	if account := h.store.FindByID(id); account != nil {
+		effectiveModels = account.TraeCNModelsForAllowlist(models)
+	}
 	credentials := map[string]interface{}{
 		"upstream_type": auth.UpstreamTraeCN,
 		"traecn_host":   host,
 		"plan_type":     "traecn",
-		"models":        models,
+		// Keep the generic projection for older clients, while the dedicated
+		// field records that this list is an optional account-level narrowing.
+		"models":                                  effectiveModels,
+		auth.TraeCNModelAllowlistCredentialKey:    models,
+		auth.TraeCNModelAllowlistSetCredentialKey: true,
 	}
 	if err := h.db.UpdateCredentials(ctx, id, credentials); err != nil {
 		writeInternalError(c, err)

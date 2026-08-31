@@ -128,6 +128,9 @@ export interface AccountRow {
   antigravity_sync_warning?: string
   base_url?: string
   traecn_host?: string
+  traecn_upstream_models?: string[]
+  traecn_model_allowlist?: string[]
+  traecn_models_synced_at?: string
   balance_query_url?: string
   models?: string[]
   model_mapping?: string
@@ -725,6 +728,12 @@ export interface UpdateTraeCNAccountRequest {
   models?: string[]
   proxy_url?: string
   group_ids?: number[]
+}
+
+export interface TraeCNModelSyncResponse {
+  models: string[]
+  effective_models?: string[]
+  synced_at?: string
 }
 
 export interface AntigravityModelQuota {

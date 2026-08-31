@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   CircleAlert,
   Edit3,
+  ListRestart,
   Loader2,
   Plus,
   RefreshCw,
@@ -412,6 +413,7 @@ function AccountActions({
   busy,
   onTest,
   onRefresh,
+  onSyncModels,
   onEdit,
   onToggle,
   onDelete,
@@ -420,6 +422,7 @@ function AccountActions({
   busy: string | null;
   onTest: () => void;
   onRefresh: () => void;
+  onSyncModels: () => void;
   onEdit: () => void;
   onToggle: () => void;
   onDelete: () => void;
@@ -433,6 +436,9 @@ function AccountActions({
       </Button>
       <Button variant="ghost" size="icon-xs" title={t("traecn.refreshAccount")} disabled={isBusy} onClick={onRefresh}>
         <RefreshCw className={cn("size-3.5", busy === "refresh" && "animate-spin")} />
+      </Button>
+      <Button variant="ghost" size="icon-xs" title={t("traecn.syncModels")} aria-label={t("traecn.syncModels")} disabled={isBusy} onClick={onSyncModels}>
+        <ListRestart className={cn("size-3.5", busy === "syncModels" && "animate-spin")} />
       </Button>
       <Button variant="ghost" size="icon-xs" title={t("traecn.editAccount")} disabled={isBusy} onClick={onEdit}>
         <Edit3 className="size-3.5" />
@@ -469,11 +475,11 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const [busy, setBusy] = useState<{ id: number; action: string } | null>(null);
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null);
   const [showAdd, setShowAdd] = useState(false);
-  const [addForm, setAddForm] = useState({ name: "", refreshTokens: "", host: DEFAULT_HOST, proxyURL: "", models: "", groupIDs: [] as number[], enabled: true });
+  const [addForm, setAddForm] = useState({ name: "", refreshTokens: "", host: DEFAULT_HOST, proxyURL: "", groupIDs: [] as number[], enabled: true });
   const [addResult, setAddResult] = useState<AddTraeCNAccountsResponse | null>(null);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<AccountRow | null>(null);
-  const [editForm, setEditForm] = useState({ name: "", host: DEFAULT_HOST, proxyURL: "", models: "", groupIDs: [] as number[] });
+  const [editForm, setEditForm] = useState({ name: "", host: DEFAULT_HOST, proxyURL: "", groupIDs: [] as number[] });
   const [saving, setSaving] = useState(false);
 
   const reloadGroups = useCallback(async () => {
@@ -542,7 +548,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
 
   const openAdd = () => {
     setAddResult(null);
-    setAddForm({ name: "", refreshTokens: "", host: DEFAULT_HOST, proxyURL: "", models: "", groupIDs: [], enabled: true });
+    setAddForm({ name: "", refreshTokens: "", host: DEFAULT_HOST, proxyURL: "", groupIDs: [], enabled: true });
     setShowAdd(true);
   };
 
@@ -556,7 +562,6 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
         refresh_tokens: tokens,
         host: addForm.host.trim() || DEFAULT_HOST,
         proxy_url: addForm.proxyURL.trim(),
-        models: parseLines(addForm.models),
         group_ids: addForm.groupIDs,
         enabled: addForm.enabled,
       });
@@ -574,7 +579,6 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
       name: account.name ?? "",
       host: account.traecn_host || DEFAULT_HOST,
       proxyURL: account.proxy_url ?? "",
-      models: (account.models ?? []).join("\n"),
       groupIDs: account.group_ids ?? [],
     });
   };
@@ -587,7 +591,6 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
         name: editForm.name.trim(),
         host: editForm.host.trim() || DEFAULT_HOST,
         proxy_url: editForm.proxyURL.trim(),
-        models: parseLines(editForm.models),
         group_ids: editForm.groupIDs,
       });
       showToast(t("traecn.editSuccess"), "success");
@@ -597,7 +600,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
     finally { setSaving(false); }
   };
 
-  const runAccountAction = async (account: AccountRow, action: "refresh" | "toggle" | "delete") => {
+  const runAccountAction = async (account: AccountRow, action: "refresh" | "syncModels" | "toggle" | "delete") => {
     if (action === "delete") {
       const ok = await confirm({ title: t("traecn.deleteTitle"), description: t("traecn.deleteDescription", { account: accountLabel(account) }), tone: "destructive", confirmVariant: "destructive", confirmText: t("common.confirm") });
       if (!ok) return;
@@ -605,9 +608,10 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
     setBusy({ id: account.id, action });
     try {
       if (action === "refresh") await api.refreshTraeCNAccount(account.id);
+      else if (action === "syncModels") await api.syncAccountModelsUpstream(account.id);
       else if (action === "toggle") await api.toggleAccountEnabled(account.id, account.enabled === false);
       else await api.deleteAccount(account.id);
-      showToast(t(`traecn.${action === "refresh" ? "refreshSuccess" : action === "toggle" ? (account.enabled === false ? "enableSuccess" : "disableSuccess") : "deleteSuccess"}`), "success");
+      showToast(t(`traecn.${action === "refresh" ? "refreshSuccess" : action === "syncModels" ? "syncModelsSuccess" : action === "toggle" ? (account.enabled === false ? "enableSuccess" : "disableSuccess") : "deleteSuccess"}`), "success");
       await reload(true);
     } catch (actionError) { showToast(getErrorMessage(actionError), "error"); }
     finally { setBusy(null); }
@@ -704,7 +708,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
                       </td>
                       <td className="px-3 py-3"><GroupChips account={account} groups={traeGroups} /></td>
                       <td className="px-3 py-3"><div className="flex items-center gap-1.5"><StatusBadge status={account.status} />{account.enabled === false ? <Badge variant="outline">{t("traecn.disabledBadge")}</Badge> : null}</div></td>
-                      <td className="px-3 py-3"><AccountActions account={account} busy={accountBusy} onTest={() => setTestingAccount(account)} onRefresh={() => void runAccountAction(account, "refresh")} onEdit={() => openEdit(account)} onToggle={() => void runAccountAction(account, "toggle")} onDelete={() => void runAccountAction(account, "delete")} /></td>
+                      <td className="px-3 py-3"><AccountActions account={account} busy={accountBusy} onTest={() => setTestingAccount(account)} onRefresh={() => void runAccountAction(account, "refresh")} onSyncModels={() => void runAccountAction(account, "syncModels")} onEdit={() => openEdit(account)} onToggle={() => void runAccountAction(account, "toggle")} onDelete={() => void runAccountAction(account, "delete")} /></td>
                     </tr>
                   );
                 })}
@@ -724,7 +728,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
             <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("traecn.hostLabel")}</span><Input value={addForm.host} onChange={(event) => setAddForm((form) => ({ ...form, host: event.target.value }))} placeholder={DEFAULT_HOST} /></label>
           </div>
           <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("traecn.proxyLabel")}</span><Input value={addForm.proxyURL} onChange={(event) => setAddForm((form) => ({ ...form, proxyURL: event.target.value }))} placeholder="http://127.0.0.1:7890" /></label>
-          <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("traecn.modelsLabel")}</span><textarea value={addForm.models} onChange={(event) => setAddForm((form) => ({ ...form, models: event.target.value }))} placeholder={t("traecn.modelsPlaceholder")} className="min-h-24 w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50" /></label>
+          <div className="rounded-lg border border-border bg-muted/25 px-3 py-2 text-xs leading-relaxed text-muted-foreground">{t("traecn.modelsFromUpstreamHint")}</div>
           <div className="space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("accounts.importGroupsLabel")}</span><AccountGroupMultiSelect groups={traeGroups} value={addForm.groupIDs} onChange={(value) => setAddForm((form) => ({ ...form, groupIDs: value }))} placeholder={t("accounts.importGroupsPlaceholder")} emptyLabel={t("accounts.groupsNone")} selectedLabel={t("accounts.groupsSelected", { count: addForm.groupIDs.length })} /></div>
           <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={addForm.enabled} onChange={(event) => setAddForm((form) => ({ ...form, enabled: event.target.checked }))} className="size-4 accent-primary" />{t("traecn.enableOnImport")}</label>
           {addResult ? <ImportResult result={addResult} /> : null}
@@ -736,7 +740,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
           <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("traecn.nameLabel")}</span><Input value={editForm.name} onChange={(event) => setEditForm((form) => ({ ...form, name: event.target.value }))} /></label>
           <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("traecn.hostLabel")}</span><Input value={editForm.host} onChange={(event) => setEditForm((form) => ({ ...form, host: event.target.value }))} /></label>
           <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("traecn.proxyLabel")}</span><Input value={editForm.proxyURL} onChange={(event) => setEditForm((form) => ({ ...form, proxyURL: event.target.value }))} /></label>
-          <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("traecn.modelsLabel")}</span><textarea value={editForm.models} onChange={(event) => setEditForm((form) => ({ ...form, models: event.target.value }))} placeholder={t("traecn.modelsPlaceholder")} className="min-h-28 w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50" /></label>
+          <div className="rounded-lg border border-border bg-muted/25 px-3 py-2 text-xs leading-relaxed text-muted-foreground">{t("traecn.modelsFromUpstreamHint")}</div>
           <div className="space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("accounts.groupsLabel")}</span><AccountGroupMultiSelect groups={traeGroups} value={editForm.groupIDs} onChange={(value) => setEditForm((form) => ({ ...form, groupIDs: value }))} placeholder={t("accounts.groupsPlaceholder")} emptyLabel={t("accounts.groupsNone")} selectedLabel={t("accounts.groupsSelected", { count: editForm.groupIDs.length })} /></div>
         </div>
       </Modal>

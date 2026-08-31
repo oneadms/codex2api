@@ -17,6 +17,7 @@ import type {
   AddTraeCNAccountsRequest,
   AddTraeCNAccountsResponse,
   UpdateTraeCNAccountRequest,
+  TraeCNModelSyncResponse,
   AddAntigravityAccountRequest,
   AntigravityCreateResponse,
   UpdateAntigravityAccountRequest,
@@ -796,9 +797,9 @@ export const api = {
   // 设置 OAuth 账号的支持模型白名单;空数组表示清空(该账号可调度所有模型)。返回归一化后的白名单。
   updateAccountModels: (id: number, models: string[]) =>
     request<{ models: string[] }>(`/accounts/${id}/models`, { method: 'PATCH', body: JSON.stringify({ models }) }),
-  // 拉取该账号真实的上游模型清单(slug 列表,不落库),供白名单编辑器合并使用。
+  // 拉取并缓存该账号真实的上游模型清单，供路由和测试模型选择使用。
   syncAccountModelsUpstream: (id: number) =>
-    request<{ models: string[] }>(`/accounts/${id}/models/sync-upstream`, { method: 'POST' }),
+    request<TraeCNModelSyncResponse>(`/accounts/${id}/models/sync-upstream`, { method: 'POST', timeoutMs: 60_000 }),
   // 用账号自身凭据并发探测系统文本模型(已排除 image),返回确认可用的模型及每个模型的判定明细。只读不落库。
   probeAccountModels: (id: number) =>
     request<{

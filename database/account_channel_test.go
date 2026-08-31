@@ -172,11 +172,14 @@ func TestSQLiteListAccountListProjectionByChannel(t *testing.T) {
 		t.Fatalf("insert antigravity account: %v", err)
 	}
 	traeID, err := db.InsertAccountWithUpstream(ctx, "traecn", "trae", "traecn", map[string]interface{}{
-		"upstream_type":  "traecn",
-		"refresh_token":  "trae-refresh",
-		"access_token":   "trae-access",
-		"traecn_host":    "https://trae.example",
-		"traecn_user_id": "trae-user",
+		"upstream_type":           "traecn",
+		"refresh_token":           "trae-refresh",
+		"access_token":            "trae-access",
+		"traecn_host":             "https://trae.example",
+		"traecn_user_id":          "trae-user",
+		"traecn_upstream_models":  []string{"deepseek-v3", "auto"},
+		"traecn_model_allowlist":  []string{"deepseek-v3"},
+		"traecn_models_synced_at": "2026-08-31T00:00:00Z",
 	}, "")
 	if err != nil {
 		t.Fatalf("insert traecn account: %v", err)
@@ -203,7 +206,7 @@ func TestSQLiteListAccountListProjectionByChannel(t *testing.T) {
 			if tt.channel == UpstreamChannelAntigravity && (rows[0].GetCredential("avatar_url") == "" || !rows[0].GetCredentialBool("verified_email") || rows[0].GetCredential("project_id") != "project-1" || rows[0].GetCredential("antigravity_sync_error") != "sync failed" || rows[0].GetCredential("antigravity_sync_warning") == "" || rows[0].GetCredential("antigravity_permissions") == "" || rows[0].GetCredential("antigravity_quota") == "") {
 				t.Fatalf("Antigravity projection omitted control-plane status fields: %#v", rows[0].Credentials)
 			}
-			if tt.channel == UpstreamChannelTraeCN && (rows[0].GetCredential("traecn_host") != "https://trae.example" || rows[0].GetCredential("traecn_user_id") != "trae-user") {
+			if tt.channel == UpstreamChannelTraeCN && (rows[0].GetCredential("traecn_host") != "https://trae.example" || rows[0].GetCredential("traecn_user_id") != "trae-user" || len(rows[0].GetCredentialStringSlice("traecn_upstream_models")) != 2 || len(rows[0].GetCredentialStringSlice("traecn_model_allowlist")) != 1 || rows[0].GetCredential("traecn_models_synced_at") == "") {
 				t.Fatalf("Trae CN projection omitted account fields: %#v", rows[0].Credentials)
 			}
 		})

@@ -1694,12 +1694,11 @@ type APIKeyLimits struct {
 	// /backend-api/codex/realtime/calls）。默认关闭。
 	AllowLive bool `json:"allow_live,omitempty"`
 	// UpstreamChannel 限定该 Key 的请求只调度到指定上游渠道的账号：
-	//   - ""/auto（默认）：自动按模型路由到 Codex、Grok 或 Antigravity；TRAECN
-	//     不参与自动路由
+	//   - ""/auto（默认）：自动按模型能力路由到 Codex、Grok、Antigravity 或 TRAECN
 	//   - codex:   仅 Codex OAuth / OpenAI Responses 中转账号
 	//   - grok:    仅 Grok 账号（此时不再要求账号声明模型，直接透传请求模型）
 	//   - antigravity: 预留的 Antigravity 管理渠道；推理适配完成前 fail closed
-	//   - traecn: 仅 TRAECN 账号；必须显式选择该渠道
+	//   - traecn: 仅 TRAECN 账号；可固定到 Trae CN 模型池（包括 auto 哨兵）
 	UpstreamChannel string `json:"upstream_channel,omitempty"`
 	// ScopeLimits 是「该 Key × 某账号分组 / 某账号」维度的用量上限（issue #439）。
 	// 与上面的 Cost/Token 限额不同，它只统计该 Key 打到对应 scope 的用量，超额后默认
