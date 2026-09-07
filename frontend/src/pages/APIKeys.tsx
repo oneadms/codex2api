@@ -1,3 +1,4 @@
+import { ANTIGRAVITY_DEFAULT_MODELS as DEFAULT_ANTIGRAVITY_MODEL_OPTIONS } from "../lib/antigravityModels";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import {
   useCallback,
@@ -10,6 +11,8 @@ import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import APIKeyTokenUsagePanel from "../components/APIKeyTokenUsagePanel";
+import APIKeyModelRequestLimitsEditor from "../components/APIKeyModelRequestLimitsEditor";
+import APIKeyModelRequestUsageCard from "../components/APIKeyModelRequestUsage";
 import ChipInput from "../components/ChipInput";
 import Modal from "../components/Modal";
 import ChannelLogo from "../components/ChannelLogo";
@@ -23,6 +26,7 @@ import { useToast } from "../hooks/useToast";
 import type {
   AccountGroup,
   APIKeyLimits,
+  APIKeyModelRequestUsage,
   APIKeyScopeLimit,
   APIKeyScopeUsageItem,
   APIKeyScopeUsageWindow,
@@ -30,9 +34,15 @@ import type {
   APIKeyScopeSummaryItem,
   APIKeyRow,
   APIKeyWindowUsage,
+  PromptFilterNewAPIBinding,
   SystemSettings,
 } from "../types";
 import { canStartAPIKeyBulkReset } from "../lib/apiKeyOperationState";
+import {
+  modelRequestLimitsFromAPIKey,
+  modelRequestLimitsToPayload,
+  type ModelRequestLimitFormState,
+} from "../lib/apiKeyModelRequests";
 import { getErrorMessage } from "../utils/error";
 import { formatBeijingTime, formatRelativeTime } from "../utils/time";
 import { Badge } from "@/components/ui/badge";
@@ -131,10 +141,11 @@ interface LimitsFormState {
   allowLive: boolean;
   upstreamChannel: UpstreamChannel;
   scopeLimits: ScopeLimitFormState[];
+  modelRequestLimits: ModelRequestLimitFormState[];
 }
 
 type ImageGenerationPolicy = "allow" | "strip" | "block";
-type UpstreamChannel = "auto" | "codex" | "grok" | "antigravity" | "traecn";
+type UpstreamChannel = "auto" | "codex" | "grok" | "antigravity" | "traecn" | "claude";
 
 // ScopeLimitFormState 是「该 Key × 某分组/账号」预算的一行表单（issue #439）。
 // 数值统一按字符串保存,空串表示不限,与其它限额字段一致。
@@ -186,10 +197,13 @@ const DEFAULT_GROK_MODEL_OPTIONS = [
   "grok-2",
 ];
 
-const DEFAULT_ANTIGRAVITY_MODEL_OPTIONS = [
-  "gemini-3-pro-preview",
-  "gemini-2.5-pro",
-  "gemini-2.5-flash",
+// Keep this fallback in lockstep with proxy.defaultClaudeModelIDs. The
+// server catalog normally wins; these aliases are only used when no
+// Claude account has populated a catalog yet.
+const DEFAULT_CLAUDE_MODEL_OPTIONS = [
+  "claude-opus-4-5",
+  "claude-sonnet-4-5",
+  "claude-haiku-4-5",
 ];
 
 function accountGroupsForUpstreamChannel(
@@ -246,6 +260,7 @@ const emptyLimitsForm: LimitsFormState = {
   allowLive: false,
   upstreamChannel: "auto",
   scopeLimits: [],
+  modelRequestLimits: [],
 };
 
 const initialCreateForm: CreateKeyFormState = {
@@ -291,6 +306,9 @@ export default function APIKeys() {
   const [editingKey, setEditingKey] = useState<APIKeyRow | null>(null);
   // 编辑抽屉里展示 scope 预算的当前用量（issue #439）；打开时按需拉一次。
   const [scopeUsage, setScopeUsage] = useState<APIKeyScopeUsageItem[]>([]);
+  const [modelRequestUsage, setModelRequestUsage] = useState<APIKeyModelRequestUsage[]>([]);
+  const [modelRequestUsageLoading, setModelRequestUsageLoading] = useState(false);
+  const [modelRequestUsageError, setModelRequestUsageError] = useState("");
   // 列表页的 scope 预算概览：按 Key ID 索引，仅在存在配了预算的 Key 时才有内容。
   const [scopeSummary, setScopeSummary] = useState<
     Record<string, APIKeyScopeSummaryItem[]>
@@ -310,6 +328,26 @@ export default function APIKeys() {
   const { confirm, confirmDialog } = useConfirmDialog();
 
   useEffect(() => {
+    let cancelled = false;
+    setModelRequestUsage([]);
+    setModelRequestUsageError("");
+    setModelRequestUsageLoading(false);
+    if (!editingKey || !editingKey.limits?.model_request_limits?.length) return;
+    setModelRequestUsageLoading(true);
+    void api.getAPIKeyModelRequestUsage(editingKey.id)
+      .then((result) => {
+        if (!cancelled) setModelRequestUsage(result.model_request_usage ?? []);
+      })
+      .catch((error) => {
+        if (!cancelled) setModelRequestUsageError(getErrorMessage(error));
+      })
+      .finally(() => {
+        if (!cancelled) setModelRequestUsageLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [editingKey]);
+
+  useEffect(() => {
     return () => {
       revealTimers.current.forEach((timer) => window.clearTimeout(timer));
       revealTimers.current.clear();
@@ -317,7 +355,7 @@ export default function APIKeys() {
   }, []);
 
   const loadKeys = useCallback(async () => {
-    const [keysResponse, groupsResponse, modelsResponse, settingsResponse] = await Promise.all([
+    const [keysResponse, groupsResponse, modelsResponse, settingsResponse, promptBindingsResponse] = await Promise.all([
       api.getAPIKeys(),
       api.listAccountGroups().catch(() => ({ groups: [] })),
       api
@@ -327,8 +365,10 @@ export default function APIKeys() {
         grok_models?: string[];
         antigravity_models?: string[];
         traecn_models?: string[];
+        claude_models?: string[];
       }>,
       api.getSettings().catch((): SystemSettings | null => null),
+      api.getPromptFilterNewAPIBindings().catch(() => ({ bindings: [] as PromptFilterNewAPIBinding[] })),
     ]);
     return {
       keys: keysResponse.keys ?? [],
@@ -337,7 +377,9 @@ export default function APIKeys() {
       grokModelOptions: modelsResponse.grok_models ?? [],
       antigravityModelOptions: modelsResponse.antigravity_models ?? [],
       traeModelOptions: modelsResponse.traecn_models ?? [],
+      claudeModelOptions: modelsResponse.claude_models ?? [],
       settings: settingsResponse,
+      promptBindings: promptBindingsResponse.bindings ?? [],
     };
   }, []);
 
@@ -348,7 +390,9 @@ export default function APIKeys() {
     grokModelOptions: string[];
     antigravityModelOptions: string[];
     traeModelOptions: string[];
+    claudeModelOptions: string[];
     settings: SystemSettings | null;
+    promptBindings: PromptFilterNewAPIBinding[];
   }>({
     initialData: {
       keys: [],
@@ -357,13 +401,19 @@ export default function APIKeys() {
       grokModelOptions: [],
       antigravityModelOptions: [],
       traeModelOptions: [],
+      claudeModelOptions: [],
       settings: null,
+      promptBindings: [],
     },
     load: loadKeys,
   });
   const keys = data.keys;
   const groups = data.groups;
   const modelOptions = data.modelOptions;
+  const promptBindingsByKey = useMemo(
+    () => new Map(data.promptBindings.map((binding) => [binding.api_key_id, binding])),
+    [data.promptBindings],
+  );
 
   // scope 预算概览单独拉：它需要跨 Key 的用量聚合，不该拖慢 Key 列表本身。
   const anyScopeBudget = keys.some(
@@ -409,18 +459,24 @@ export default function APIKeys() {
       "qwen3-coder",
       "auto",
     ];
+  const claudeModelOptions =
+    data.claudeModelOptions.length > 0
+      ? data.claudeModelOptions
+      : DEFAULT_CLAUDE_MODEL_OPTIONS;
   const modelOptionsForChannel = useCallback(
     (channel: UpstreamChannel): string[] => {
       if (channel === "grok") return grokModelOptions;
       if (channel === "antigravity") return antigravityModelOptions;
       if (channel === "traecn") return traeModelOptions;
       if (channel === "codex") return modelOptions;
+      if (channel === "claude") return claudeModelOptions;
       const seen = new Set(modelOptions.map((m) => m.toLowerCase()));
       const merged = [...modelOptions];
       for (const candidate of [
         ...grokModelOptions,
         ...antigravityModelOptions,
         ...traeModelOptions,
+        ...claudeModelOptions,
       ]) {
         if (!seen.has(candidate.toLowerCase())) {
           seen.add(candidate.toLowerCase());
@@ -429,7 +485,7 @@ export default function APIKeys() {
       }
       return merged;
     },
-    [modelOptions, grokModelOptions, antigravityModelOptions, traeModelOptions],
+    [modelOptions, grokModelOptions, antigravityModelOptions, traeModelOptions, claudeModelOptions],
   );
   const createSelectableGroups = useMemo(
     () =>
@@ -735,7 +791,7 @@ export default function APIKeys() {
         ...(createForm.key.trim() ? { key: createForm.key.trim() } : {}),
         ...(quotaLimit && quotaLimit > 0 ? { quota_limit: quotaLimit } : {}),
         allowed_group_ids: createForm.allowedGroupIds,
-        limits: limitsFormToPayload(createForm.limits),
+        limits: limitsFormToPayload(createForm.limits, t),
         ...expirationPayload,
       };
 
@@ -1124,8 +1180,11 @@ export default function APIKeys() {
       const expirationPayload = buildExpirationPayload(editForm, t, {
         clearNever: true,
       });
-      const limitsPayload = limitsFormToPayload(editForm.limits);
-      await api.updateAPIKey(editingKey.id, {
+      const limitsPayload = {
+        ...editingKey.limits,
+        ...limitsFormToPayload(editForm.limits, t),
+      };
+      const saved = await api.updateAPIKey(editingKey.id, {
         name: trimmed,
         quota_limit: quotaLimit,
         allowed_group_ids: editForm.allowedGroupIds,
@@ -1157,7 +1216,7 @@ export default function APIKeys() {
             name: trimmed,
             quota_limit: quotaLimit,
             allowed_group_ids: editForm.allowedGroupIds,
-            limits: limitsPayload,
+            limits: saved.limits ?? limitsPayload,
             expires_at: nextExpires ?? null,
           };
         }),
@@ -1522,6 +1581,7 @@ export default function APIKeys() {
                                     t={t}
                                   />
                                   <KeyChannelBadge keyRow={keyRow} t={t} />
+                                  <APIKeyPromptPolicyBadge binding={promptBindingsByKey.get(keyRow.id)} />
                                   <KeyScopeBudgetBadge
                                     items={scopeSummary[String(keyRow.id)]}
                                     t={t}
@@ -1730,6 +1790,7 @@ export default function APIKeys() {
                                         t={t}
                                       />
                                       <KeyChannelBadge keyRow={keyRow} t={t} />
+                                      <APIKeyPromptPolicyBadge binding={promptBindingsByKey.get(keyRow.id)} />
                                       <KeyScopeBudgetBadge
                                         items={scopeSummary[String(keyRow.id)]}
                                         t={t}
@@ -2377,6 +2438,12 @@ export default function APIKeys() {
                 onValueChange={(value) => setEditTab(value as "basic" | "limits")}
               />
 
+              <APIKeyModelRequestUsageCard
+                items={modelRequestUsage}
+                loading={modelRequestUsageLoading}
+                error={modelRequestUsageError}
+              />
+
               {editTab === "basic" ? (
                 <>
                   <div className="grid gap-4 sm:grid-cols-2">
@@ -2697,9 +2764,11 @@ function limitsFromAPIKey(limits: APIKeyLimits | undefined): LimitsFormState {
       limits.upstream_channel === "grok" ||
       limits.upstream_channel === "antigravity"
       || limits.upstream_channel === "traecn"
+      || limits.upstream_channel === "claude"
         ? limits.upstream_channel
         : "auto",
     scopeLimits: scopeLimitsFromAPIKey(limits.scope_limits),
+    modelRequestLimits: modelRequestLimitsFromAPIKey(limits.model_request_limits),
   };
 }
 
@@ -2791,10 +2860,15 @@ function UpstreamChannelPicker({
       label: t("apiKeys.limits.upstreamChannelTraeCN"),
       icon: <ChannelLogo channel="traecn" size={18} />,
     },
+    {
+      key: "claude",
+      label: t("apiKeys.limits.upstreamChannelClaude"),
+      icon: <ChannelLogo channel="claude" size={18} />,
+    },
   ];
   return (
     <div>
-      <div className="grid grid-cols-5 gap-1 rounded-xl border border-border bg-muted/30 p-1">
+      <div className="grid grid-cols-6 gap-1 rounded-xl border border-border bg-muted/30 p-1">
         {options.map(({ key, label, icon }) => (
           <button
             key={key}
@@ -2901,7 +2975,7 @@ function parseTokenLimit(value: string, unit: TokenLimitUnit): number {
 // limitsFormToPayload 把表单值转为后端期望的 APIKeyLimits。
 // 空字符串或 0 在后端被视为 "未配置";所以不一一过滤,直接把全部字段都发出去。
 // (sanitizeAPIKeyLimits 在后端会把负值与空白清理掉)
-function limitsFormToPayload(form: LimitsFormState): APIKeyLimits {
+function limitsFormToPayload(form: LimitsFormState, t: Translator): APIKeyLimits {
   const num = (s: string) => {
     const n = Number(s.trim());
     return Number.isFinite(n) && n > 0 ? n : 0;
@@ -2939,6 +3013,7 @@ function limitsFormToPayload(form: LimitsFormState): APIKeyLimits {
     allow_live: form.upstreamChannel === "codex" && form.allowLive,
     upstream_channel:
       form.upstreamChannel === "auto" ? undefined : form.upstreamChannel,
+    model_request_limits: modelRequestLimitsToPayload(form.modelRequestLimits, t),
     scope_limits: form.scopeLimits
       .filter((row) => Number(row.scopeId.trim()) > 0)
       .filter(scopeLimitRowHasLimit)
@@ -3182,6 +3257,18 @@ function KeyChannelBadge({
       </Badge>
     );
   }
+  if (channel === "claude") {
+    return (
+      <Badge
+        variant="outline"
+        title={t("apiKeys.limits.upstreamChannelClaude")}
+        className="gap-1 border-transparent bg-muted/70 px-1.5 py-0 text-[11px] font-semibold text-foreground"
+      >
+        <ChannelLogo channel="claude" size={12} />
+        Claude
+      </Badge>
+    );
+  }
   // auto：路由图标表示"不限渠道，按模型自动路由"
   return (
     <Badge
@@ -3192,6 +3279,54 @@ function KeyChannelBadge({
       <Waypoints className="size-3" />
       {t("apiKeys.limits.upstreamChannelAutoTab")}
     </Badge>
+  );
+}
+
+// APIKeyPromptPolicyBadge separates the effective Prompt policy from the
+// optional NewAPI identity binding. An unbound key still follows the global
+// Prompt Filter; the badge makes that explicit instead of implying bypass.
+function APIKeyPromptPolicyBadge({
+  binding,
+}: {
+  binding?: PromptFilterNewAPIBinding;
+}) {
+  const { t } = useTranslation();
+  const scope = binding?.prompt_filter_scope ?? "inherit";
+  const scopeLabel =
+    scope === "off"
+      ? t("apiKeys.promptFilterScopeOff")
+      : scope === "local_only"
+        ? t("apiKeys.promptFilterScopeLocal")
+        : t("apiKeys.promptFilterScopeGlobal");
+  const identityLabel = binding
+    ? binding.require_signed_identity
+      ? t("apiKeys.promptFilterIdentityRequired")
+      : t("apiKeys.promptFilterIdentityBound")
+    : t("apiKeys.promptFilterIdentityUnbound");
+  return (
+    <span className="inline-flex max-w-full flex-wrap items-center gap-1">
+      <Badge
+        variant="outline"
+        className={cn(
+          "max-w-full truncate border-transparent bg-sky-500/10 px-1.5 py-0 text-[10px] font-semibold text-sky-700 dark:text-sky-300",
+          scope === "off" && "bg-rose-500/10 text-rose-700 dark:text-rose-300",
+          scope === "local_only" && "bg-amber-500/10 text-amber-700 dark:text-amber-300",
+        )}
+        title={scopeLabel}
+      >
+        {scopeLabel}
+      </Badge>
+      <Badge
+        variant="outline"
+        className={cn(
+          "max-w-full truncate border-transparent bg-muted/70 px-1.5 py-0 text-[10px] font-medium text-muted-foreground",
+          !binding && "bg-amber-500/10 text-amber-700 dark:text-amber-300",
+        )}
+        title={identityLabel}
+      >
+        {identityLabel}
+      </Badge>
+    </span>
   );
 }
 
@@ -3440,6 +3575,7 @@ function LimitsEditor({
     value.tokenLimit30d !== "" ||
     value.tokenLimitDaily !== "" ||
     value.scopeLimits.length > 0 ||
+    value.modelRequestLimits.length > 0 ||
     value.imageGenerationPolicy !== "allow";
   const [open, setOpen] = useState(hasAny || !!expanded);
   const tokenUnitOptions = useMemo(
@@ -3574,6 +3710,17 @@ function LimitsEditor({
             suffix={t("apiKeys.limits.concurrencySuffix")}
           />
         </div>
+      </LimitSection>
+
+      <LimitSection
+        icon={<CalendarClock className="size-3.5" />}
+        title={t("modelRequests.title")}
+        description={t("modelRequests.description")}
+      >
+        <APIKeyModelRequestLimitsEditor
+          value={value.modelRequestLimits}
+          onChange={(modelRequestLimits) => patch({ modelRequestLimits })}
+        />
       </LimitSection>
 
       <LimitSection
@@ -3823,10 +3970,30 @@ const GROK_PLAN_FILTER_OPTIONS = [
   "supergrok_plus",
 ] as const;
 
+// Claude OAuth profiles expose these normalized plan keys. Keep them
+// separate from the Codex/Grok plan allowlist so a Claude-bound API key
+// cannot accidentally be configured with an unrelated plan.
+const CLAUDE_PLAN_FILTER_OPTIONS = [
+  "claude",
+  "free",
+  "pro",
+  "max",
+  "max-5x",
+  "max-20x",
+  "team",
+  "enterprise",
+  "business",
+] as const;
+
 const PLAN_FILTER_OPTIONS = [
   ...CODEX_PLAN_FILTER_OPTIONS,
   ...GROK_PLAN_FILTER_OPTIONS.filter(
     (plan) => !(CODEX_PLAN_FILTER_OPTIONS as readonly string[]).includes(plan),
+  ),
+  ...CLAUDE_PLAN_FILTER_OPTIONS.filter(
+    (plan) =>
+      !(CODEX_PLAN_FILTER_OPTIONS as readonly string[]).includes(plan) &&
+      !(GROK_PLAN_FILTER_OPTIONS as readonly string[]).includes(plan),
   ),
 ];
 
@@ -3834,6 +4001,7 @@ function planOptionsForChannel(channel: UpstreamChannel): readonly string[] {
   if (channel === "codex") return CODEX_PLAN_FILTER_OPTIONS;
   if (channel === "grok") return GROK_PLAN_FILTER_OPTIONS;
   if (channel === "traecn") return ["traecn"];
+  if (channel === "claude") return CLAUDE_PLAN_FILTER_OPTIONS;
   return PLAN_FILTER_OPTIONS;
 }
 

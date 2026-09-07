@@ -157,11 +157,11 @@ export function buildEndpointSpecs(
       title: copy(locale, "创建 Messages 响应", "Create Messages output"),
       description: copy(
         locale,
-        "Anthropic Messages API 兼容端点，会在 Claude 与 Codex Responses 格式之间自动转换，模型名按系统设置映射。",
-        "Anthropic Messages compatible endpoint that translates between Claude and Codex Responses formats, with model names mapped from system settings.",
+        "Anthropic Messages API 兼容端点。Claude OAuth 账号可走原生 Messages 透传；没有可用 Claude 账号时自动回退到 Codex Responses 转换，模型名按系统设置映射。",
+        "Anthropic Messages compatible endpoint. Claude OAuth accounts use native Messages passthrough; when no eligible Claude account is available, the gateway falls back to Codex Responses translation with the configured model mapping.",
       ),
       defaultBody: `{
-  "model": "claude-sonnet-4-5-20250514",
+  "model": "claude-sonnet-4-5",
   "max_tokens": 1024,
   "messages": [{"role": "user", "content": "Hello"}]
 }`,
@@ -171,7 +171,7 @@ export function buildEndpointSpecs(
   --header 'Content-Type: application/json' \\
   --header 'anthropic-version: 2023-06-01' \\
   --data '{
-  "model": "claude-sonnet-4-5-20250514",
+  "model": "claude-sonnet-4-5",
   "max_tokens": 1024,
   "messages": [{"role": "user", "content": "Hello, Claude!"}]
 }'`,
@@ -182,7 +182,7 @@ export function buildEndpointSpecs(
   "id": "msg_abc123",
   "type": "message",
   "role": "assistant",
-  "model": "claude-sonnet-4-5-20250514",
+  "model": "claude-sonnet-4-5",
   "content": [{"type": "text", "text": "Hello! How can I assist you today?"}],
   "stop_reason": "end_turn",
   "stop_sequence": null,
@@ -528,8 +528,8 @@ curl --request POST \\
       title: copy(locale, "列出账号", "List accounts"),
       description: copy(
         locale,
-        "列出账号的状态、用量、标签、账号分组和基础元数据。可选 query channel=codex|grok|antigravity|traecn 仅返回对应上游（渠道管理页可用对应 channel，避免拉全站账号）。",
-        "List accounts with status, usage, tags, account groups, and basic metadata. Optional query channel=codex|grok|antigravity|traecn returns only that upstream (use the matching channel on provider pages to avoid loading every account).",
+        "列出账号的状态、用量、标签、账号分组和基础元数据。可选 query channel=codex|grok|antigravity|claude|traecn 仅返回对应上游（渠道管理页可用对应 channel，避免拉全站账号）。",
+        "List accounts with status, usage, tags, account groups, and basic metadata. Optional query channel=codex|grok|antigravity|claude|traecn returns only that upstream (use the matching channel on provider pages to avoid loading every account).",
       ),
       curl: `curl --request GET \\
   --url ${baseUrl}/api/admin/accounts \\
@@ -538,6 +538,11 @@ curl --request POST \\
 # Grok only
 curl --request GET \\
   --url '${baseUrl}/api/admin/accounts?channel=grok' \\
+  --header 'X-Admin-Key: <admin_secret>'
+
+# Claude only
+curl --request GET \\
+  --url '${baseUrl}/api/admin/accounts?channel=claude' \\
   --header 'X-Admin-Key: <admin_secret>'`,
       responses: [
         {

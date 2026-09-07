@@ -30,8 +30,34 @@ func TestAntigravityIsExcludedFromCodexOnlyTransports(t *testing.T) {
 	if compactFilter(account) {
 		t.Fatal("Responses Compact admitted an Antigravity account")
 	}
-	if excludeAntigravityAccountsFilter(nil)(account) {
-		t.Fatal("Chat/Messages transport filter admitted an Antigravity account")
+}
+
+// Chat/Messages translate their inbound body into a Responses payload before
+// dispatch, which is exactly what the Antigravity adapter consumes. Admission
+// must therefore follow the same catalog gate as /v1/responses; a blanket
+// transport exclusion left every advertised Antigravity model unroutable on
+// those endpoints (issue #595).
+func TestAntigravityIsAdmittedOnChatAndMessagesTransports(t *testing.T) {
+	account := &auth.Account{
+		DBID:                 81,
+		UpstreamType:         auth.UpstreamAntigravity,
+		AccessToken:          "google-access-token",
+		RefreshToken:         "google-refresh-token",
+		AntigravityProjectID: "google-project",
+		Models:               auth.AntigravityDefaultModelIDs(),
+	}
+
+	for _, model := range AntigravityPublishedModelIDs(auth.AntigravityDefaultModelIDs()) {
+		if !accountFilterForResponsesModelWithOriginal(model, model, false)(account) {
+			t.Fatalf("Chat transport filter rejected Antigravity model %q", model)
+		}
+		if !accountFilterForResponsesModel(model, false)(account) {
+			t.Fatalf("Messages transport filter rejected Antigravity model %q", model)
+		}
+	}
+
+	if accountFilterForResponsesModel("gpt-5.1-codex", false)(account) {
+		t.Fatal("Antigravity account was admitted for a model it cannot serve")
 	}
 }
 

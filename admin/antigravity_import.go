@@ -34,6 +34,9 @@ type antigravityImportDocument struct {
 	DisabledPresent bool
 	Name            string
 	ProxyURL        string
+	// ProxyEnabled 是源端导出的代理启用状态，nil 表示文件没写。只用于导入时的
+	// 告警统计：代理一律以启用态注册，见 countDisabledAtSource。
+	ProxyEnabled *bool
 }
 
 func parseAntigravityImportContent(content string, defaults antigravityImportDefaults) ([]auth.AntigravityCredential, error) {
@@ -184,13 +187,17 @@ func antigravityImportDocumentFromMap(root map[string]any, defaults antigravityI
 	if err != nil {
 		return antigravityImportDocument{}, err
 	}
-	return antigravityImportDocument{
+	document := antigravityImportDocument{
 		AuthKind: authKind, Credential: credential, APIKey: apiKey,
 		Models: models, ModelMapping: modelMapping,
 		Disabled: disabled, DisabledPresent: disabledPresent,
 		Name:     credential.Name,
 		ProxyURL: antigravityString(root, "proxy_url", "proxyUrl", "proxy"),
-	}, nil
+	}
+	if proxyEnabled, present := antigravityBool(root, "proxy_enabled", "proxyEnabled"); present {
+		document.ProxyEnabled = &proxyEnabled
+	}
+	return document, nil
 }
 
 func antigravityImportAuthKind(values map[string]any) (string, bool, error) {

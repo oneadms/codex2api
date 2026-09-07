@@ -28,6 +28,37 @@ func TestApplyUpstreamChannelFilterAntigravityFailsClosed(t *testing.T) {
 	}
 }
 
+func TestApplyUpstreamChannelFilterClaudeIsolatesProvider(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Set(contextAPIKeyRow, &database.APIKeyRow{Limits: database.APIKeyLimits{UpstreamChannel: database.UpstreamChannelClaude}})
+	filter := (&Handler{}).applyUpstreamChannelFilter(c, "claude-sonnet-4-5", func(*auth.Account) bool { return true })
+	claude := &auth.Account{DBID: 1, UpstreamType: auth.UpstreamClaude, AccessToken: "claude", Models: []string{"claude-sonnet-4-5"}}
+	codex := &auth.Account{DBID: 2, AccessToken: "codex"}
+	if !filter(claude) {
+		t.Fatal("Claude channel rejected Claude account")
+	}
+	if filter(codex) {
+		t.Fatal("Claude channel admitted Codex account")
+	}
+}
+
+func TestResponsesFilterRejectsClaudeProtocol(t *testing.T) {
+	claude := &auth.Account{DBID: 3, UpstreamType: auth.UpstreamClaude, AccessToken: "claude", Models: []string{"claude-sonnet-4-5"}}
+	filter := excludeClaudeAccountsFilter(accountFilterForResponsesModel("claude-sonnet-4-5", true))
+	if filter(claude) {
+		t.Fatal("Responses protocol admitted Claude account")
+	}
+}
+
+func TestResponsesCompactFilterRejectsClaudeProtocol(t *testing.T) {
+	claude := &auth.Account{DBID: 6, UpstreamType: auth.UpstreamClaude, AccessToken: "claude", Models: []string{"claude-sonnet-4-5"}}
+	filter := accountFilterForCompactResponsesModelWithOriginal("claude-sonnet-4-5", "claude-sonnet-4-5", true)
+	if filter(claude) {
+		t.Fatal("Responses Compact admitted Claude native Messages account")
+	}
+}
+
 func TestResponsesFilterAdmitsAntigravityInLazyMode(t *testing.T) {
 	account := &auth.Account{
 		DBID: 4, UpstreamType: auth.UpstreamAntigravity, AccessToken: "google-token",

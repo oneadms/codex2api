@@ -181,6 +181,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 				has_compaction_history INTEGER DEFAULT 0,
 				via_websocket INTEGER DEFAULT 0,
 				cached_tokens INTEGER DEFAULT 0,
+				cache_write_5m_tokens INTEGER DEFAULT 0,
+				cache_write_1h_tokens INTEGER DEFAULT 0,
 				service_tier TEXT DEFAULT '',
 				requested_service_tier TEXT DEFAULT '',
 				actual_service_tier TEXT DEFAULT '',
@@ -209,6 +211,22 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			expires_at TIMESTAMP NULL,
 			enabled INTEGER NOT NULL DEFAULT 1,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE TABLE IF NOT EXISTS api_key_model_request_counters (
+			api_key_id INTEGER NOT NULL,
+			rule_id TEXT NOT NULL,
+			window_start INTEGER NOT NULL,
+			reset_at INTEGER NOT NULL,
+			used_requests INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (api_key_id, rule_id, window_start)
+		);`,
+		`CREATE TABLE IF NOT EXISTS api_key_model_request_ledger (
+			api_key_id INTEGER NOT NULL,
+			rule_id TEXT NOT NULL,
+			request_id TEXT NOT NULL,
+			window_start INTEGER NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (api_key_id, rule_id, request_id)
 		);`,
 		`CREATE TABLE IF NOT EXISTS api_key_scope_counters (
 			api_key_id INTEGER NOT NULL,
@@ -253,8 +271,12 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 					site_logo TEXT DEFAULT '',
 					background_config TEXT DEFAULT '{}',
 					grok_config TEXT DEFAULT '{}',
+					claude_config TEXT DEFAULT '{}',
 					antigravity_oauth_config TEXT DEFAULT '{}',
-					subscription_upgrades_enabled INTEGER,
+					invite_guide_config TEXT DEFAULT '{}',
+					visible_channels_config TEXT DEFAULT '{}',
+					channel_test_config TEXT DEFAULT '{}',
+					antigravity_config TEXT DEFAULT '{}',
 					max_concurrency INTEGER DEFAULT 2,
 				global_rpm INTEGER DEFAULT 0,
 				test_model TEXT DEFAULT 'gpt-5.4',
@@ -285,7 +307,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 				reasoning_effort_models TEXT DEFAULT '[]',
 				allow_remote_migration INTEGER DEFAULT 0,
 				client_compat_mode TEXT DEFAULT 'preserve',
-				codex_min_cli_version TEXT DEFAULT '0.144.1',
+				codex_min_cli_version TEXT DEFAULT '0.153.3',
 				codex_user_agent_config TEXT DEFAULT '{}',
 				usage_log_mode TEXT DEFAULT 'full',
 				usage_log_batch_size INTEGER DEFAULT 200,
@@ -336,6 +358,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 					codex_synced_cli_version TEXT DEFAULT '',
 					codex_cli_version_sync_enabled INTEGER DEFAULT 1,
 					codex_cli_version_sync_interval_hours INTEGER DEFAULT 12,
+					claude_synced_cli_version TEXT DEFAULT '',
 					model_pricing_overrides TEXT DEFAULT '{}',
 					model_pricing_sync_url TEXT DEFAULT '',
 					ignore_usage_limit_status INTEGER DEFAULT 0,
@@ -356,6 +379,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 					oauth_model_cooldown_seconds INTEGER NOT NULL DEFAULT 300,
 					oauth_model_cooldown_backoff_enabled INTEGER NOT NULL DEFAULT 1
 				);`,
+		modelCapabilitiesSchema,
 		`CREATE TABLE IF NOT EXISTS model_registry (
 			id TEXT PRIMARY KEY,
 			enabled INTEGER DEFAULT 1,
@@ -524,6 +548,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"usage_logs", "compact", "INTEGER DEFAULT 0"},
 		{"usage_logs", "has_compaction_history", "INTEGER DEFAULT 0"},
 		{"usage_logs", "cached_tokens", "INTEGER DEFAULT 0"},
+		{"usage_logs", "cache_write_5m_tokens", "INTEGER DEFAULT 0"},
+		{"usage_logs", "cache_write_1h_tokens", "INTEGER DEFAULT 0"},
 		{"usage_logs", "service_tier", "TEXT DEFAULT ''"},
 		{"usage_logs", "requested_service_tier", "TEXT DEFAULT ''"},
 		{"usage_logs", "actual_service_tier", "TEXT DEFAULT ''"},
@@ -537,6 +563,10 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"usage_logs", "user_agent_overridden", "INTEGER DEFAULT 0"},
 		{"usage_logs", "internal_reason", "TEXT DEFAULT ''"},
 		{"usage_logs", "parent_request_id", "TEXT DEFAULT ''"},
+		{"usage_logs", "request_id", "TEXT DEFAULT ''"},
+		{"usage_logs", "upstream_request_id", "TEXT DEFAULT ''"},
+		{"usage_logs", "upstream_proxy_id", "INTEGER DEFAULT 0"},
+		{"usage_logs", "upstream_proxy_name", "TEXT DEFAULT ''"},
 		{"usage_logs", "image_count", "INTEGER DEFAULT 0"},
 		{"usage_logs", "image_width", "INTEGER DEFAULT 0"},
 		{"usage_logs", "image_height", "INTEGER DEFAULT 0"},
@@ -572,8 +602,12 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "site_logo", "TEXT DEFAULT ''"},
 		{"system_settings", "background_config", "TEXT DEFAULT '{}'"},
 		{"system_settings", "grok_config", "TEXT DEFAULT '{}'"},
+		{"system_settings", "claude_config", "TEXT DEFAULT '{}'"},
 		{"system_settings", "antigravity_oauth_config", "TEXT DEFAULT '{}'"},
-		{"system_settings", "subscription_upgrades_enabled", "INTEGER"},
+		{"system_settings", "invite_guide_config", "TEXT DEFAULT '{}'"},
+		{"system_settings", "visible_channels_config", "TEXT DEFAULT '{}'"},
+		{"system_settings", "channel_test_config", "TEXT DEFAULT '{}'"},
+		{"system_settings", "antigravity_config", "TEXT DEFAULT '{}'"},
 		{"system_settings", "test_content", "TEXT DEFAULT 'hi'"},
 		{"system_settings", "traecn_default_model", "TEXT DEFAULT 'auto'"},
 		{"system_settings", "traecn_test_model", "TEXT DEFAULT 'auto'"},
@@ -624,6 +658,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "codex_synced_cli_version", "TEXT DEFAULT ''"},
 		{"system_settings", "codex_cli_version_sync_enabled", "INTEGER DEFAULT 1"},
 		{"system_settings", "codex_cli_version_sync_interval_hours", "INTEGER DEFAULT 12"},
+		{"system_settings", "claude_synced_cli_version", "TEXT DEFAULT ''"},
 		{"system_settings", "model_pricing_overrides", "TEXT DEFAULT '{}'"},
 		{"system_settings", "model_pricing_sync_url", "TEXT DEFAULT ''"},
 		{"system_settings", "ignore_usage_limit_status", "INTEGER DEFAULT 0"},
@@ -689,7 +724,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"prompt_filter_logs", "request_protocol", "TEXT DEFAULT ''"},
 		{"prompt_filter_logs", "request_provider", "TEXT DEFAULT ''"},
 		{"system_settings", "client_compat_mode", "TEXT DEFAULT 'preserve'"},
-		{"system_settings", "codex_min_cli_version", "TEXT DEFAULT '0.144.1'"},
+		{"system_settings", "codex_min_cli_version", "TEXT DEFAULT '0.153.3'"},
 		{"system_settings", "codex_user_agent_config", "TEXT DEFAULT '{}'"},
 		{"system_settings", "usage_log_mode", "TEXT DEFAULT 'full'"},
 		{"system_settings", "usage_log_batch_size", "INTEGER DEFAULT 200"},
@@ -770,6 +805,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_accounts_created_id ON accounts(created_at, id);`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_updated_id ON accounts(updated_at, id);`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_logs_created_at ON usage_logs(created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_logs_request_id ON usage_logs(request_id) WHERE request_id <> '';`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_logs_upstream_request_id ON usage_logs(upstream_request_id) WHERE upstream_request_id <> '';`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_logs_account_id ON usage_logs(account_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_logs_account_created_at ON usage_logs(account_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_logs_account_generation_created_at ON usage_logs(account_id, credential_generation, created_at);`,
@@ -813,9 +850,6 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 	}
 	if err := db.installSchedulerOutboxTriggers(ctx); err != nil {
 		return fmt.Errorf("install scheduler outbox triggers: %w", err)
-	}
-	if err := db.ensureSubscriptionUpgradeSchema(ctx); err != nil {
-		return err
 	}
 
 	return db.runDataMigrationsWithTimeout()

@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
@@ -1558,6 +1559,11 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 		})
 		durationMs := int(time.Since(start).Milliseconds())
 		if reqErr != nil {
+			if apiKeyModelRequestError(reqErr) != nil {
+				h.store.Release(account)
+				sendAPIKeyModelRequestQuotaError(c, reqErr)
+				return
+			}
 			retryable := isRetryableRequestErrorForContext(c.Request.Context(), reqErr, continuousRetryPolicy)
 			if kind := classifyTransportFailure(reqErr); retryable && shouldPenalizeTransportKind(kind) {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
@@ -1607,6 +1613,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 				Transport: upstreamPromptPolicyTransport(stream, false), StatusCode: resp.StatusCode,
 				AccountID: account.ID(), AttemptIndex: attempt + 1,
 			}))
+			markImageModelUnavailableFromHTTP(h.store, account, requestModel, resp.StatusCode, errBody)
 			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, requestModel)
 			continuousSelected := continuousRetryHTTPSelected(continuousRetryPolicy, resp.StatusCode, errBody)
 			shouldRetry := retryAllowedByEndpointCap(attempt, maxImageAttempts, continuousSelected) && shouldRetryHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries, continuousRetryPolicy)
@@ -1688,6 +1695,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 				// Check retryability BEFORE writing error response to avoid
 				// double-write when the error is transient.
 				markImageModelUnavailable(h.store, account, requestModel, readErr)
+				logImageNoOutputOutcome(account, inboundEndpoint, requestModel, readErr)
 				accountID := account.ID()
 				resp.Body.Close()
 				h.store.Release(account)
@@ -1750,6 +1758,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			// Stream disconnects and upstream image generation failures can be
 			// transient (e.g. upstream model overload, network hiccup).
 			markImageModelUnavailable(h.store, account, requestModel, readErr)
+			logImageNoOutputOutcome(account, inboundEndpoint, requestModel, readErr)
 			accountID := account.ID()
 			resp.Body.Close()
 			h.store.Release(account)
@@ -2210,18 +2219,69 @@ func collectImageModelText(builder *strings.Builder, payload []byte) {
 	}
 }
 
-func isImageContentPolicyRefusal(text string) bool {
-	lower := strings.ToLower(text)
-	for _, marker := range []string{
-		"content policy", "content_policy", "content filter", "content_filter",
-		"safety system", "safety policy", "safety violation", "moderation",
-		"安全系统", "安全策略", "安全政策", "内容政策", "内容审核", "违规内容", "不适合生成",
-	} {
+// imageModelReplyPreviewMaxRunes 限制回填进错误信息/用量日志的模型文本长度。
+const imageModelReplyPreviewMaxRunes = 240
+
+// imageModelReplyPreview 把模型的文本回复压成一行可安全外发的摘要：折叠空白、
+// 脱敏、按 rune 截断（不能按字节截，中文回复会被切成乱码）。
+func imageModelReplyPreview(text string) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if text == "" {
+		return ""
+	}
+	preview := security.SafeTruncate(security.SanitizeLog(text), imageModelReplyPreviewMaxRunes)
+	if utf8.RuneCountInString(text) > imageModelReplyPreviewMaxRunes {
+		preview += "…"
+	}
+	return preview
+}
+
+func imageTextContainsAny(lower string, markers ...string) bool {
+	for _, marker := range markers {
 		if strings.Contains(lower, marker) {
 			return true
 		}
 	}
 	return false
+}
+
+// isImageContentPolicyRefusal 判断"有文本、无图片"的终态是不是模型的内容拒绝。
+// 两类证据任一成立即判定：
+//  1. 文本点名了审核/安全/内容政策等术语。
+//  2. 自然语言拒绝：既有"无法/不能"类拒绝措辞，又点名了政策类主题（真实人物、
+//     版权、成人内容等）。模型用中文回复时几乎不会出现第 1 类术语，这种拒绝
+//     以前会被当成上游故障换号重试，最后回一句看不出原因的 502（issue #589
+//     里三个账号连环 502 很可能就是这样来的）。
+//
+// 只有拒绝措辞、没有主题的文本（"I can't generate images right now"）不算：那更
+// 像账号缺图片工具的能力缺失，应当换号重试而不是按用户错误终止。
+func isImageContentPolicyRefusal(text string) bool {
+	lower := strings.ToLower(text)
+	if imageTextContainsAny(lower,
+		"content policy", "content_policy", "content filter", "content_filter",
+		"safety system", "safety policy", "safety violation", "moderation",
+		"usage policies", "usage policy", "against our policies", "against my guidelines",
+		"安全系统", "安全策略", "安全政策", "内容政策", "内容审核", "违规内容", "不适合生成",
+		"使用政策", "使用规范", "内容规范",
+	) {
+		return true
+	}
+	refusal := imageTextContainsAny(lower,
+		"can't", "cannot", "can not", "unable to", "not able to", "won't be able", "not allowed to",
+		"无法", "不能", "不会为", "不可以", "不被允许", "不允许",
+	)
+	if !refusal {
+		return false
+	}
+	return imageTextContainsAny(lower,
+		"real people", "real person", "real individual", "actual person", "public figure", "celebrit",
+		"likeness", "copyright", "trademark", "intellectual property", "explicit", "sexual", "nudity",
+		"violence", "violent", "gore", "graphic content", "hateful", "harassment", "self-harm",
+		"minors", "underage", "children",
+		"真实人物", "真人", "公众人物", "名人", "明星", "肖像", "版权", "商标", "知识产权",
+		"未成年", "儿童", "色情", "裸露", "成人内容", "暴力", "血腥", "仇恨", "骚扰", "自残",
+		"敏感内容", "敏感题材", "不符合", "违反",
+	)
 }
 
 func classifyImageNoOutput(text string) error {
@@ -2241,15 +2301,21 @@ func classifyImageNoOutput(text string) error {
 			statusCode: http.StatusBadRequest,
 			errorType:  "image_generation_user_error",
 			code:       "content_policy_violation",
-			message:    security.SafeTruncate(security.SanitizeLog(text), imageModelTextMaxBytes),
+			message:    imageModelReplyPreview(text),
 		}
+	}
+	// 把模型说了什么带回给调用方和用量日志。以前这里只回一句固定文案，用户和
+	// 运维都看不到上游到底为什么没出图（issue #589）。
+	message := "Upstream did not execute image generation"
+	if preview := imageModelReplyPreview(text); preview != "" {
+		message += "; model replied: " + preview
 	}
 	return &imageNoOutputError{
 		kind:       imageNoOutputUnavailable,
 		statusCode: http.StatusBadGateway,
 		errorType:  "upstream_error",
 		code:       "image_generation_unavailable",
-		message:    "Upstream did not execute image generation",
+		message:    message,
 	}
 }
 
@@ -2350,17 +2416,66 @@ func imageErrorKind(err error) string {
 }
 
 func imageErrorNeedsModelCooldown(err error) bool {
-	outcome := imageNoOutputDetails(err)
-	return outcome != nil && outcome.kind == imageNoOutputUnavailable
+	return isExplicitImageGenerationCapabilityLoss(imageResponseFailedPayload(err))
 }
 
 func markImageModelUnavailable(store *auth.Store, account *auth.Account, model string, err error) {
 	if store == nil || account == nil || !imageErrorNeedsModelCooldown(err) {
 		return
 	}
+	markImageModelCapabilityUnavailable(store, account, model)
+}
+
+// logImageNoOutputOutcome 把"上游收到请求却没出图"的终态连同模型文本打进服务日志，
+// 让运维不用翻用量日志也能看到上游给出的理由（issue #589）。
+func logImageNoOutputOutcome(account *auth.Account, inboundEndpoint, model string, err error) {
+	outcome := imageNoOutputDetails(err)
+	if outcome == nil || account == nil {
+		return
+	}
+	log.Printf("%s 上游未产出图片 (account=%d model=%s kind=%s status=%d): %s",
+		inboundEndpoint, account.ID(), model, outcome.kind, outcome.statusCode, outcome.Error())
+}
+
+func markImageModelUnavailableFromHTTP(store *auth.Store, account *auth.Account, model string, statusCode int, body []byte) {
+	if statusCode != http.StatusBadRequest || !isExplicitImageGenerationCapabilityLoss(body) {
+		return
+	}
+	markImageModelCapabilityUnavailable(store, account, model)
+}
+
+// isExplicitImageGenerationCapabilityLoss only accepts structured upstream
+// evidence. A response.completed frame containing plain model text is still
+// retryable for this request, but it is prompt-dependent and must not persist a
+// capability cooldown on the account/model pair.
+func isExplicitImageGenerationCapabilityLoss(payload []byte) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	code := strings.ToLower(firstNonEmptyImageErrorField(
+		gjson.GetBytes(payload, "response.error.code").String(),
+		gjson.GetBytes(payload, "error.code").String(),
+	))
+	if code == "image_generation_unavailable" {
+		return true
+	}
+	message := strings.ToLower(firstNonEmptyImageErrorField(
+		gjson.GetBytes(payload, "response.error.message").String(),
+		gjson.GetBytes(payload, "error.message").String(),
+		gjson.GetBytes(payload, "message").String(),
+		string(payload),
+	))
+	return strings.Contains(message, "image_generation") &&
+		strings.Contains(message, "not found in 'tools' parameter")
+}
+
+func markImageModelCapabilityUnavailable(store *auth.Store, account *auth.Account, model string) {
+	if store == nil || account == nil {
+		return
+	}
 	cooldown := store.MarkModelCooldown(account, model, imageOAuthUnavailableCooldown, "openai_images_oauth_tool_unavailable")
 	if !cooldown.ResetAt.IsZero() {
-		log.Printf("账号 %d 的 OAuth 图片工具未执行，模型 %s 冷却到 %s", account.ID(), model, cooldown.ResetAt.Format(time.RFC3339))
+		log.Printf("账号 %d 的 OAuth 图片工具明确不可用，模型 %s 冷却到 %s", account.ID(), model, cooldown.ResetAt.Format(time.RFC3339))
 	}
 }
 

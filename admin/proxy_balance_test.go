@@ -50,6 +50,17 @@ func TestIsOAuthProxyBalanceTarget(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "claude oauth",
+			row: &database.AccountRow{
+				Type: "anthropic",
+				Credentials: map[string]interface{}{
+					"upstream_type": auth.UpstreamClaude,
+					"refresh_token": "rt-claude",
+				},
+			},
+			want: true,
+		},
+		{
 			name: "codex access token only",
 			row: &database.AccountRow{
 				Type:        "oauth",

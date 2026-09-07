@@ -497,6 +497,31 @@ func TestExpiredConversationLockDoesNotBlockSignedConversation(t *testing.T) {
 	}
 }
 
+func TestSignedConversationLockSeparatesNewAPIChannels(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	base := verifiedNewAPIPolicyContext{
+		Platform:     "gateway-a",
+		Identity:     newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"},
+		MetaVerified: true,
+		Meta:         newAPIPolicyMeta{SessionFingerprint: "0123456789abcdef0123456789abcdef"},
+	}
+	first := base
+	first.Meta.ChannelID = 1001
+	second := base
+	second.Meta.ChannelID = 1002
+	firstIdentity, ok := verifiedPromptConversationLockIdentity(c, first)
+	if !ok {
+		t.Fatal("first channel lock identity unavailable")
+	}
+	secondIdentity, ok := verifiedPromptConversationLockIdentity(c, second)
+	if !ok {
+		t.Fatal("second channel lock identity unavailable")
+	}
+	if firstIdentity.LockKey == secondIdentity.LockKey {
+		t.Fatalf("signed channels share conversation lock key: %q", firstIdentity.LockKey)
+	}
+}
+
 // 纯外部审核命中(如 moderation 分类阈值越线)与 fail-closed 审核失败没有本地
 // 检测证据,只应拒绝当次请求;本地规则命中才升级为会话锁(issue #527)。
 func TestReviewOnlyBlockDoesNotLockConversation(t *testing.T) {

@@ -50,6 +50,8 @@ import type {
   APIKeyTokenStat,
   APIKeyAccountStatsResponse,
   APIKeyScopeUsageItem,
+  APIKeyLimits,
+  APIKeyModelRequestUsage,
   APIKeyScopeSummaryItem,
   AccountsResponse,
   AccountAnalysisResponse,
@@ -73,16 +75,28 @@ import type {
   ImagePromptTemplatePayload,
   ImagePromptTemplatesResponse,
   InviteResponse,
+  InviteRecipientsCheckResponse,
   InviteEligibilityResponse,
+  InviteGuidePlan,
   InviteTrackingResponse,
   MessageResponse,
   ModelSyncResponse,
+  RefreshAllModelsResponse,
   ModelPricingOverride,
 	OfficialPricingSyncConfig,
 	OfficialPricingSyncResult,
   ModelsResponse,
   OAuthExchangeResponse,
   OAuthURLResponse,
+  ClaudeAuthURLResponse,
+  ClaudeAuthKind,
+  ClaudeSessionKeyExchangeRequest,
+  ClaudeSetupTokenImportRequest,
+  ClaudeExchangeCodeRequest,
+  ClaudeImportTokenRequest,
+  ClaudeCredentialExportEntry,
+  ClaudeImportBundleResponse,
+  ClaudeAddAccountResponse,
   OpsErrorSummary,
   OpsOverviewResponse,
   PromptFilterLog,
@@ -129,6 +143,11 @@ import type {
   CreateAccountGroupRequest,
   UpdateAccountGroupRequest,
   UpstreamChannel,
+  ClaudeGlobalConfig,
+  VisibleChannelsSettings,
+  ChannelTestSettings,
+  ChannelTestSettingsResponse,
+  AntigravitySettingsResponse,
 } from './types'
 
 const BASE = '/api/admin'
@@ -596,7 +615,7 @@ export const api = {
     if (params.order) searchParams.set('order', params.order)
     return request<AccountsPageResponse>(`/accounts?${searchParams.toString()}`, { signal })
   },
-  getAccountAnalysis: (channel: 'codex' | 'grok' | 'antigravity' | 'traecn' = 'codex', signal?: AbortSignal) =>
+  getAccountAnalysis: (channel: 'codex' | 'grok' | 'antigravity' | 'traecn' | 'claude' = 'codex', signal?: AbortSignal) =>
     request<AccountAnalysisResponse>(`/accounts/analysis?channel=${channel}`, { signal }),
   getAccountPageStats: (ids: number[], signal?: AbortSignal) => {
     const query = new URLSearchParams({ ids: ids.join(',') })
@@ -744,6 +763,72 @@ export const api = {
     request<void>(`/accounts/antigravity/oauth/${encodeURIComponent(sessionId)}`, {
       method: 'DELETE',
     }),
+  // Claude Code OAuth：第一步取授权 URL（服务端暂存 state→verifier）。mode=setup_token
+  // 申请长效 Setup Token(仅推理 scope,1 年有效,无 RT)。
+  generateClaudeAuthURL: (mode: ClaudeAuthKind = 'oauth') =>
+    request<ClaudeAuthURLResponse>('/accounts/claude/oauth/auth-url', {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+      timeoutMs: 15_000,
+    }),
+  // claude.ai sessionKey(cookie)一键换号:服务端代跑 OAuth 三步。
+  exchangeClaudeSessionKey: (data: ClaudeSessionKeyExchangeRequest) =>
+    request<ClaudeAddAccountResponse>('/accounts/claude/oauth/exchange-session-key', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: 120_000,
+    }),
+  // 批量粘贴 sk-ant-oat01- Setup Token。
+  importClaudeSetupTokens: (data: ClaudeSetupTokenImportRequest) =>
+    request<ClaudeImportBundleResponse>('/accounts/claude/import-setup-tokens', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: 120_000,
+    }),
+  // 第二步：用 state+code 换取 token 并入库（可选从代理池分配代理）。
+  exchangeClaudeOAuthCode: (data: ClaudeExchangeCodeRequest) =>
+    request<ClaudeAddAccountResponse>('/accounts/claude/oauth/exchange-code', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: 90_000,
+    }),
+  // Claude 凭据导入：OAuth、Setup Token 或 Base URL + API Key。
+  importClaudeToken: (data: ClaudeImportTokenRequest) =>
+    request<ClaudeAddAccountResponse>('/accounts/claude/import', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: 60_000,
+    }),
+  /** Import a versioned Claude credential object or bundle. */
+  importClaudeCredentialBundle: (
+    data: ClaudeCredentialExportEntry | ClaudeCredentialExportEntry[] | { accounts: ClaudeCredentialExportEntry[] },
+  ) =>
+    request<ClaudeAddAccountResponse | ClaudeImportBundleResponse>('/accounts/claude/import', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: 120_000,
+    }),
+  /** Download one Claude JSON credential or a ZIP for multiple accounts. */
+  exportClaudeAccounts: (ids?: number[], filter: 'all' | 'healthy' = 'all', format: 'auto' | 'json' | 'zip' = 'auto') => {
+    const params = new URLSearchParams({ filter, format })
+    if (ids && ids.length > 0) params.set('ids', ids.join(','))
+    return requestNamedBlob(`/accounts/claude/export?${params.toString()}`)
+  },
+  refreshClaudeModels: (id: number) =>
+    request<{ message: string; models: string[]; count: number }>(`/accounts/${id}/claude/models`, {
+      method: 'POST',
+      timeoutMs: 30_000,
+    }),
+  refreshAllClaudeModels: () =>
+    request<{ message: string; refreshed: number; failed: number; model_count: number }>('/accounts/claude/models/refresh', {
+      method: 'POST',
+      timeoutMs: 60_000,
+    }),
+  refreshAllModels: () =>
+    request<RefreshAllModelsResponse>('/models/refresh-all', {
+      method: 'POST',
+      timeoutMs: 130_000,
+    }),
   batchUpdateGrokModels: (data: BatchUpdateGrokModelsRequest) =>
     request<BatchUpdateGrokModelsResponse>('/accounts/grok/batch-models', {
       method: 'POST',
@@ -791,6 +876,10 @@ export const api = {
       reset_5h_at?: string
       reset_7d_at?: string
       reset_spark_at?: string
+      claude_usage_probe_at?: string
+      claude_usage_probe_error?: string
+      claude_usage_windows?: import('./types').ClaudeUsageWindow[]
+      claude_usage_windows_probed?: boolean
     }>(`/accounts/${id}/usage/refresh`, { method: 'POST' }),
   updateAccountScheduler: (id: number, data: UpdateAccountSchedulerRequest) =>
     request<MessageResponse>(`/accounts/${id}/scheduler`, { method: 'PATCH', body: JSON.stringify(data) }),
@@ -869,23 +958,68 @@ export const api = {
   },
   sendInvite: (id: number, data: { emails?: string[]; emails_text?: string; program_id?: string; entrypoint?: string; proxy_url?: string; max_emails?: number }) =>
     request<InviteResponse>(`/accounts/${id}/invite`, { method: 'POST', body: JSON.stringify(data) }),
-  getInviteEligibility: (id: number, params?: { program_id?: string; entrypoint?: string; proxy_url?: string }) => {
+  checkInviteRecipients: (emails: string[], signal?: AbortSignal) =>
+    request<InviteRecipientsCheckResponse>('/accounts/invite/recipients/check', {
+      method: 'POST',
+      body: JSON.stringify({ emails }),
+      signal,
+    }),
+  // refresh=1 绕过网关的资格/记录缓存直连上游，用于手动刷新与发送邀请后的重拉。
+  getInviteEligibility: (id: number, params?: { program_id?: string; entrypoint?: string; proxy_url?: string; refresh?: boolean }) => {
     const search = new URLSearchParams()
     if (params?.program_id) search.set('program_id', params.program_id)
     if (params?.entrypoint) search.set('entrypoint', params.entrypoint)
     if (params?.proxy_url) search.set('proxy_url', params.proxy_url)
+    if (params?.refresh) search.set('refresh', '1')
     const qs = search.toString()
     return request<InviteEligibilityResponse>(`/accounts/${id}/invite/eligibility${qs ? `?${qs}` : ''}`)
   },
-  getInviteTracking: (id: number, params?: { program_id?: string; period?: string; limit?: number; proxy_url?: string }) => {
+  getInviteTracking: (id: number, params?: { program_id?: string; period?: string; limit?: number; proxy_url?: string; refresh?: boolean }) => {
     const search = new URLSearchParams()
     if (params?.program_id) search.set('program_id', params.program_id)
     if (params?.period) search.set('period', params.period)
     if (typeof params?.limit === 'number') search.set('limit', String(params.limit))
     if (params?.proxy_url) search.set('proxy_url', params.proxy_url)
+    if (params?.refresh) search.set('refresh', '1')
     const qs = search.toString()
     return request<InviteTrackingResponse>(`/accounts/${id}/invite/tracking${qs ? `?${qs}` : ''}`)
   },
+  // 导入后的邀请收益评估。emails 是可用受邀邮箱数，传了就按「单次收益高的号优先」
+  // 做贪心分配；不传表示不限，建议次数等于各账号的剩余奖励次数。
+  getInviteGuidePlan: (ids: number[], emails?: number) => {
+    const search = new URLSearchParams({ ids: ids.join(',') })
+    if (typeof emails === 'number' && emails > 0) search.set('emails', String(emails))
+    return request<InviteGuidePlan>(`/accounts/invite/plan?${search.toString()}`)
+  },
+  probeInviteGuidePlan: (ids: number[]) =>
+    request<{ queued: number; skipped: number }>('/accounts/invite/plan/probe', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    }),
+  getVisibleChannels: () => request<VisibleChannelsSettings>('/settings/visible-channels'),
+  updateVisibleChannels: (channels: readonly UpstreamChannel[]) =>
+    request<VisibleChannelsSettings>('/settings/visible-channels', {
+      method: 'PUT',
+      body: JSON.stringify({ channels }),
+    }),
+  getAntigravitySettings: () => request<AntigravitySettingsResponse>('/settings/antigravity'),
+  updateAntigravitySettings: (patch: { model_redirects?: Record<string, string>; redirect_overrides_effort?: boolean }) =>
+    request<AntigravitySettingsResponse>('/settings/antigravity', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }),
+  getChannelTestSettings: () => request<ChannelTestSettingsResponse>('/settings/channel-tests'),
+  updateChannelTestSettings: (patch: Partial<Record<'antigravity' | 'claude', Partial<ChannelTestSettings>>>) =>
+    request<ChannelTestSettingsResponse>('/settings/channel-tests', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }),
+  getInviteGuideSettings: () => request<{ enabled: boolean }>('/settings/invite-guide'),
+  updateInviteGuideSettings: (enabled: boolean) =>
+    request<{ enabled: boolean }>('/settings/invite-guide', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
   batchResetStatus: (ids: number[]) =>
     request<{ message: string; success: number; failed: number }>('/accounts/batch-reset-status', { method: 'POST', body: JSON.stringify({ ids }) }),
   batchDeleteAccounts: (ids: number[]) =>
@@ -1074,7 +1208,7 @@ export const api = {
   deleteAPIKey: (id: number) =>
     request<MessageResponse>(`/keys/${id}`, { method: 'DELETE' }),
   updateAPIKey: (id: number, data: UpdateAPIKeyRequest) =>
-    request<MessageResponse>(`/keys/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    request<MessageResponse & { limits?: APIKeyLimits }>(`/keys/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   resetAPIKeyQuota: (id: number) =>
     request<MessageResponse>(`/keys/${id}/reset-quota`, { method: 'POST' }),
   resetAllAPIKeyQuotas: () =>
@@ -1082,6 +1216,8 @@ export const api = {
   // 分组 / 账号维度限额的当前用量（issue #439）。
   getAPIKeyScopeUsage: (id: number) =>
     request<{ items: APIKeyScopeUsageItem[] }>(`/keys/${id}/scope-usage`),
+  getAPIKeyModelRequestUsage: (id: number) =>
+    request<{ model_request_usage: APIKeyModelRequestUsage[] }>(`/keys/${id}/model-request-usage`),
   // 列表页用的全量概览：一次拿到所有 Key 的 scope 预算占比。
   getAPIKeysScopeSummary: () =>
     request<{ summary: Record<string, APIKeyScopeSummaryItem[]> }>('/keys-scope-summary'),
@@ -1141,6 +1277,22 @@ export const api = {
     request<MessageResponse>('/usage/logs', { method: 'DELETE' }),
   getSetupHints: () => request<SetupHintsResponse>('/setup-hints'),
   getSettings: () => request<SystemSettings>('/settings'),
+  getClaudeConfig: () =>
+    request<ClaudeGlobalConfig>('/settings/claude-config'),
+  updateClaudeConfig: (data: ClaudeGlobalConfig) =>
+    request<{ message: string } & ClaudeGlobalConfig>('/settings/claude-config', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  syncClaudeCLIVersion: () =>
+    request<{
+      fetched_version: string
+      effective_version: string
+      builtin_version: string
+      updated: boolean
+      accounts_refreshed: number
+      warning?: string
+    }>('/settings/claude-config/cli-version/sync', { method: 'POST' }),
   getObservedInstructions: () =>
     request<ObservedInstructionsResponse>('/settings/observed-instructions'),
   updateSettings: (data: Partial<SystemSettings>) =>
@@ -1317,6 +1469,7 @@ export const api = {
     request<{
       models: Array<{
         model: string
+        channel?: string
         source: string
         pricing: ModelPricingOverride
         canonical_model?: string
@@ -1327,6 +1480,7 @@ export const api = {
       models_dev_url: string
 		official_openai_url: string
 		official_xai_url: string
+		official_claude_url: string
 		official_sync_config: OfficialPricingSyncConfig
     }>('/model-pricing'),
   updateModelPricing: (payload: { model: string; reset?: boolean; pricing?: ModelPricingOverride }) =>
@@ -1339,12 +1493,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ url: url ?? '' }),
     }),
-	updateOfficialPricingSyncConfig: (config: Pick<OfficialPricingSyncConfig, 'enabled' | 'interval_minutes' | 'include_openai' | 'include_grok'>) =>
+	updateOfficialPricingSyncConfig: (config: Pick<OfficialPricingSyncConfig, 'enabled' | 'interval_minutes' | 'include_openai' | 'include_grok' | 'include_claude'>) =>
 		request<OfficialPricingSyncConfig>('/model-pricing/official-sync/config', {
 			method: 'PUT',
 			body: JSON.stringify(config),
 		}),
-	syncOfficialModelPricing: (sources: { include_openai: boolean; include_grok: boolean }) =>
+	syncOfficialModelPricing: (sources: { include_openai: boolean; include_grok: boolean; include_claude?: boolean }) =>
 		request<OfficialPricingSyncResult>('/model-pricing/official-sync', {
 			method: 'POST',
 			body: JSON.stringify(sources),
@@ -1371,16 +1525,27 @@ export const api = {
     request<{ message: string; cleaned: number }>('/accounts/antigravity/clean-banned', { method: 'POST' }),
   cleanAntigravityError: () =>
     request<{ message: string; cleaned: number }>('/accounts/antigravity/clean-error', { method: 'POST' }),
-  exportAccounts: (params: { filter: 'healthy' | 'all'; ids?: number[]; channel?: UpstreamChannel }) => {
+  /**
+   * 导出账号凭据。includeProxy 打开后条目里会带上账号绑定的代理 URL，
+   * 而代理 URL 常含明文用户名密码，因此默认关闭、由调用方显式开启。
+   */
+  exportAccounts: (params: {
+    filter: 'healthy' | 'all'
+    ids?: number[]
+    channel?: UpstreamChannel
+    includeProxy?: boolean
+  }) => {
     const sp = new URLSearchParams({ filter: params.filter })
     if (params.ids && params.ids.length > 0) sp.set('ids', params.ids.join(','))
     if (params.channel) sp.set('channel', params.channel)
+    if (params.includeProxy) sp.set('include_proxy', '1')
     return request<CPAExportEntry[]>(`/accounts/export?${sp.toString()}`)
   },
   /** 导出回收站账号；ids 为空则导出回收站全部。 */
-  exportRecycleBinAccounts: (ids?: number[]) => {
+  exportRecycleBinAccounts: (ids?: number[], includeProxy?: boolean) => {
     const sp = new URLSearchParams()
     if (ids && ids.length > 0) sp.set('ids', ids.join(','))
+    if (includeProxy) sp.set('include_proxy', '1')
     const q = sp.toString()
     return request<CPAExportEntry[]>(`/accounts/recycle-bin/export${q ? `?${q}` : ''}`)
   },
@@ -1391,9 +1556,10 @@ export const api = {
    * 单个账号返回裸 JSON，多个账号返回 ZIP（内部每账号一个 <邮箱>.json）。
    * 文件名由服务端在 Content-Disposition 里给出，前端不再自行拼接。
    */
-  exportGrokAccounts: (ids?: number[]) => {
+  exportGrokAccounts: (ids?: number[], includeProxy?: boolean) => {
     const sp = new URLSearchParams({ filter: 'all' })
     if (ids && ids.length > 0) sp.set('ids', ids.join(','))
+    if (includeProxy) sp.set('include_proxy', '1')
     return requestNamedBlob(`/accounts/grok/export?${sp.toString()}`)
   },
   /** Admin-only secret-bearing Antigravity credential download (JSON or ZIP). */

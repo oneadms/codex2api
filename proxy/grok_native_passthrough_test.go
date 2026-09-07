@@ -39,6 +39,29 @@ func TestForwardGrokNativeNonStreamPreservesJSONAndFiltersHeaders(t *testing.T) 
 	}
 }
 
+func TestCopyClaudeNativeResponseHeadersPreservesUsageMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	header := http.Header{
+		"anthropic-ratelimit-unified-5h-utilization": []string{"0.42"},
+		"anthropic-ratelimit-unified-5h-reset":       []string{"4102444800"},
+		"anthropic-ratelimit-unified-status":         []string{"allowed"},
+		"anthropic-version":                          []string{"2023-06-01"},
+		"Authorization":                              []string{"Bearer secret"},
+		"Set-Cookie":                                 []string{"secret=1"},
+		"X-Leak":                                     []string{"nope"},
+	}
+	copyClaudeNativeResponseHeaders(ctx, header)
+	if recorder.Header().Get("anthropic-ratelimit-unified-5h-utilization") != "0.42" || recorder.Header().Get("anthropic-version") != "2023-06-01" {
+		t.Fatalf("Claude usage headers were not forwarded: %#v", recorder.Header())
+	}
+	if recorder.Header().Get("Authorization") != "" || recorder.Header().Get("Set-Cookie") != "" || recorder.Header().Get("X-Leak") != "" {
+		t.Fatalf("sensitive/unallowlisted headers leaked: %#v", recorder.Header())
+	}
+}
+
 func TestProtocolNonStreamFailureRejectsPseudoSuccessPayloads(t *testing.T) {
 	tests := []struct {
 		name     string

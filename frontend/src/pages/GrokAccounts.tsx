@@ -31,10 +31,20 @@ import {
   Pencil,
   BarChart3,
   Layers,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  Clock,
 } from "lucide-react";
 import { api, getAdminKey } from "../api";
 import type { ProxyRow } from "../api";
-import { ProxyPoolSelect } from "../components/ProxyPoolSelect";
+import { ProxyField } from "../components/ProxyField";
+import AccountProxyBadge from "../components/AccountProxyBadge";
+import AccountProxyQuickEditor from "../components/AccountProxyQuickEditor";
+import {
+  buildProxyBindingContext,
+  type ProxyBindingContext,
+} from "../lib/accountProxyBinding";
 import type {
   AccountGroup,
   AccountRow,
@@ -64,6 +74,7 @@ import AccountGroupFilterSelect, {
 } from "../components/AccountGroupFilterSelect";
 import AccountGroupMultiSelect from "../components/AccountGroupMultiSelect";
 import { useImportGroupIds } from "../hooks/useImportGroupIds";
+import { useAccountTableColumns } from "../hooks/useAccountTableColumns";
 import { useIsDesktop } from "../hooks/useMediaQuery";
 import AccountHealthBar from "../components/AccountHealthBar";
 import AccountUsageModal from "../components/AccountUsageModal";
@@ -71,9 +82,11 @@ import Modal from "../components/Modal";
 import ModelLogo from "../components/ModelLogo";
 import OperationResultsModal from "../components/OperationResultsModal";
 import PageHeader from "../components/PageHeader";
+import ColumnSettingsMenu from "../components/ColumnSettingsMenu";
 import { CompactStat } from "../components/CompactStat";
 import Pagination from "../components/Pagination";
 import StateShell from "../components/StateShell";
+import ChannelLogo from "../components/ChannelLogo";
 import StatusBadge from "../components/StatusBadge";
 import { mergeAccountLiveState, useAccountLiveState } from "../hooks/useAccountLiveState";
 import { Button } from "@/components/ui/button";
@@ -135,6 +148,10 @@ const GROK_LIMITED_STATUSES = new Set([
 
 // 与 Codex 账号页一致的表格/卡片双布局，选择持久化到 localStorage。
 const GROK_VIEW_MODE_KEY = "codex2api:grok-accounts:view-mode";
+const GROK_TABLE_COLUMNS = [
+  "sequence", "plan", "proxy", "status", "requests", "usage", "models", "updatedAt",
+] as const;
+type GrokColumnVisibility = Record<(typeof GROK_TABLE_COLUMNS)[number], boolean>;
 
 // 批量导入的分片大小。后端单次上限是 5000，但一次请求要串行落库/刷新几千条，
 // 墙钟时间会长到浏览器或反代先断开；切成小片可以让每次请求都在一分钟量级完成，
@@ -184,6 +201,7 @@ interface GrokRowHandlers {
   toggleEnabled: (account: AccountRow) => void;
   edit: (account: AccountRow) => void;
   editGroups: (account: AccountRow) => void;
+  editProxy: (account: AccountRow) => void;
   remove: (account: AccountRow) => void;
   usageRefreshed: (account: AccountRow) => void;
 }
@@ -335,6 +353,14 @@ function shortHost(raw?: string | null): string {
 
 // 套餐徽章：使用后端解析出的官方 tier 展示名；付费档琥珀，Free 绿色。
 // 表格用常规尺寸、空值显示占位「—」；卡片用 compact 尺寸、空值不渲染。
+// GrokSortIcon 表头排序指示(与 Codex/Claude 页同款图标,替代此前的 ↑↓ 文本箭头)。
+function GrokSortIcon({ active, dir }: { active: boolean; dir: "asc" | "desc" }) {
+  if (active) {
+    return dir === "desc" ? <ArrowDown className="size-3.5" /> : <ArrowUp className="size-3.5" />;
+  }
+  return <ArrowUpDown className="size-3 text-muted-foreground/35 group-hover:text-primary/70" />;
+}
+
 function GrokPlanBadge({
   account,
   compact = false,
@@ -478,6 +504,39 @@ function GrokAccounts({
       cancelled = true;
     };
   }, []);
+  // 代理徽章判定上下文：fail-closed(钉住的托管代理已不在启用池)只在代理池开启时
+  // 成立,所以开关与全局代理必须跟着代理池一起读进来。
+  const [proxyPoolEnabled, setProxyPoolEnabled] = useState(false);
+  const [globalProxyURL, setGlobalProxyURL] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getSettings()
+      .then((settings) => {
+        if (cancelled) return;
+        setProxyPoolEnabled(Boolean(settings.proxy_pool_enabled));
+        setGlobalProxyURL((settings.proxy_url ?? "").trim());
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const [quickProxyAccount, setQuickProxyAccount] = useState<AccountRow | null>(
+    null,
+  );
+  // 分组用全量而非 grokGroups:后端解析组代理不看渠道,按渠道过滤会把跨渠道的
+  // 存量成员误报成"无组代理"。对象引用稳定,memo 行组件才不会整表重渲。
+  const proxyBindingCtx = useMemo<ProxyBindingContext>(
+    () =>
+      buildProxyBindingContext({
+        proxies: proxyPool,
+        groups: allGroups,
+        poolEnabled: proxyPoolEnabled,
+        globalProxy: globalProxyURL,
+      }),
+    [proxyPool, allGroups, proxyPoolEnabled, globalProxyURL],
+  );
   const [modelDraft, setModelDraft] = useState("");
   const [modelsLoading, setModelsLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -494,6 +553,9 @@ function GrokAccounts({
 
   // 导入入口：选择器弹窗 + 三种来源（JSON 凭据文件 / sso.txt / refreshtoken.txt）
   const [showImportPicker, setShowImportPicker] = useState(false);
+  // 采用文件内代理：勾选后 JSON 凭据文件里带的 proxy_url 生效，并自动注册进代理池。
+  // sso.txt / refreshtoken.txt 一行一个 token，物理上带不了代理，只对 JSON 生效。
+  const [importFileProxies, setImportFileProxies] = useState(false);
   const authFileInputRef = useRef<HTMLInputElement | null>(null);
   const ssoFileInputRef = useRef<HTMLInputElement | null>(null);
   const refreshFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -559,6 +621,10 @@ function GrokAccounts({
   const [cleaning, setCleaning] = useState(false);
   const [viewMode, setViewMode] = useState<GrokViewMode>(getInitialGrokViewMode);
   const isDesktop = useIsDesktop();
+  const { columns: visibleColumns, toggleColumn, resetColumns } = useAccountTableColumns(
+    "codex2api:grok-accounts:visible-columns",
+    GROK_TABLE_COLUMNS,
+  );
   // 与 Codex 账号页一致：服务端分页 + 本地记忆每页条数。
   const pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS;
   const [page, setPage] = useState(1);
@@ -1003,6 +1069,7 @@ function GrokAccounts({
     // openEdit/handleRefresh 等在组件体更靠后定义,这里一律用闭包延迟取值,避开 TDZ。
     edit: (account) => openEdit(account),
     editGroups: (account) => openQuickGroupEditor(account),
+    editProxy: (account) => setQuickProxyAccount(account),
     remove: (account) => void handleDelete(account),
     usageRefreshed: (account) => {
       void refreshAccountRow(account.id);
@@ -1018,6 +1085,7 @@ function GrokAccounts({
       toggleEnabled: (account) => rowHandlersRef.current.toggleEnabled(account),
       edit: (account) => rowHandlersRef.current.edit(account),
       editGroups: (account) => rowHandlersRef.current.editGroups(account),
+      editProxy: (account) => rowHandlersRef.current.editProxy(account),
       remove: (account) => rowHandlersRef.current.remove(account),
       usageRefreshed: (account) => rowHandlersRef.current.usageRefreshed(account),
     }),
@@ -1287,14 +1355,21 @@ function GrokAccounts({
     }
   };
 
+  // GrokImportChunkResult 覆盖三个导入端点的共同响应形态。代理三项只有 JSON 凭据
+  // 文件那条链路会返回（且必须开了「采用文件内代理」），其余端点恒为 undefined。
+  type GrokImportChunkResult = {
+    total: number;
+    imported: number;
+    failed: number;
+    items: GrokSSOImportItem[];
+    proxies_imported?: number;
+    proxies_skipped?: number;
+    proxy_warning?: string;
+  };
+
   // runImport 统一跑一次导入调用：置忙、展示结果、成功后刷新列表。
   const runImport = async (
-    fn: () => Promise<{
-      total: number;
-      imported: number;
-      failed: number;
-      items: GrokSSOImportItem[];
-    }>,
+    fn: () => Promise<GrokImportChunkResult>,
     totalItems = 0,
   ) => runImportChunks([fn], totalItems);
 
@@ -1305,14 +1380,7 @@ function GrokAccounts({
   // totalItems 是全部待导入条数(调用方按文件/行数预先算好),用于右上角进度浮层
   // (与 Codex 账号页批量操作同款);传 0 则进度条按分片完成时的累计条数走。
   const runImportChunks = async (
-    chunks: Array<
-      () => Promise<{
-        total: number;
-        imported: number;
-        failed: number;
-        items: GrokSSOImportItem[];
-      }>
-    >,
+    chunks: Array<() => Promise<GrokImportChunkResult>>,
     totalItems = 0,
   ) => {
     if (chunks.length === 0) return;
@@ -1335,6 +1403,14 @@ function GrokAccounts({
       failed: 0,
       items: [] as GrokSSOImportItem[],
     };
+    // 代理注册结果按分片累加。carried 只有在后端确实处理了这个开关时才为真
+    // （响应里出现代理计数），据此决定收尾 toast 要不要带代理那段。
+    const proxySummary = {
+      carried: false,
+      imported: 0,
+      skipped: 0,
+      warnings: [] as string[],
+    };
     const reportMerged = (type: "progress" | "complete", error?: string) =>
       reportOperationEvent(progressTitle, {
         type,
@@ -1352,23 +1428,52 @@ function GrokAccounts({
         merged.imported += res.imported ?? 0;
         merged.failed += res.failed ?? 0;
         merged.items = merged.items.concat(res.items ?? []);
+        if (res.proxies_imported !== undefined) {
+          proxySummary.carried = true;
+          proxySummary.imported += res.proxies_imported;
+          proxySummary.skipped += res.proxies_skipped ?? 0;
+          // 分片之间的告警多半一模一样(同一批文件),去重后再拼。
+          const warning = res.proxy_warning?.trim();
+          if (warning && !proxySummary.warnings.includes(warning)) {
+            proxySummary.warnings.push(warning);
+          }
+        }
         if (chunks.length > 1) {
           setImportProgress({ done: i + 1, total: chunks.length });
         }
         reportMerged(i === chunks.length - 1 ? "complete" : "progress");
       }
       // 全部成功时不再弹明细弹窗(右上角进度浮层已给出结果);
-      // 有失败才弹,保留逐号失败原因供排查。
-      if (merged.failed > 0) {
+      // 有失败才弹,保留逐号失败原因供排查。命中既有身份被合并/复活的条目
+      // 也要弹明细——否则"导入成功却没多出新账号"会让人以为导入没生效。
+      if (
+        merged.failed > 0 ||
+        merged.items.some((item) => item.updated || item.revived)
+      ) {
         setImportResult({ ...merged, items: [...merged.items] });
       }
       if (merged.imported > 0) {
-        showToast(
-          t("grok.fileImportDone", {
-            imported: merged.imported,
-            total: merged.total,
-          }),
-        );
+        const done = t("grok.fileImportDone", {
+          imported: merged.imported,
+          total: merged.total,
+        });
+        // Toast 只有一个槽位,连续调用会互相顶掉——代理结果和告警必须拼进同一条。
+        if (proxySummary.carried) {
+          const parts = [
+            done,
+            t("accounts.importProxySummary", {
+              imported: proxySummary.imported,
+              skipped: proxySummary.skipped,
+            }),
+            ...proxySummary.warnings,
+          ];
+          showToast(
+            parts.join(" "),
+            proxySummary.warnings.length > 0 ? "error" : "success",
+          );
+        } else {
+          showToast(done);
+        }
         void reload();
         scheduleUsageSettleReloads();
       }
@@ -1412,6 +1517,7 @@ function GrokAccounts({
           api.batchImportGrokAccounts({
             files: part,
             group_ids: importGroupIds,
+            import_proxy: importFileProxies || undefined,
           }),
       ),
       files.length,
@@ -1955,6 +2061,7 @@ function GrokAccounts({
           description={t("grok.pageSubtitle")}
           onRefresh={() => void reload()}
           hideTitle
+          actionsBelow
           titleAdornment={headerSlot}
           actions={
             <div className="flex flex-wrap items-center gap-1.5">
@@ -2238,6 +2345,26 @@ function GrokAccounts({
                 </button>
               ))}
             </div>
+            {viewMode === "table" && isDesktop ? (
+              <ColumnSettingsMenu
+                columns={visibleColumns}
+                columnOrder={GROK_TABLE_COLUMNS}
+                onToggle={toggleColumn}
+                onReset={resetColumns}
+                title={t("accounts.columnSettings")}
+                resetTitle={t("accounts.columnReset")}
+                labels={{
+                  sequence: t("accounts.sequence"),
+                  plan: t("grok.colPlan"),
+                  proxy: t("accounts.proxyColumn"),
+                  status: t("grok.colStatus"),
+                  requests: t("accounts.requests"),
+                  usage: t("accounts.usage"),
+                  models: t("grok.colModels"),
+                  updatedAt: t("grok.colUpdated"),
+                }}
+              />
+            ) : null}
           </div>
 
           <div className="flex flex-wrap items-center gap-1">
@@ -2385,6 +2512,7 @@ function GrokAccounts({
         <StateShell
           variant="section"
           isEmpty={sortedAccounts.length === 0}
+          emptyIcon={<ChannelLogo channel="grok" size={30} />}
           emptyTitle={
             accounts.length === 0
               ? t("grok.emptyTitle")
@@ -2441,7 +2569,7 @@ function GrokAccounts({
         >
           {viewMode === "table" && isDesktop ? (
             <div className="data-table-shell hidden lg:block">
-              <Table className="[&_td]:px-2.5 [&_th]:px-2.5 [&_td]:py-4">
+              <Table className="[&_td]:px-2.5 [&_th]:px-2.5 [&_td]:py-3">
                 <TableHeader>
                   <TableRow>
                     <TableHead className="w-9">
@@ -2455,64 +2583,87 @@ function GrokAccounts({
                         onChange={toggleSelectAll}
                       />
                     </TableHead>
-                    <TableHead className="w-10 text-[13px] font-semibold">
-                      {t("accounts.sequence")}
-                    </TableHead>
+                    {visibleColumns.sequence ? (
+                      <TableHead className="w-10 text-[13px] font-semibold">
+                        {t("accounts.sequence")}
+                      </TableHead>
+                    ) : null}
                     <TableHead className="text-[13px] font-semibold">
                       {t("grok.colAccount")}
                     </TableHead>
-                    <TableHead className="text-center text-[13px] font-semibold">
-                      {t("grok.colPlan")}
-                    </TableHead>
-                    <TableHead className="text-[13px] font-semibold">
-                      {t("grok.colStatus")}
-                    </TableHead>
-                    <TableHead
-                      className={cn(
-                        "select-none text-[13px] font-semibold transition-colors",
-                        usageSortBlocked
-                          ? "cursor-not-allowed text-muted-foreground"
-                          : "cursor-pointer hover:text-primary",
-                      )}
-                      title={
-                        usageSortBlocked
-                          ? t("accounts.largePoolSortDisabled")
-                          : t("grok.sortRequestsHint")
-                      }
-                      onClick={() => toggleSort("requests")}
-                    >
-                      {t("accounts.requests")}{" "}
-                      {sortKey === "requests"
-                        ? sortDir === "desc"
-                          ? "↓"
-                          : "↑"
-                        : ""}
-                    </TableHead>
-                    <TableHead
-                      className="min-w-[170px] cursor-pointer select-none text-[13px] font-semibold transition-colors hover:text-primary"
-                      onClick={() => toggleSort("usage")}
-                    >
-                      {t("accounts.usage")}{" "}
-                      {sortKey === "usage"
-                        ? sortDir === "desc"
-                          ? "↓"
-                          : "↑"
-                        : ""}
-                    </TableHead>
-                    <TableHead className="text-[13px] font-semibold">
-                      {t("grok.colModels")}
-                    </TableHead>
-                    <TableHead
-                      className="cursor-pointer select-none text-[13px] font-semibold transition-colors hover:text-primary"
-                      onClick={() => toggleSort("updated")}
-                    >
-                      {t("grok.colUpdated")}{" "}
-                      {sortKey === "updated"
-                        ? sortDir === "desc"
-                          ? "↓"
-                          : "↑"
-                        : ""}
-                    </TableHead>
+                    {visibleColumns.plan ? (
+                      <TableHead className="text-center text-[13px] font-semibold">
+                        {t("grok.colPlan")}
+                      </TableHead>
+                    ) : null}
+                    {visibleColumns.proxy ? (
+                      <TableHead className="text-[13px] font-semibold">
+                        {t("accounts.proxyColumn")}
+                      </TableHead>
+                    ) : null}
+                    {visibleColumns.status ? (
+                      <TableHead className="text-[13px] font-semibold">
+                        {t("grok.colStatus")}
+                      </TableHead>
+                    ) : null}
+                    {visibleColumns.requests ? (
+                      <TableHead
+                        aria-sort={sortKey === "requests" ? (sortDir === "desc" ? "descending" : "ascending") : "none"}
+                        className={cn(
+                          "select-none text-[13px] font-semibold transition-colors",
+                          usageSortBlocked
+                            ? "cursor-not-allowed text-muted-foreground"
+                            : "group cursor-pointer hover:text-primary",
+                          sortKey === "requests" && "text-primary",
+                        )}
+                        title={
+                          usageSortBlocked
+                            ? t("accounts.largePoolSortDisabled")
+                            : t("grok.sortRequestsHint")
+                        }
+                        onClick={() => toggleSort("requests")}
+                      >
+                        <span className="inline-flex items-center gap-1.5">
+                          {t("accounts.requests")}
+                          <GrokSortIcon active={sortKey === "requests"} dir={sortDir} />
+                        </span>
+                      </TableHead>
+                    ) : null}
+                    {visibleColumns.usage ? (
+                      <TableHead
+                        aria-sort={sortKey === "usage" ? (sortDir === "desc" ? "descending" : "ascending") : "none"}
+                        className={cn(
+                          "group min-w-[232px] cursor-pointer select-none text-[13px] font-semibold transition-colors hover:text-primary",
+                          sortKey === "usage" && "text-primary",
+                        )}
+                        onClick={() => toggleSort("usage")}
+                      >
+                        <span className="inline-flex items-center gap-1.5">
+                          {t("accounts.usage")}
+                          <GrokSortIcon active={sortKey === "usage"} dir={sortDir} />
+                        </span>
+                      </TableHead>
+                    ) : null}
+                    {visibleColumns.models ? (
+                      <TableHead className="text-[13px] font-semibold">
+                        {t("grok.colModels")}
+                      </TableHead>
+                    ) : null}
+                    {visibleColumns.updatedAt ? (
+                      <TableHead
+                        aria-sort={sortKey === "updated" ? (sortDir === "desc" ? "descending" : "ascending") : "none"}
+                        className={cn(
+                          "group cursor-pointer select-none text-[13px] font-semibold transition-colors hover:text-primary",
+                          sortKey === "updated" && "text-primary",
+                        )}
+                        onClick={() => toggleSort("updated")}
+                      >
+                        <span className="inline-flex items-center gap-1.5">
+                          {t("grok.colUpdated")}
+                          <GrokSortIcon active={sortKey === "updated"} dir={sortDir} />
+                        </span>
+                      </TableHead>
+                    ) : null}
                     <TableHead className="text-right text-[13px] font-semibold">
                       {t("accounts.actions")}
                     </TableHead>
@@ -2521,9 +2672,11 @@ function GrokAccounts({
                 <TableBody>
                   {pagedAccounts.map((account, index) => (
                     <MemoGrokAccountTableRow
+                      visibleColumns={visibleColumns}
                       key={account.id}
                       account={account}
                       allGroups={allGroups}
+                      proxyCtx={proxyBindingCtx}
                       sequence={(currentPage - 1) * pageSize + index + 1}
                       busy={busyId === account.id}
                       batchTesting={batchTesting}
@@ -2551,6 +2704,7 @@ function GrokAccounts({
                   key={account.id}
                   account={account}
                   allGroups={allGroups}
+                  proxyCtx={proxyBindingCtx}
                   sequence={(currentPage - 1) * pageSize + index + 1}
                   busy={busyId === account.id}
                   batchTesting={batchTesting}
@@ -2729,26 +2883,14 @@ function GrokAccounts({
                     />
                   </div>
                   <div>
-                    <label className="mb-2 block text-sm font-medium text-muted-foreground">
-                      {t("grok.proxyUrl")}
-                    </label>
-                    <div className="flex flex-col gap-2 sm:flex-row">
-                      <Input
-                        className="min-w-0 flex-1"
-                        placeholder="http://user:pass@host:port"
-                        value={form.proxy_url ?? ""}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                          setForm((f) => ({ ...f, proxy_url: e.target.value }))
-                        }
-                      />
-                      <ProxyPoolSelect
-                        className="shrink-0 sm:w-[180px]"
-                        proxies={proxyPool}
-                        onSelect={(url) =>
-                          setForm((f) => ({ ...f, proxy_url: url }))
-                        }
-                      />
-                    </div>
+                    <ProxyField
+                      value={form.proxy_url ?? ""}
+                      onChange={(url) => setForm((f) => ({ ...f, proxy_url: url }))}
+                      proxies={proxyPool}
+                      label={t("grok.proxyUrl")}
+                      labelClassName="mb-2 text-sm font-medium"
+                      placeholder="http://user:pass@host:port"
+                    />
                   </div>
                 </>
               ) : (
@@ -2851,24 +2993,14 @@ function GrokAccounts({
               </div>
 
               <div>
-                <label className="mb-2 block text-sm font-medium text-muted-foreground">
-                  {t("grok.proxyUrl")}
-                </label>
-                <div className="flex flex-col gap-2 sm:flex-row">
-                  <Input
-                    className="min-w-0 flex-1"
-                    placeholder="http://user:pass@host:port"
-                    value={form.proxy_url ?? ""}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                      setForm((f) => ({ ...f, proxy_url: e.target.value }))
-                    }
-                  />
-                  <ProxyPoolSelect
-                    className="shrink-0 sm:w-[180px]"
-                    proxies={proxyPool}
-                    onSelect={(url) => setForm((f) => ({ ...f, proxy_url: url }))}
-                  />
-                </div>
+                <ProxyField
+                  value={form.proxy_url ?? ""}
+                  onChange={(url) => setForm((f) => ({ ...f, proxy_url: url }))}
+                  proxies={proxyPool}
+                  label={t("grok.proxyUrl")}
+                  labelClassName="mb-2 text-sm font-medium"
+                  placeholder="http://user:pass@host:port"
+                />
               </div>
 
               {ssoResult ? (
@@ -3037,24 +3169,14 @@ function GrokAccounts({
               </div>
 
               <div>
-                <label className="mb-2 block text-sm font-medium text-muted-foreground">
-                  {t("grok.proxyUrl")}
-                </label>
-                <div className="flex flex-col gap-2 sm:flex-row">
-                  <Input
-                    className="min-w-0 flex-1"
-                    placeholder="http://user:pass@host:port"
-                    value={form.proxy_url ?? ""}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                      setForm((f) => ({ ...f, proxy_url: e.target.value }))
-                    }
-                  />
-                  <ProxyPoolSelect
-                    className="shrink-0 sm:w-[180px]"
-                    proxies={proxyPool}
-                    onSelect={(url) => setForm((f) => ({ ...f, proxy_url: url }))}
-                  />
-                </div>
+                <ProxyField
+                  value={form.proxy_url ?? ""}
+                  onChange={(url) => setForm((f) => ({ ...f, proxy_url: url }))}
+                  proxies={proxyPool}
+                  label={t("grok.proxyUrl")}
+                  labelClassName="mb-2 text-sm font-medium"
+                  placeholder="http://user:pass@host:port"
+                />
               </div>
             </>
           )}
@@ -3098,6 +3220,16 @@ function GrokAccounts({
           showCreditSettings={false}
         />
       ) : null}
+
+      {/* 代理徽章直达的快速绑定弹窗：与 Codex 账号页共用组件 */}
+      <AccountProxyQuickEditor
+        account={quickProxyAccount}
+        accountLabel={quickProxyAccount ? accountLabel(quickProxyAccount) : ""}
+        proxies={proxyPool}
+        ctx={proxyBindingCtx}
+        onClose={() => setQuickProxyAccount(null)}
+        onSaved={() => reload()}
+      />
 
       {/* 快速设置账号分组(issue #487):与 Codex 账号页同一交互 */}
       <Modal
@@ -3330,6 +3462,18 @@ function GrokAccounts({
           <p className="text-[11px] text-muted-foreground">
             {t("accounts.importGroupsHint")}
           </p>
+          <label className="flex cursor-pointer items-center gap-2 pt-1 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              className="size-3.5"
+              checked={importFileProxies}
+              onChange={(e) => setImportFileProxies(e.target.checked)}
+            />
+            {t("accounts.importFileProxies")}
+          </label>
+          <p className="text-[11px] text-muted-foreground">
+            {t("grok.importFileProxiesHint")}
+          </p>
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
           <button
@@ -3431,7 +3575,15 @@ function GrokAccounts({
                   )}
                   <span className="min-w-0 flex-1 break-all text-muted-foreground">
                     {item.email || item.name || `#${index + 1}`}
-                    {item.ok ? null : item.error ? ` — ${item.error}` : ""}
+                    {item.ok
+                      ? item.revived
+                        ? ` — ${t("grok.importItemRevived", { id: item.id })}`
+                        : item.updated
+                          ? ` — ${t("grok.importItemUpdated", { id: item.id })}`
+                          : null
+                      : item.error
+                        ? ` — ${item.error}`
+                        : ""}
                   </span>
                 </div>
               ))}
@@ -3736,26 +3888,14 @@ function GrokAccounts({
             ) : null}
 
             <div>
-              <label className="mb-2 block text-sm font-medium text-muted-foreground">
-                {t("grok.proxyUrl")}
-              </label>
-              <div className="flex flex-col gap-2 sm:flex-row">
-                <Input
-                  className="min-w-0 flex-1"
-                  placeholder="http://user:pass@host:port"
-                  value={editForm.proxy_url}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                    setEditForm((f) => ({ ...f, proxy_url: e.target.value }))
-                  }
-                />
-                <ProxyPoolSelect
-                  className="shrink-0 sm:w-[180px]"
-                  proxies={proxyPool}
-                  onSelect={(url) =>
-                    setEditForm((f) => ({ ...f, proxy_url: url }))
-                  }
-                />
-              </div>
+              <ProxyField
+                value={editForm.proxy_url}
+                onChange={(url) => setEditForm((f) => ({ ...f, proxy_url: url }))}
+                proxies={proxyPool}
+                label={t("grok.proxyUrl")}
+                labelClassName="mb-2 text-sm font-medium"
+                placeholder="http://user:pass@host:port"
+              />
             </div>
           </div>
         ) : null}
@@ -3772,7 +3912,9 @@ function GrokAccounts({
 const MemoGrokAccountTableRow = memo(function MemoGrokAccountTableRow({
   account,
   allGroups,
+  proxyCtx,
   sequence,
+  visibleColumns,
   busy,
   batchTesting,
   selected,
@@ -3782,7 +3924,9 @@ const MemoGrokAccountTableRow = memo(function MemoGrokAccountTableRow({
 }: {
   account: AccountRow;
   allGroups: AccountGroup[];
+  proxyCtx: ProxyBindingContext;
   sequence: number;
+  visibleColumns: GrokColumnVisibility;
   busy: boolean;
   batchTesting: boolean;
   selected: boolean;
@@ -3798,7 +3942,9 @@ const MemoGrokAccountTableRow = memo(function MemoGrokAccountTableRow({
     <GrokAccountTableRow
       account={account}
       groups={groups}
+      proxyCtx={proxyCtx}
       sequence={sequence}
+      visibleColumns={visibleColumns}
       busy={busy}
       batchTesting={batchTesting}
       selected={selected}
@@ -3812,6 +3958,7 @@ const MemoGrokAccountTableRow = memo(function MemoGrokAccountTableRow({
       onToggleEnabled={() => handlers.toggleEnabled(account)}
       onEdit={() => handlers.edit(account)}
       onEditGroups={() => handlers.editGroups(account)}
+      onEditProxy={() => handlers.editProxy(account)}
       onDelete={() => handlers.remove(account)}
       onUsageRefreshed={() => handlers.usageRefreshed(account)}
     />
@@ -3821,6 +3968,7 @@ const MemoGrokAccountTableRow = memo(function MemoGrokAccountTableRow({
 const MemoGrokAccountCard = memo(function MemoGrokAccountCard({
   account,
   allGroups,
+  proxyCtx,
   sequence,
   busy,
   batchTesting,
@@ -3830,6 +3978,7 @@ const MemoGrokAccountCard = memo(function MemoGrokAccountCard({
 }: {
   account: AccountRow;
   allGroups: AccountGroup[];
+  proxyCtx: ProxyBindingContext;
   sequence: number;
   busy: boolean;
   batchTesting: boolean;
@@ -3845,6 +3994,7 @@ const MemoGrokAccountCard = memo(function MemoGrokAccountCard({
     <GrokAccountCard
       account={account}
       groups={groups}
+      proxyCtx={proxyCtx}
       sequence={sequence}
       busy={busy}
       batchTesting={batchTesting}
@@ -3858,6 +4008,7 @@ const MemoGrokAccountCard = memo(function MemoGrokAccountCard({
       onToggleEnabled={() => handlers.toggleEnabled(account)}
       onEdit={() => handlers.edit(account)}
       onEditGroups={() => handlers.editGroups(account)}
+      onEditProxy={() => handlers.editProxy(account)}
       onDelete={() => handlers.remove(account)}
       onUsageRefreshed={() => handlers.usageRefreshed(account)}
     />
@@ -3867,6 +4018,7 @@ const MemoGrokAccountCard = memo(function MemoGrokAccountCard({
 function GrokAccountCard({
   account,
   groups = [],
+  proxyCtx,
   sequence,
   busy,
   batchTesting,
@@ -3880,11 +4032,13 @@ function GrokAccountCard({
   onToggleEnabled,
   onEdit,
   onEditGroups,
+  onEditProxy,
   onDelete,
   onUsageRefreshed,
 }: {
   account: AccountRow;
   groups?: AccountGroup[];
+  proxyCtx: ProxyBindingContext;
   sequence: number;
   busy: boolean;
   batchTesting: boolean;
@@ -3898,6 +4052,7 @@ function GrokAccountCard({
   onToggleEnabled: () => void;
   onEdit: () => void;
   onEditGroups: () => void;
+  onEditProxy: () => void;
   onDelete: () => void;
   onUsageRefreshed: () => void;
 }) {
@@ -4029,6 +4184,11 @@ function GrokAccountCard({
             groups={groups}
             onClick={onEditGroups}
             emptyLabel={t("accounts.groupQuickEdit")}
+          />
+          <AccountProxyBadge
+            account={account}
+            ctx={proxyCtx}
+            onClick={onEditProxy}
           />
         </div>
 
@@ -4191,7 +4351,9 @@ function GrokAccountActions({
 function GrokAccountTableRow({
   account,
   groups = [],
+  proxyCtx,
   sequence,
+  visibleColumns,
   busy,
   batchTesting,
   selected,
@@ -4205,12 +4367,15 @@ function GrokAccountTableRow({
   onToggleEnabled,
   onEdit,
   onEditGroups,
+  onEditProxy,
   onDelete,
   onUsageRefreshed,
 }: {
   account: AccountRow;
   groups?: AccountGroup[];
+  proxyCtx: ProxyBindingContext;
   sequence: number;
+  visibleColumns: GrokColumnVisibility;
   busy: boolean;
   batchTesting: boolean;
   selected: boolean;
@@ -4224,6 +4389,7 @@ function GrokAccountTableRow({
   onToggleEnabled: () => void;
   onEdit: () => void;
   onEditGroups: () => void;
+  onEditProxy: () => void;
   onDelete: () => void;
   onUsageRefreshed: () => void;
 }) {
@@ -4267,9 +4433,11 @@ function GrokAccountTableRow({
           onClick={(event) => event.stopPropagation()}
         />
       </TableCell>
-      <TableCell className="font-mono text-[12px] text-muted-foreground">
-        #{sequence}
-      </TableCell>
+      {visibleColumns.sequence ? (
+        <TableCell className="font-mono text-[13px] tabular-nums text-muted-foreground" title={`ID ${account.id}`}>
+          {sequence}
+        </TableCell>
+      ) : null}
       <TableCell>
         <div className="flex min-w-0 items-center gap-2.5">
           <ModelLogo
@@ -4329,76 +4497,97 @@ function GrokAccountTableRow({
           </div>
         </div>
       </TableCell>
-      <TableCell className="text-center">
-        <GrokPlanBadge account={account} />
-      </TableCell>
-      <TableCell data-account-state-cell="status">
-        {tableOverlay ?? (
-          <div className="space-y-1.5">
-            <StatusBadge
-              status={disabled ? "paused" : (account.status ?? "unknown")}
-              errorMessage={account.error_message}
-            />
-            {(account.active_requests ?? 0) > 0 && (
-              <span
-                className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-blue-600 ring-1 ring-inset ring-blue-500/20 dark:bg-blue-950 dark:text-blue-400 dark:ring-blue-400/20"
-                title={t("accounts.activeRequestsTooltip", { count: account.active_requests ?? 0 })}
-              >
-                <span className="size-1.5 animate-pulse rounded-full bg-blue-500 dark:bg-blue-400" aria-hidden />
-                {account.active_requests}
-              </span>
-            )}
-            <AccountHealthBar buckets={healthBuckets} />
-          </div>
-        )}
-      </TableCell>
-      <TableCell>
-        <RequestCountPills account={account} compact />
-      </TableCell>
-      <TableCell className="min-w-[170px]">
-        <GrokUsageCell account={account} onRefreshed={onUsageRefreshed} />
-      </TableCell>
-      <TableCell>
-        {models.length === 0 ? (
-          <span className="text-[12px] text-muted-foreground/70">
-            {t("grok.noModels")}
+      {visibleColumns.plan ? (
+        <TableCell className="text-center">
+          <GrokPlanBadge account={account} />
+        </TableCell>
+      ) : null}
+      {visibleColumns.proxy ? (
+        <TableCell className="min-w-[120px] max-w-[180px]">
+          <AccountProxyBadge
+            account={account}
+            ctx={proxyCtx}
+            onClick={onEditProxy}
+          />
+        </TableCell>
+      ) : null}
+      {visibleColumns.status ? (
+        <TableCell data-account-state-cell="status">
+          {tableOverlay ?? (
+            <div className="space-y-1.5">
+              <StatusBadge
+                status={disabled ? "paused" : (account.status ?? "unknown")}
+                errorMessage={account.error_message}
+              />
+              {(account.active_requests ?? 0) > 0 && (
+                <span
+                  className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-blue-600 ring-1 ring-inset ring-blue-500/20 dark:bg-blue-950 dark:text-blue-400 dark:ring-blue-400/20"
+                  title={t("accounts.activeRequestsTooltip", { count: account.active_requests ?? 0 })}
+                >
+                  <span className="size-1.5 animate-pulse rounded-full bg-blue-500 dark:bg-blue-400" aria-hidden />
+                  {account.active_requests}
+                </span>
+              )}
+              <AccountHealthBar buckets={healthBuckets} />
+            </div>
+          )}
+        </TableCell>
+      ) : null}
+      {visibleColumns.requests ? (
+        <TableCell>
+          <RequestCountPills account={account} compact />
+        </TableCell>
+      ) : null}
+      {visibleColumns.usage ? (
+        <TableCell className="min-w-[232px]">
+          <GrokUsageCell account={account} onRefreshed={onUsageRefreshed} />
+        </TableCell>
+      ) : null}
+      {visibleColumns.models ? (
+        <TableCell>
+          {models.length === 0 ? (
+            <span className="text-[12px] text-muted-foreground/70">
+              {t("grok.noModels")}
+            </span>
+          ) : (
+            <div className="flex max-w-[150px] flex-wrap items-center gap-1">
+              {models.slice(0, 2).map((model) => (
+                <span
+                  key={model}
+                  className="max-w-[9rem] truncate rounded-md bg-muted/50 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground ring-1 ring-inset ring-border"
+                  title={model}
+                >
+                  {model}
+                </span>
+              ))}
+              {models.length > 2 ? (
+                <span
+                  className="text-[10px] font-medium text-muted-foreground"
+                  title={models.join(", ")}
+                >
+                  +{models.length - 2}
+                </span>
+              ) : null}
+            </div>
+          )}
+        </TableCell>
+      ) : null}
+      {visibleColumns.updatedAt ? (
+        <TableCell>
+          <span
+            className="whitespace-nowrap text-[12px] text-muted-foreground"
+            title={
+              account.updated_at
+                ? formatBeijingTime(account.updated_at) || undefined
+                : undefined
+            }
+          >
+            {account.updated_at
+              ? formatRelativeTime(account.updated_at)
+              : "—"}
           </span>
-        ) : (
-          <div className="flex max-w-[150px] flex-wrap items-center gap-1">
-            {models.slice(0, 2).map((model) => (
-              <span
-                key={model}
-                className="max-w-[9rem] truncate rounded-md bg-muted/50 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground ring-1 ring-inset ring-border"
-                title={model}
-              >
-                {model}
-              </span>
-            ))}
-            {models.length > 2 ? (
-              <span
-                className="text-[10px] font-medium text-muted-foreground"
-                title={models.join(", ")}
-              >
-                +{models.length - 2}
-              </span>
-            ) : null}
-          </div>
-        )}
-      </TableCell>
-      <TableCell>
-        <span
-          className="whitespace-nowrap text-[12px] text-muted-foreground"
-          title={
-            account.updated_at
-              ? formatBeijingTime(account.updated_at) || undefined
-              : undefined
-          }
-        >
-          {account.updated_at
-            ? formatRelativeTime(account.updated_at)
-            : "—"}
-        </span>
-      </TableCell>
+        </TableCell>
+      ) : null}
       <TableCell className="text-right">
         <div className="inline-flex items-center gap-0.5">
           <GrokAccountActions
@@ -5084,6 +5273,14 @@ function grokFormatResetAt(
   return { label: full.slice(5), title: full };
 }
 
+// grokShortResetLabel 把 "MM-DD HH:mm:ss" 压成表格内联形态:当天只留 HH:mm,跨天留 "MM-DD HH:mm"。
+function grokShortResetLabel(label: string): string {
+  const noSeconds = label.slice(0, 11);
+  // "今天"按显示时区算(formatBeijingTime 同一口径),避免浏览器本地日期与显示时区错位。
+  const today = formatBeijingTime(new Date().toISOString(), "").slice(5, 10);
+  return today && noSeconds.startsWith(`${today} `) ? noSeconds.slice(6) : noSeconds;
+}
+
 function grokFormatCompactNumber(value?: number): string {
   const n = Number(value || 0);
   if (n >= 1_000_000)
@@ -5171,16 +5368,17 @@ function GrokUsageBar({
           >
             {valueText}
           </span>
+          {/* 重置时间与进度条同行:当天只显示时分,跨天带月日;完整时间在 tooltip */}
+          {resetTime ? (
+            <span
+              className="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap text-[10px] tabular-nums text-muted-foreground/80"
+              title={`${t("grok.quotaReset")} ${resetTime.title}`}
+            >
+              <Clock className="size-2.5" aria-hidden />
+              {grokShortResetLabel(resetTime.label)}
+            </span>
+          ) : null}
         </div>
-        {resetTime ? (
-          <div
-            className="mt-0.5 pl-[34px] text-[10px] font-medium text-muted-foreground/80"
-            title={resetTime.title}
-          >
-            {/* 表格空间紧张，重置时间去掉秒（完整时间在 tooltip） */}
-            ⏱ {t("grok.quotaReset")} {resetTime.label.slice(0, 11)}
-          </div>
-        ) : null}
       </div>
     );
   }

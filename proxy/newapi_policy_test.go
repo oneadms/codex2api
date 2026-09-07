@@ -1383,3 +1383,15 @@ func addSignedNewAPIPolicyMetaWithSecret(t *testing.T, c *gin.Context, meta newA
 	c.Request.Header.Set("X-NewAPI-Policy-Meta", encoded)
 	c.Request.Header.Set("X-NewAPI-Policy-Meta-Signature", signature)
 }
+
+func TestNewAPIRuntimeScopeSeparatesSignedChannels(t *testing.T) {
+	first := newAPIRuntimeScopeWithChannel(101, "fanren", 1001)
+	second := newAPIRuntimeScopeWithChannel(101, "fanren", 1002)
+	legacy := newAPIRuntimeScopeWithChannel(101, "fanren", 0)
+	if first == second || first == legacy || second == legacy {
+		t.Fatalf("channel-aware runtime scopes collided: first=%q second=%q legacy=%q", first, second, legacy)
+	}
+	if !strings.Contains(first, ":channel:1001") || !strings.Contains(second, ":channel:1002") {
+		t.Fatalf("runtime scope does not retain channel boundary: %q / %q", first, second)
+	}
+}

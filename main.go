@@ -24,6 +24,7 @@ import (
 	"github.com/codex2api/config"
 	"github.com/codex2api/database"
 	"github.com/codex2api/internal/imagestore"
+	"github.com/codex2api/internal/version"
 	"github.com/codex2api/proxy"
 	"github.com/codex2api/proxy/wsrelay"
 	"github.com/codex2api/security"
@@ -108,7 +109,7 @@ func main() {
 			PromptFilterCustomPatterns:        "[]",
 			PromptFilterDisabledPatterns:      "[]",
 			ClientCompatMode:                  proxy.ClientCompatModePreserve,
-			CodexMinCLIVersion:                "0.144.1",
+			CodexMinCLIVersion:                "0.153.3",
 			UsageLogMode:                      database.UsageLogModeFull,
 			UsageLogBatchSize:                 200,
 			UsageLogFlushIntervalSeconds:      5,
@@ -159,7 +160,7 @@ func main() {
 			PromptFilterCustomPatterns:        "[]",
 			PromptFilterDisabledPatterns:      "[]",
 			ClientCompatMode:                  proxy.ClientCompatModePreserve,
-			CodexMinCLIVersion:                "0.144.1",
+			CodexMinCLIVersion:                "0.153.3",
 			UsageLogMode:                      database.UsageLogModeFull,
 			UsageLogBatchSize:                 200,
 			UsageLogFlushIntervalSeconds:      5,
@@ -220,6 +221,18 @@ func main() {
 		}
 	}
 	antigravityOAuthCancel()
+	antigravityCfgCtx, antigravityCfgCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	if raw, err := db.LoadAntigravityConfig(antigravityCfgCtx); err != nil {
+		log.Printf("加载 Antigravity 渠道设置失败(模型重定向不生效): %v", err)
+	} else if parsed, parseErr := auth.ParseAntigravitySettings(raw); parseErr != nil {
+		log.Printf("Antigravity 渠道设置解析失败(模型重定向不生效,请在管理页重新保存): %v", parseErr)
+	} else {
+		auth.SetConfiguredAntigravitySettings(parsed)
+		if len(parsed.ModelRedirects) > 0 {
+			log.Printf("Antigravity 模型重定向已加载: %d 条", len(parsed.ModelRedirects))
+		}
+	}
+	antigravityCfgCancel()
 
 	appliedResponseCache := proxy.GetResponseCacheAppliedConfig()
 	log.Printf(
@@ -311,6 +324,15 @@ func main() {
 		auth.ResinRequestDecorator = nil
 	}
 
+	// Claude CLI 同步版本先于账号加载发布，保证 GenerateClaudeFingerprint 与回写使用同一生效版本。
+	claudeCLIVersionCtx, claudeCLIVersionCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if synced, err := db.GetClaudeSyncedCLIVersion(claudeCLIVersionCtx); err == nil {
+		auth.SetClaudeSyncedCLIVersion(synced)
+	} else {
+		log.Printf("读取 Claude CLI 同步版本失败（使用内置 %s）: %v", auth.BuiltinClaudeCLIVersion, err)
+	}
+	claudeCLIVersionCancel()
+
 	// 5. 初始化账号管理器
 	store := auth.NewStore(db, tc, settings)
 
@@ -352,6 +374,9 @@ func main() {
 	// 出上游新版本门槛时无需发版即可跟进。开关/间隔在设置页可调，
 	// CODEX_DISABLE_CLI_VERSION_SYNC 为硬关闭。
 	proxy.StartCodexCLIVersionSync(backgroundCtx, db, store.GetProxyURL)
+
+	// Claude Code CLI 版本同步：启动先用生效版本回写账号指纹，再按 ClaudeConfig 开关/间隔联网同步。
+	proxy.StartClaudeCLIVersionSync(backgroundCtx, db, store, store.GetProxyURL)
 
 	log.Printf("账号就绪: %d/%d 可用", store.AvailableCount(), store.AccountCount())
 
@@ -553,6 +578,7 @@ func main() {
 		}
 		c.JSON(200, gin.H{
 			"status":          "ok",
+			"build_version":   version.Current(),
 			"available":       available,
 			"total":           total,
 			"counts_complete": countsComplete,
@@ -615,6 +641,9 @@ func main() {
 	adminHandler.WaitAutoActivate5hWindow()
 	wsKeepalive.Stop()
 	wsrelay.ShutdownExecutor()
+	if !proxy.DrainResponseCacheBackendWrites(2 * time.Second) {
+		log.Printf("部分响应上下文后台写入未在关闭窗口内完成")
+	}
 	store.Stop()
 	// 所有请求入口和后台生产者停止后，再排空仍可能访问 Store、缓存或数据库的短任务。
 	if !db.DrainBackgroundTasks(2 * time.Second) {

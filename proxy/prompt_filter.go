@@ -257,6 +257,7 @@ type promptFilterAuditContext struct {
 	RequestCorrelationID string
 	NewAPIPolicyStatus   string
 	NewAPIPlatform       string
+	NewAPIChannelID      int
 	NewAPIUserID         string
 	NewAPIUserName       string
 	NewAPIUserEmail      string
@@ -279,8 +280,10 @@ func (h *Handler) capturePromptFilterAuditContext(c *gin.Context) promptFilterAu
 	populatePromptFilterAPIKeyMeta(c, input)
 	newAPIStatus, policyContext := h.cachedNewAPIPolicyAuditState(c)
 	sessionHash := ""
+	newAPIChannelID := 0
 	newAPIUserName, newAPIUserEmail, newAPIUserGroup := "", "", ""
 	if (newAPIStatus == "verified" || newAPIStatus == "signed_response") && policyContext.MetaVerified {
+		newAPIChannelID = policyContext.Meta.ChannelID
 		sessionHash = hashRiskIdentity(policyContext.Meta.SessionFingerprint)
 		newAPIUserName = policyContext.Meta.UserName
 		newAPIUserEmail = policyContext.Meta.UserEmail
@@ -307,6 +310,7 @@ func (h *Handler) capturePromptFilterAuditContext(c *gin.Context) promptFilterAu
 		RequestCorrelationID: ensurePromptPolicyRequestCorrelationID(c),
 		NewAPIPolicyStatus:   newAPIStatus,
 		NewAPIPlatform:       policyContext.Platform,
+		NewAPIChannelID:      newAPIChannelID,
 		NewAPIUserID:         policyContext.Identity.UserID,
 		NewAPIUserName:       newAPIUserName,
 		NewAPIUserEmail:      newAPIUserEmail,

@@ -184,6 +184,9 @@ func continuousRetryKeepaliveForContext(ctx context.Context) continuousRetryKeep
 }
 
 func activateContinuousRetryKeepalive(ctx context.Context) {
+	if apiKeyModelRequestAdmissionPending(ctx) {
+		return
+	}
 	if keepalive := continuousRetryKeepaliveForContext(ctx); keepalive != nil {
 		keepalive.Activate()
 	}
@@ -508,8 +511,9 @@ func writeCommittedResponsesRetryError(c *gin.Context, message string) bool {
 	payload, _ := json.Marshal(gin.H{
 		"type": "response.failed",
 		"response": gin.H{
-			"status": "failed",
-			"error":  gin.H{"message": message, "type": "upstream_error", "code": code},
+			"created_at": time.Now().Unix(),
+			"status":     "failed",
+			"error":      gin.H{"message": message, "type": "upstream_error", "code": code},
 		},
 	})
 	_, _ = c.Writer.WriteString("data: " + string(payload) + "\n\n")
@@ -605,7 +609,8 @@ func writeContinuousRetryLocalResponsesError(c *gin.Context) bool {
 	payload, _ := json.Marshal(gin.H{
 		"type": "response.failed",
 		"response": gin.H{
-			"status": "failed",
+			"created_at": time.Now().Unix(),
+			"status":     "failed",
 			"error": gin.H{
 				"message": continuousRetryLocalFailureMessage,
 				"type":    "server_error",

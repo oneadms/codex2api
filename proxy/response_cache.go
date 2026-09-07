@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"container/list"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,6 +65,7 @@ func responseCacheStoreKey(owner, responseID string) string {
 type responseCacheEntry struct {
 	key       string
 	items     []json.RawMessage
+	blobs     []*sharedResponseContextItem
 	bytes     int64
 	expiresAt time.Time
 	element   *list.Element
@@ -96,6 +99,9 @@ func defaultResponseCacheConfig() responseCacheConfig {
 // 否则计 Miss（含负标记、后端错误/损坏、重建超限）。Local*/Remote* 是分层口径。
 // 不变量：Hits = LocalHits + RemoteHits；Hits + Misses = LocalHits + LocalMisses。
 type ResponseCacheStats struct {
+	// Unique retained payload bytes, excluding slice/map overhead and active
+	// readers. Bytes below remains the conservative logical eviction budget.
+	SharedPayloadBytes     int64
 	Entries                int
 	Bytes                  int64
 	HighWaterBytes         int64
@@ -122,6 +128,7 @@ type ResponseCacheStats struct {
 type responseCacheState struct {
 	mu           sync.RWMutex
 	store        map[string]*responseCacheEntry
+	sharedItems  map[[sha256.Size]byte]*sharedResponseContextItem
 	lru          *list.List
 	markers      map[string]*responseCacheMarker
 	markerLRU    *list.List
@@ -187,6 +194,7 @@ var respCache responseCacheState
 
 func init() {
 	respCache.store = make(map[string]*responseCacheEntry)
+	respCache.sharedItems = make(map[[sha256.Size]byte]*sharedResponseContextItem)
 	respCache.lru = list.New()
 	respCache.markers = make(map[string]*responseCacheMarker)
 	respCache.markerLRU = list.New()
@@ -216,8 +224,14 @@ func GetResponseCacheStats() ResponseCacheStats {
 // resetResponseCacheStateForTest replaces all local state with a deterministic
 // test configuration. It deliberately remains package-private.
 func resetResponseCacheStateForTest(config responseCacheConfig) {
+	// 上一个测试的后台写入必须先落地，否则会写进重置后的后端。
+	drainResponseCacheBackendWrites()
+	responseCacheBackendWriter.mu.Lock()
+	responseCacheBackendWriter.draining = false
+	responseCacheBackendWriter.mu.Unlock()
 	respCache.mu.Lock()
 	respCache.store = make(map[string]*responseCacheEntry)
+	respCache.sharedItems = make(map[[sha256.Size]byte]*sharedResponseContextItem)
 	respCache.lru = list.New()
 	respCache.markers = make(map[string]*responseCacheMarker)
 	respCache.markerLRU = list.New()
@@ -279,6 +293,17 @@ func removeResponseCacheChainOwnerLocked(owner string) {
 	respCache.stats.ChainOwners = len(respCache.chainOwners)
 }
 
+// markResponseCacheChainOwnerIfOnDemand 在 on_demand 写入策略下把 owner 标为
+// 近期续链者；always 策略下写入本就放行，不占 LRU 名额。
+func markResponseCacheChainOwnerIfOnDemand(owner string) {
+	respCache.mu.Lock()
+	defer respCache.mu.Unlock()
+	if respCache.config.writePolicy != database.ResponseCacheWritePolicyOnDemand {
+		return
+	}
+	markResponseCacheChainOwnerLocked(owner)
+}
+
 // responseCacheWriteAllowed 判断当前写入策略下 owner 是否有写入资格。
 // on_demand 下过期记录按不合格处理（惰性删除交给清理循环）。
 func responseCacheWriteAllowed(owner string) bool {
@@ -311,11 +336,83 @@ func setResponseCache(owner, responseID string, items []json.RawMessage) {
 	respCache.mu.RUnlock()
 
 	if runtimeCache != nil && len(runtimeItems) > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		writeResponseContextBackend(runtimeCache, responseID, storeKey, runtimeItems)
+	}
+}
+
+const (
+	// 后台写入并发槽位；耗尽后退回同步写（背压而非丢弃）。
+	responseCacheBackendWriteSlots = 16
+	// 后台写入不在请求路径上，给大载荷留足时间；同步兜底写沿用旧上限。
+	responseCacheBackendWriteTimeout = 2 * time.Second
+	responseCacheBackendSyncTimeout  = 500 * time.Millisecond
+)
+
+var responseCacheBackendWriter = struct {
+	wg       sync.WaitGroup
+	mu       sync.Mutex
+	draining bool
+	slots    chan struct{}
+}{slots: make(chan struct{}, responseCacheBackendWriteSlots)}
+
+// writeResponseContextBackend 把已入 L1 的条目写到共享后端。写入在后台完成，
+// 调用方（响应收尾、串行的 WS 帧循环）不再等 Redis 往返；槽位耗尽时退回同步写，
+// 保证 L1 未命中时共享后端仍能兜底。后台写持有调用方切片的私有克隆，返回后
+// 调用方或后端对各自副本的改动互不可见（memcpy 远比一次 Redis 往返便宜）。
+func writeResponseContextBackend(runtimeCache cache.TokenCache, responseID, storeKey string, items []json.RawMessage) {
+	write := func(payload []json.RawMessage, timeout time.Duration) {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		if err := runtimeCache.SetResponseContext(ctx, storeKey, runtimeItems, responseCacheTTL); err != nil {
+		if err := runtimeCache.SetResponseContext(ctx, storeKey, payload, responseCacheTTL); err != nil {
 			log.Printf("写入 Redis response context 失败: response_id=%s err=%v", responseID, err)
 		}
+	}
+	responseCacheBackendWriter.mu.Lock()
+	if responseCacheBackendWriter.draining {
+		responseCacheBackendWriter.mu.Unlock()
+		write(cloneResponseContextItems(items), responseCacheBackendSyncTimeout)
+		return
+	}
+	select {
+	case responseCacheBackendWriter.slots <- struct{}{}:
+		payload := cloneResponseContextItems(items)
+		responseCacheBackendWriter.wg.Add(1)
+		responseCacheBackendWriter.mu.Unlock()
+		go func() {
+			defer func() {
+				<-responseCacheBackendWriter.slots
+				responseCacheBackendWriter.wg.Done()
+			}()
+			write(payload, responseCacheBackendWriteTimeout)
+		}()
+	default:
+		responseCacheBackendWriter.mu.Unlock()
+		write(cloneResponseContextItems(items), responseCacheBackendSyncTimeout)
+	}
+}
+
+// drainResponseCacheBackendWrites 等待后台写入全部落地（测试与关停使用）。
+func drainResponseCacheBackendWrites() {
+	responseCacheBackendWriter.mu.Lock()
+	responseCacheBackendWriter.wg.Wait()
+	responseCacheBackendWriter.mu.Unlock()
+}
+
+// DrainResponseCacheBackendWrites 在关停时等待后台共享后端写入完成，最多等 timeout。
+func DrainResponseCacheBackendWrites(timeout time.Duration) bool {
+	responseCacheBackendWriter.mu.Lock()
+	responseCacheBackendWriter.draining = true
+	responseCacheBackendWriter.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		responseCacheBackendWriter.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
 	}
 }
 
@@ -324,9 +421,7 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 	defer respCache.mu.Unlock()
 
 	items = trimResponseContextTail(items, respCache.config.maxItems)
-	if normalizedItems, err := cache.NormalizeResponseContextItems(items); err == nil {
-		items = normalizedItems
-	}
+	items, hashes, normalized := respCache.normalizeResponseContextItemsLocked(items)
 	var entryBytes int64
 	for _, item := range items {
 		entryBytes += int64(len(item))
@@ -350,7 +445,6 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 		return items, false, overL1ByteBudget
 	}
 
-	retainedItems := cloneResponseContextItems(items)
 	for len(respCache.store)+1 > respCache.config.maxEntries ||
 		respCache.stats.Bytes+entryBytes > respCache.config.maxBytes {
 		oldest := respCache.oldestLocked()
@@ -372,9 +466,11 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 		respCache.removeEntryLocked(oldest, reason)
 	}
 
+	retainedItems, blobs := respCache.retainResponseContextItemsLocked(items, hashes, normalized)
 	entry := &responseCacheEntry{
 		key:       storeKey,
 		items:     retainedItems,
+		blobs:     blobs,
 		bytes:     entryBytes,
 		expiresAt: time.Now().Add(respCache.config.ttl),
 	}
@@ -395,6 +491,77 @@ func cloneResponseContextItems(items []json.RawMessage) []json.RawMessage {
 		itemsCopy[i] = append(json.RawMessage(nil), item...)
 	}
 	return itemsCopy
+}
+
+// Cached bodies are immutable. Identical items across response IDs share an
+// owned allocation; reference counts follow cache entries only. Eviction drops
+// ownership without modifying bytes, so an active replay remains valid.
+type sharedResponseContextItem struct {
+	key        [sha256.Size]byte
+	body       json.RawMessage
+	refs       int
+	normalized bool
+}
+
+// Previously interned canonical bytes have already passed JSON validation and
+// escape normalization. Rechecking every historical item on every turn would
+// consume the allocation savings in repeated parsing. Only new bytes need it.
+func (c *responseCacheState) normalizeResponseContextItemsLocked(items []json.RawMessage) ([]json.RawMessage, [][sha256.Size]byte, bool) {
+	hashes := make([][sha256.Size]byte, len(items))
+	var normalized []json.RawMessage
+	for i, item := range items {
+		key := sha256.Sum256(item)
+		if blob := c.sharedItems[key]; blob != nil && blob.normalized && bytes.Equal(blob.body, item) {
+			hashes[i] = key
+			continue
+		}
+		next, err := cache.NormalizeResponseContextItems([]json.RawMessage{item})
+		if err != nil {
+			return items, nil, false
+		} // Preserve legacy all-or-nothing normalization.
+		if !bytes.Equal(item, next[0]) {
+			if normalized == nil {
+				normalized = append([]json.RawMessage(nil), items...)
+			}
+			normalized[i] = next[0]
+			key = sha256.Sum256(next[0])
+		}
+		hashes[i] = key
+	}
+	if normalized != nil {
+		items = normalized
+	}
+	return items, hashes, true
+}
+
+func (c *responseCacheState) retainResponseContextItemsLocked(items []json.RawMessage, hashes [][sha256.Size]byte, normalized bool) ([]json.RawMessage, []*sharedResponseContextItem) {
+	if c.sharedItems == nil {
+		c.sharedItems = make(map[[sha256.Size]byte]*sharedResponseContextItem)
+	}
+	retained := make([]json.RawMessage, len(items))
+	blobs := make([]*sharedResponseContextItem, len(items))
+	for i, item := range items {
+		var key [sha256.Size]byte
+		if hashes != nil {
+			key = hashes[i]
+		} else {
+			key = sha256.Sum256(item)
+		}
+		blob := c.sharedItems[key]
+		if blob == nil || !bytes.Equal(blob.body, item) {
+			blob = &sharedResponseContextItem{key: key, body: append(json.RawMessage(nil), item...)}
+			// A hash collision must never alias unrelated content or replace a
+			// live intern entry. The colliding item stays privately owned.
+			if c.sharedItems[key] == nil {
+				c.sharedItems[key] = blob
+			}
+			c.stats.SharedPayloadBytes += int64(len(item))
+		}
+		blob.refs++
+		blob.normalized = blob.normalized || normalized
+		retained[i], blobs[i] = blob.body, blob
+	}
+	return retained, blobs
 }
 
 type responseCacheRemovalReason uint8
@@ -423,6 +590,18 @@ func (c *responseCacheState) removeEntryLocked(entry *responseCacheEntry, reason
 		return
 	}
 	delete(c.store, entry.key)
+	for _, blob := range entry.blobs {
+		blob.refs--
+		if blob.refs == 0 {
+			if c.sharedItems[blob.key] == blob {
+				delete(c.sharedItems, blob.key)
+				if len(c.sharedItems) == 0 {
+					c.sharedItems = nil
+				}
+			}
+			c.stats.SharedPayloadBytes -= int64(len(blob.body))
+		}
+	}
 	if entry.element != nil {
 		c.lru.Remove(entry.element)
 	}
@@ -603,12 +782,27 @@ func getResponseCache(owner, responseID string) []json.RawMessage {
 	return result.Items
 }
 
+// getResponseCacheForReplay is reserved for request preparation. Callers must
+// treat item bodies as immutable and replace, never mutate, an item to edit it.
+func getResponseCacheForReplay(owner, responseID string) responseCacheLookupResult {
+	return getResponseCacheResultWithOwnership(owner, responseID, true)
+}
+
 // getResponseCacheResult preserves enough lookup state for the HTTP handlers
 // to distinguish a reconstructable hit from a final local/backend failure.
 // 命中/未命中计数只在这个出口、单一临界区内记账一次：聚合 Hits/Misses 是
 // 端到端口径，Local*/Remote* 是分层口径，两组在任意快照瞬间保持一致。
 func getResponseCacheResult(owner, responseID string) responseCacheLookupResult {
-	result := lookupResponseCacheResult(owner, responseID)
+	return getResponseCacheResultWithOwnership(owner, responseID, false)
+}
+
+func getResponseCacheResultWithOwnership(owner, responseID string, borrow bool) responseCacheLookupResult {
+	result := lookupResponseCacheResultWithOwnership(owner, responseID, borrow)
+	recordResponseCacheLookup(owner, result)
+	return result
+}
+
+func recordResponseCacheLookup(owner string, result responseCacheLookupResult) {
 	respCache.mu.Lock()
 	// 任何续链查询（无论命中与否）都赋予 owner 写入资格：这是 on_demand
 	// 写入策略的准入信号，命中率与之无关。
@@ -632,10 +826,13 @@ func getResponseCacheResult(owner, responseID string) responseCacheLookupResult 
 		}
 	}
 	respCache.mu.Unlock()
-	return result
 }
 
 func lookupResponseCacheResult(owner, responseID string) responseCacheLookupResult {
+	return lookupResponseCacheResultWithOwnership(owner, responseID, false)
+}
+
+func lookupResponseCacheResultWithOwnership(owner, responseID string, borrow bool) responseCacheLookupResult {
 	storeKey := responseCacheStoreKey(owner, responseID)
 	respCache.mu.Lock()
 	entry, ok := respCache.store[storeKey]
@@ -652,6 +849,11 @@ func lookupResponseCacheResult(owner, responseID string) responseCacheLookupResu
 			// 取引用后在锁外克隆，避免大条目命中时锁内做兆级拷贝。
 			items := entry.items
 			respCache.mu.Unlock()
+			if borrow {
+				// Each reader owns its sequence header. Bodies stay immutable;
+				// append/replacing an item cannot alter another reader's list.
+				return responseCacheLookupResult{Items: append([]json.RawMessage(nil), items...), Kind: responseCacheLookupHit, Source: responseCacheSourceLocal}
+			}
 			return responseCacheLookupResult{
 				Items:  cloneResponseContextItems(items),
 				Kind:   responseCacheLookupHit,

@@ -28,6 +28,7 @@ const (
 	modelBackingRelay
 	modelBackingAntigravity
 	modelBackingTraeCN
+	modelBackingClaude
 )
 
 type scopedModelRecord struct {
@@ -79,6 +80,8 @@ func scopedModelOwner(record *scopedModelRecord) string {
 		return "google"
 	case modelBackingTraeCN:
 		return "trae"
+	case modelBackingClaude:
+		return "anthropic"
 	default:
 		return "codex2api"
 	}
@@ -232,6 +235,18 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 				addTarget(id)
 			}
 
+		case account.IsClaudeOAuth():
+			// Claude Code OAuth 账号按账号声明的默认模型暴露原生模型。
+			for _, id := range DefaultClaudeModelIDsForAccount(account) {
+				addScopedModel(records, id, modelBackingClaude, time.Time{}, false)
+				addTarget(id)
+			}
+
+		case account.IsClaudeAPIKey():
+			for _, id := range DefaultClaudeModelIDsForAccount(account) {
+				addScopedModel(records, id, modelBackingClaude, time.Time{}, false)
+				addTarget(id)
+			}
 		default:
 			for _, item := range catalog.Items {
 				if !item.Enabled || !account.SupportsCodexModel(item.ID) {
@@ -250,7 +265,7 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 	// surface. Global/OpenAI aliases and synthesized effort aliases belong to
 	// other providers and would make Cockpit's catalog diverge again.
 	channel := row.Limits.ResolveUpstreamChannel()
-	if channel != database.UpstreamChannelAntigravity && channel != database.UpstreamChannelTraeCN {
+	if channel != database.UpstreamChannelAntigravity && channel != database.UpstreamChannelTraeCN && channel != database.UpstreamChannelClaude {
 		// Global exact aliases are visible only when their concrete target is
 		// routeable in this key's account snapshot. Wildcards are patterns, not
 		// model IDs, and therefore never appear in /v1/models.

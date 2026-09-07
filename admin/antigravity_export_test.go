@@ -38,7 +38,7 @@ func TestAntigravityExportOAuthRoundTripsThroughImporter(t *testing.T) {
 			"antigravity_client_id": "client-id", "antigravity_client_secret": "client-secret",
 			"oauth_scope": "scope-a", "expires_at": "2026-08-22T00:00:00Z",
 		},
-	})
+	}, exportProxyResolver{include: true})
 	if !ok || entry.AuthKind != auth.AntigravityAuthKindOAuth {
 		t.Fatalf("OAuth export entry = %+v, ok=%v", entry, ok)
 	}
@@ -71,7 +71,7 @@ func TestAntigravityExportAPIKeyIsExplicitAndSecretBearing(t *testing.T) {
 			"upstream_type": auth.UpstreamAntigravity, "api_key": "google-secret-key",
 			"models": []string{"gemini-test"}, "model_mapping": `{"alias":"gemini-test"}`,
 		},
-	})
+	}, exportProxyResolver{include: true})
 	if !ok || entry.AuthKind != auth.AntigravityAuthKindAPIKey || entry.APIKey != "google-secret-key" {
 		t.Fatalf("API-key entry = %+v, ok=%v", entry, ok)
 	}

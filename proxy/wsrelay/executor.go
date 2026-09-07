@@ -185,7 +185,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	// 续链亲和：上游无服务端存储时，previous_response_id 的上下文只存活在产出
 	// 该响应的那条 WS 连接里。带续链 ID 的请求优先取回原连接（独占成功才用），
 	// 否则落到随机槽位会触发上游 "previous response not found"。
-	poolSessionID := sessionID
+	poolSessionID := proxy.ResolveCodexWebsocketTransportSessionKey(sessionID, ginHeaders)
 	var wc *WsConnection
 	var pr *PendingRequest
 	var err2 error
@@ -203,7 +203,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		if proxy.IsStatelessWebsocketSessionID(sessionID) && baseKey != "" && !statelessOneShotEnabled() {
 			wc, pr, poolSessionID, err2 = e.manager.AcquireReusableConnection(ctx, account, wsURL, baseKey, sessionID, statelessConnectionSlots(), headers, proxyOverride)
 		} else {
-			wc, pr, err2 = e.manager.AcquireConnection(ctx, account, wsURL, sessionID, headers, proxyOverride)
+			wc, pr, err2 = e.manager.AcquireConnection(ctx, account, wsURL, poolSessionID, headers, proxyOverride)
 		}
 	}
 	// 取连耗时（busy 排队 + 探活 + 握手）计入本 attempt 的 ws_acquire_ms（issue #413）
@@ -211,6 +211,11 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	if err2 != nil {
 		return nil, err2
 	}
+	// AcquireConnection 可能按 busy overflow 策略落到 <lane>#ovf-N；
+	// response_id 续链绑定和发送失败后的重拨都必须使用实际槽位，不能继续
+	// 记录调用前的 base lane。普通、stateless slot 与 preferred 路径在这里
+	// 做同一轮幂等校正。
+	poolSessionID = actualWebsocketPoolSessionID(wc, poolSessionID)
 	if wc.upstreamUserAgentKnown {
 		proxy.RecordUpstreamUserAgent(ctx, wc.upstreamUserAgent)
 	}
@@ -218,6 +223,13 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	// 发送请求，失败时最多重试 2 次（重建连接）。
 	// 用 DiscardConnection 按连接指针精确清理：续链亲和取回的连接其 PoolKey
 	// 可能与当前请求的 proxy 组合不同，按参数重算 key 会漏删。
+	if err := proxy.ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(wsBody, "model").String()); err != nil {
+		if !wc.cancelUnsentReadLease(pr.RequestID) {
+			e.manager.DiscardConnection(wc)
+		}
+		wc.session.RemovePendingRequest(pr.RequestID)
+		return nil, err
+	}
 	sendErr := e.sendRequest(wc, wsBody, pr.RequestID)
 	for retries := 0; shouldRetryWebsocketSendError(sendErr) && retries < 2; retries++ {
 		wc.session.RemovePendingRequest(pr.RequestID)
@@ -258,6 +270,16 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		apiKey:      apiKey,
 		readErrChan: make(chan error, 1),
 	}, nil
+}
+
+func actualWebsocketPoolSessionID(wc *WsConnection, fallback string) string {
+	if wc == nil || wc.session == nil {
+		return fallback
+	}
+	if actual := strings.TrimSpace(wc.session.ID); actual != "" {
+		return actual
+	}
+	return fallback
 }
 
 func shouldRetryWebsocketSendError(err error) bool {
@@ -550,9 +572,10 @@ func (r *WsResponse) buildErrorEvent(payload []byte) ([]byte, bool) {
 	if errObj == "" {
 		errObj = fmt.Sprintf(`{"message":%q,"code":%d}`, errMsg, status)
 	}
-	event := fmt.Sprintf(`{"type":"response.failed","response":{"status":"failed","error":%s}}`, errObj)
+	createdAt := time.Now().Unix()
+	event := fmt.Sprintf(`{"type":"response.failed","response":{"created_at":%d,"status":"failed","error":%s}}`, createdAt, errObj)
 	if status > 0 {
-		event = fmt.Sprintf(`{"type":"response.failed","response":{"status":"failed","status_code":%d,"error":%s}}`, status, errObj)
+		event = fmt.Sprintf(`{"type":"response.failed","response":{"created_at":%d,"status":"failed","status_code":%d,"error":%s}}`, createdAt, status, errObj)
 	}
 	return []byte(event), true
 }

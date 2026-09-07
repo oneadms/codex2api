@@ -88,7 +88,7 @@ func newResponsesWSSessionPreemptKey(c *gin.Context, rawBody []byte, identity re
 		return responsesWSSessionPreemptKey{}, false
 	}
 	scopeHash := responsesWSSessionPreemptScopeHash(c, identity)
-	sessionHash := responsesWSSessionPreemptIdentityHash(rawBody, identity)
+	sessionHash := responsesWSSessionPreemptIdentityHash(rawBody, identity, responsesWSTransportLane(c, identity))
 	if scopeHash == "" || sessionHash == "" {
 		return responsesWSSessionPreemptKey{}, false
 	}
@@ -150,7 +150,25 @@ func normalizedResponsesWSPreemptGroupIDs(ids []int64) []int64 {
 	return result
 }
 
-func responsesWSSessionPreemptIdentityHash(rawBody []byte, identity requestSessionIdentity) string {
+func responsesWSTransportLane(c *gin.Context, identity requestSessionIdentity) string {
+	if c == nil || c.Request == nil {
+		return ""
+	}
+	base := strings.TrimSpace(identity.explicitUpstreamID)
+	if base == "" && identity.hasDownstreamAffinity {
+		base = strings.TrimSpace(identity.affinityID)
+	}
+	if base == "" {
+		return ""
+	}
+	lane := ResolveCodexWebsocketTransportSessionKey(base, c.Request.Header)
+	if lane == base {
+		return ""
+	}
+	return lane
+}
+
+func responsesWSSessionPreemptIdentityHash(rawBody []byte, identity requestSessionIdentity, transportLane string) string {
 	turnState := strings.TrimSpace(codexWSTurnContinuationToken(rawBody))
 	previousResponseID := strings.TrimSpace(gjson.GetBytes(rawBody, "previous_response_id").String())
 	contentSeed := strings.TrimSpace(deriveContentSessionSeed(rawBody))
@@ -168,6 +186,12 @@ func responsesWSSessionPreemptIdentityHash(rawBody []byte, identity requestSessi
 		source = "content:" + contentSeed
 	default:
 		return ""
+	}
+	if transportLane = strings.TrimSpace(transportLane); transportLane != "" {
+		// A Codex session tree shares session-id while each parent/subagent has its
+		// own thread-id. Only newer work in the same logical thread may preempt an
+		// active owner; sibling agents must be allowed to run concurrently.
+		source += "\x00transport:" + transportLane
 	}
 	streamID := strings.TrimSpace(gjson.GetBytes(rawBody, "stream_id").String())
 	sum := sha256.Sum256([]byte(source + "\x00stream:" + streamID))

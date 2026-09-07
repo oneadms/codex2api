@@ -110,6 +110,14 @@ func ApplyCodexSessionHeaders(outbound http.Header, account *auth.Account, fallb
 	}
 
 	convergedSessionID, threadID := ConvergedCodexSessionIdentity(account, downstreamHeaders)
+	if threadID == "" {
+		// off/device 档不会生成收敛后的 thread_id，但真实 Codex 的
+		// Thread-Id 仍是区分父任务与子 Agent 的会话语义。优先保留下游
+		// 自报值（显式头优先、turn metadata 兜底），仅在确实缺失时才
+		// 回落到单线程会话形态。full 档会在上一步给出收敛值，仍按配置
+		// 有意把多条线程折叠为同一上游身份。
+		_, threadID = extractClientCodexIdentity(downstreamHeaders)
+	}
 
 	// session-id 默认仍是网关自己的会话键：收敛不介入上游会话身份是既有约束，
 	// 只有显式开启对齐才改用收敛值（见 codexSessionHeaderAlignsConverged）。

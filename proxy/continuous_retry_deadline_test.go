@@ -186,7 +186,7 @@ func TestContinuousRetryHTTPTimeoutWritesStableProtocols(t *testing.T) {
 		contains []string
 	}{
 		{name: "json", protocol: continuousRetryProtocolOpenAI, wantCode: http.StatusGatewayTimeout, contains: []string{"upstream_timeout"}},
-		{name: "responses SSE", protocol: continuousRetryProtocolResponses, commit: true, wantCode: http.StatusOK, contains: []string{"response.failed", "upstream_timeout"}},
+		{name: "responses SSE", protocol: continuousRetryProtocolResponses, commit: true, wantCode: http.StatusOK, contains: []string{"response.failed", "upstream_timeout", `"created_at":`}},
 		{name: "chat SSE", protocol: continuousRetryProtocolChat, commit: true, wantCode: http.StatusOK, contains: []string{"upstream_timeout"}},
 		{name: "anthropic SSE", protocol: continuousRetryProtocolAnthropic, commit: true, wantCode: http.StatusOK, contains: []string{"event: error", "api_error"}},
 	}
@@ -311,6 +311,9 @@ func TestContinuousRetryCommittedWritersReturnLastFailureOnce(t *testing.T) {
 			}
 			if strings.Contains(body, continuousRetryTimeoutMessage) {
 				t.Fatalf("body used generic timeout despite remembered failure: %q", body)
+			}
+			if tc.protocol == continuousRetryProtocolResponses && !strings.Contains(body, `"created_at":`) {
+				t.Fatalf("Responses failure is missing created_at: %q", body)
 			}
 		})
 	}

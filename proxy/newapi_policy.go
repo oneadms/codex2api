@@ -169,7 +169,28 @@ func normalizedNewAPIPlatform(value string) string {
 }
 
 func newAPIRuntimeScope(apiKeyID int64, platform string) string {
-	return fmt.Sprintf("api-key:%d:platform:%s", apiKeyID, hashRiskIdentity(normalizedNewAPIPlatform(platform)))
+	return newAPIRuntimeScopeWithChannel(apiKeyID, platform, 0)
+}
+
+// newAPIRuntimeScopeWithChannel isolates ephemeral risk/session state by the
+// signed NewAPI channel when available. Persisted person identity remains
+// platform+user scoped so the same person is still discoverable across
+// channels, while a risky channel cannot poison another channel's short-term
+// adaptive trust or conversation context.
+func newAPIRuntimeScopeWithChannel(apiKeyID int64, platform string, channelID int) string {
+	scope := fmt.Sprintf("api-key:%d:platform:%s", apiKeyID, hashRiskIdentity(normalizedNewAPIPlatform(platform)))
+	if channelID > 0 {
+		scope += fmt.Sprintf(":channel:%d", channelID)
+	}
+	return scope
+}
+
+func newAPIRuntimeScopeForPolicyContext(policyContext verifiedNewAPIPolicyContext) string {
+	channelID := 0
+	if policyContext.MetaVerified {
+		channelID = policyContext.Meta.ChannelID
+	}
+	return newAPIRuntimeScopeWithChannel(policyContext.APIKeyID, policyContext.Platform, channelID)
 }
 
 type newAPISecretCandidate struct {

@@ -91,6 +91,9 @@ func TestContinuousRetryLocalProtocolErrorsDoNotRequireCommittedWriter(t *testin
 			if !strings.Contains(body, tc.want) || !strings.Contains(body, continuousRetryLocalFailureMessage) {
 				t.Fatalf("body = %q", body)
 			}
+			if tc.name == "responses" && !strings.Contains(body, `"created_at":`) {
+				t.Fatalf("Responses failure is missing created_at: %q", body)
+			}
 		})
 	}
 }

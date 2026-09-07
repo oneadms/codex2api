@@ -44,13 +44,10 @@ const subscriptionProbeMinInterval = 6 * time.Hour
 
 // ChatGPTSubscription 是 /backend-api/subscriptions 响应中本服务关心的字段。
 type ChatGPTSubscription struct {
-	PlanType        string `json:"plan_type"`
-	ActiveStart     string `json:"active_start"`
-	ActiveUntil     string `json:"active_until"`
-	WillRenew       bool   `json:"will_renew"`
-	BillingCurrency string `json:"billing_currency"`
-	BillingPeriod   string `json:"billing_period"`
-	IsDelinquent    bool   `json:"is_delinquent"`
+	PlanType    string `json:"plan_type"`
+	ActiveStart string `json:"active_start"`
+	ActiveUntil string `json:"active_until"`
+	WillRenew   bool   `json:"will_renew"`
 }
 
 // ActiveUntilTime 解析 active_until；缺失或格式非法返回零值。

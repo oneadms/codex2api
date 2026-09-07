@@ -29,6 +29,31 @@ test("usage reload skips accounts that cannot be sampled", () => {
   assert.equal(needsUsageReload({ status: "unauthorized" }), false);
 });
 
+test("Claude usage probe without quota headers still counts as sampled", () => {
+  const sampled = {
+    status: "active",
+    claude_api: true,
+    claude_usage_probe_at: "2026-08-29T05:00:00Z",
+    claude_usage_probe_error: "",
+  };
+  assert.equal(needsUsageReload(sampled), false);
+  assert.equal(isUnsampledQuotaAccount(sampled), false);
+  assert.equal(getAccountStatusBadgeStatus(sampled), "active");
+});
+
+test("Claude probe failures remain unsampled and are not eligible for OpenAI billing", () => {
+  const failed = {
+    status: "active",
+    claude_api: true,
+    claude_usage_probe_at: "2026-08-29T05:00:00Z",
+    claude_usage_probe_error: "upstream timeout",
+  };
+  assert.equal(needsUsageReload(failed), true);
+  assert.equal(isUnsampledQuotaAccount(failed), true);
+  assert.equal(supportsOfficialUsage(failed), false);
+  assert.equal(needsOfficialCostReload(failed), false);
+});
+
 test("unsampled quota accounts are not treated as available", () => {
   assert.equal(isUnsampledQuotaAccount({ status: "active" }), true);
   assert.equal(
@@ -69,6 +94,7 @@ test("official cost reload only retries Codex accounts missing the snapshot", ()
   assert.equal(needsOfficialCostReload({ official_usd_7d: 12.5 }), false);
   assert.equal(needsOfficialCostReload({ openai_responses_api: true }), false);
   assert.equal(needsOfficialCostReload({ grok_api: true }), false);
+  assert.equal(needsOfficialCostReload({ claude_api: true }), false);
   assert.equal(
     needsOfficialCostReload({ access_token_type: "codex_at" }),
     false,
@@ -92,6 +118,7 @@ test("official cost reload only retries Codex accounts missing the snapshot", ()
   assert.equal(supportsOfficialUsage({ access_token_type: " CODEX_AT " }), false);
   assert.equal(supportsOfficialUsage({ openai_responses_api: true }), false);
   assert.equal(supportsOfficialUsage({ grok_api: true }), false);
+  assert.equal(supportsOfficialUsage({ claude_api: true }), false);
   assert.equal(isOfficialCostHiddenAccount({ status: "error" }), true);
   assert.equal(isOfficialCostHiddenAccount({ status: "active" }), false);
   assert.equal(

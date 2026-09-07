@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/codex2api/auth"
@@ -22,6 +23,146 @@ import (
 // ==================== Anthropic 错误格式 ====================
 
 const upstreamErrorBodyReadMaxBytes = 1 << 20
+
+// isClaudeClientCompatibilityError recognizes Anthropic's model/client version
+// gate. It must stay narrower than generic invalid_request_error so ordinary
+// request failures retain their existing account/error handling.
+func isClaudeClientCompatibilityError(statusCode int, body []byte) bool {
+	if statusCode != http.StatusBadRequest || len(body) == 0 {
+		return false
+	}
+	errType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()))
+	if errType == "" {
+		errType = strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "type").String()))
+	}
+	if errType != ErrorTypeInvalidRequest {
+		return false
+	}
+	// Only the structured message fields are inspected: scanning the raw body
+	// would let echoed request content steer the classification.
+	message := strings.ToLower(strings.Join([]string{
+		gjson.GetBytes(body, "error.message").String(),
+		gjson.GetBytes(body, "message").String(),
+	}, " "))
+	return strings.Contains(message, "claude code") &&
+		strings.Contains(message, "does not support this model") &&
+		strings.Contains(message, "version") && strings.Contains(message, "required")
+}
+
+var claudeDownstreamResponseHeaders = map[string]struct{}{
+	"anthropic-ratelimit-unified-5h-utilization":       {},
+	"anthropic-ratelimit-unified-5h-reset":             {},
+	"anthropic-ratelimit-unified-7d-utilization":       {},
+	"anthropic-ratelimit-unified-7d-reset":             {},
+	"anthropic-ratelimit-unified-reset":                {},
+	"anthropic-ratelimit-unified-status":               {},
+	"anthropic-ratelimit-unified-representative-claim": {},
+	"anthropic-ratelimit-unified-overage-status":       {},
+	"anthropic-version":                                {},
+}
+
+// copyClaudeNativeResponseHeaders forwards only non-sensitive Anthropic
+// response metadata. The shared native-forwarder intentionally has a Grok
+// header allowlist, so Claude's unified quota headers need a provider-specific
+// opt-in to remain visible to an Anthropic client.
+func copyClaudeNativeResponseHeaders(c *gin.Context, header http.Header) {
+	if c == nil {
+		return
+	}
+	for name, values := range header {
+		if _, ok := claudeDownstreamResponseHeaders[strings.ToLower(strings.TrimSpace(name))]; !ok {
+			continue
+		}
+		for _, value := range values {
+			if !strings.ContainsAny(value, "\r\n") {
+				c.Writer.Header().Add(name, value)
+			}
+		}
+	}
+}
+
+// syncAnthropicUsageStateForAccount keeps the Anthropic Messages execution
+// path provider-aware. Claude OAuth responses expose Anthropic's unified
+// rate-limit headers; all other accounts use the existing Codex header
+// semantics. This helper is used on success, failure, and retry paths so a
+// Claude response can never be parsed as a Codex snapshot.
+func syncAnthropicUsageStateForAccount(store *auth.Store, account *auth.Account, resp *http.Response) {
+	if account != nil && account.IsClaudeOAuth() {
+		SyncClaudeUsageState(store, account, resp)
+		return
+	}
+	SyncCodexUsageState(store, account, resp)
+}
+
+// normalizeNativeFailureMessageForAccount keeps the shared native forwarder
+// compatible with Claude without leaking its historical Grok fallback text to
+// Anthropic clients. Structured upstream messages remain untouched.
+func normalizeNativeFailureMessageForAccount(account *auth.Account, outcome streamOutcome) streamOutcome {
+	if account != nil && account.IsClaudeOAuth() && strings.EqualFold(strings.TrimSpace(outcome.failureMessage), "Grok upstream stream failed") {
+		outcome.failureMessage = "Claude upstream stream failed"
+	}
+	return outcome
+}
+
+// applyClaudeNativeFailureCooldown handles provider errors embedded in an
+// otherwise-200 native SSE stream. Claude's relay-style model policy may be
+// configured off, but a body-only rate-limit signal still needs a short account
+// backoff so the scheduler does not immediately hammer the same token again.
+func (h *Handler) applyClaudeNativeFailureCooldown(account *auth.Account, outcome streamOutcome, resp *http.Response, model string) streamOutcome {
+	if h == nil || h.store == nil || account == nil || !account.IsClaudeOAuth() || len(outcome.failurePayload) == 0 || outcome.logStatusCode == http.StatusOK {
+		return outcome
+	}
+	if !account.IsClaudeAPIKey() && isClaudeClientCompatibilityError(outcome.logStatusCode, responseFailedErrorBody(outcome.failurePayload)) {
+		// A provider compatibility gate is deterministic for the caller, not a
+		// transient upstream/account failure. Keep it out of all cooldown paths.
+		outcome.failureKind = "client_compatibility"
+		return outcome
+	}
+	// Anthropic may encode a billing entitlement failure inside an otherwise
+	// successful native SSE response. The shared response.failed handler would
+	// otherwise apply account-level 429 semantics and make every other Claude
+	// model unavailable. Keep this deterministic model-level rejection aligned
+	// with the ordinary HTTP 429 path.
+	lowerPayload := strings.ToLower(string(outcome.failurePayload))
+	billingStatus := outcome.logStatusCode
+	// A compatibility relay can omit both status_code and rate_limit_error from
+	// a response.failed frame while retaining the precise billing message. Treat
+	// that shape as a synthetic 429 for entitlement classification only.
+	if billingStatus != http.StatusTooManyRequests && strings.Contains(lowerPayload, "usage credits") && strings.Contains(lowerPayload, "required") {
+		billingStatus = http.StatusTooManyRequests
+	}
+	if HandleClaudeModelBillingRejection(h.store, account, model, billingStatus, responseFailedErrorBody(outcome.failurePayload)) {
+		outcome.failureKind = "rate_limited_model"
+		return outcome
+	}
+	decision := h.applyResponseFailedCooldown(account, outcome.failurePayload, resp, model)
+	if decision.ResetAt.IsZero() && !claudeHasAuthoritativeQuotaCooldown(account) && (outcome.logStatusCode == http.StatusTooManyRequests || strings.Contains(lowerPayload, "rate_limit") || strings.Contains(lowerPayload, "overloaded")) {
+		// Relay model cooldown is intentionally optional. Keep a bounded account
+		// backoff for native Anthropic rate_limit/overloaded frames even in that mode.
+		var headers http.Header
+		if resp != nil {
+			headers = resp.Header
+		}
+		backoff := claudeGenericRateLimitBackoff(headers)
+		h.store.MarkCooldown(account, backoff, "rate_limited")
+	}
+	return applyResponseFailedDecisionKind(outcome, outcome.failurePayload, decision)
+}
+
+func claudeHasAuthoritativeQuotaCooldown(account *auth.Account) bool {
+	if account == nil || !account.HasActiveCooldown() {
+		return false
+	}
+	reason, _ := account.GetCooldownSnapshot()
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case auth.ResponsesRateLimitedCooldownReason, "rate_limited_5h", "rate_limited_7d", "usage_limited", "usage_limit":
+		return true
+	}
+	// A generic rate-limited cooldown may still carry a provider Retry-After
+	// value. It is safer to preserve any active cooldown than to replace it with
+	// the fallback one-minute delay while handling a second body-only frame.
+	return true
+}
 
 // sendAnthropicError 发送 Anthropic 格式的错误响应
 func sendAnthropicError(c *gin.Context, statusCode int, errType, message string) {
@@ -105,16 +246,138 @@ func (h *Handler) applyMessagesModelMapping(codexBody []byte, supportedModels []
 	return codexBody
 }
 
+// hasNativeClaudeAccountForModel 判断池中是否有能服务该模型的 Claude Code OAuth
+// 账号(据此决定 /v1/messages 是走原生 claude 透传还是 Codex 翻译兜底)。
+//
+// 保留这个无请求上下文的版本供内部/旧测试调用；真实 HTTP 请求使用下面的
+// hasNativeClaudeAccountForRequest，它会额外应用 API Key 的渠道、分组、套餐和
+// 账号可用性边界，避免一个全局存在但当前 Key 不可用的 Claude 账号把请求锁死
+// 在原生路径上。
+func (h *Handler) hasNativeClaudeAccountForModel(model string) bool {
+	return h.hasNativeClaudeAccountForRequest(nil, model)
+}
+
+// hasNativeClaudeAccountForRequest 判断当前请求是否真的有可调度的 Claude
+// 原生账号。Claude 模型优先原生，但只有在当前 API Key 能看到至少一个健康
+// 账号时才锁定原生路由；否则保留既有 Codex 翻译兜底。
+func (h *Handler) hasNativeClaudeAccountForRequest(c *gin.Context, model string) bool {
+	return h.hasNativeClaudeAccountMatching(c, model, false)
+}
+
+func (h *Handler) hasNativeClaudeAccountMatching(c *gin.Context, model string, apiKeyOnly bool) bool {
+	if h == nil || h.store == nil {
+		return false
+	}
+	model = h.resolveNativeClaudeRequestModel(c, model)
+	if model == "" {
+		return false
+	}
+	requestedChannel := requestUpstreamChannel(c)
+	if requestedChannel != "" && requestedChannel != database.UpstreamChannelClaude {
+		return false
+	}
+	apiKeyID := requestAPIKeyID(c)
+	accountFilter := claudeChannelAccountFilter(model)
+	accountFilter = h.withModelCooldownFilter(model, accountFilter)
+	if c != nil && c.Request != nil {
+		// The full Messages filter is assembled immediately after this routing
+		// stub. Apply the request's session affinity here as well, so a native
+		// Claude account hidden from this session does not force an unusable
+		// native route before the final selector runs.
+		rawBody, _ := rawRequestBodyFromContext(c)
+		rawBody = ingressRequestBody(c, rawBody)
+		identity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
+		accountFilter = applyAffinityGroupRouting(c, identity, accountFilter)
+	}
+	for _, account := range h.store.Accounts() {
+		if account == nil || !account.IsClaudeOAuth() || (apiKeyOnly && !account.IsClaudeAPIKey()) || !claudeAccountSupportsModel(account, model) {
+			continue
+		}
+		if accountFilter != nil && !accountFilter(account) {
+			continue
+		}
+		if !account.IsAvailable() {
+			continue
+		}
+		if c != nil && (!account.AllowsAPIKey(apiKeyID) || !h.store.APIKeyAllowsAccount(apiKeyID, account)) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// claudeNativeRouteContextKey 是本次请求的原生 Claude 路由判定缓存键。
+const claudeNativeRouteContextKey = "codex2api_native_claude_route"
+
+type claudeNativeRouteDecision struct {
+	model  string
+	native bool
+}
+
+// nativeClaudeRouteForRequest 是 hasNativeClaudeAccountForRequest 的按请求记忆版。
+// 判定本身要扫一遍号池,而同一次 /v1/messages 里入站净化与模型路由都得问一次;
+// 万级号池下重复全扫是实打实的热路径开销,所以把结果挂在 gin context 上。
+// 缓存连模型一起存:同一请求内模型是固定的,存下来只是防止将来有人换模型复用。
+func (h *Handler) nativeClaudeRouteForRequest(c *gin.Context, model string) bool {
+	if c == nil {
+		return h.hasNativeClaudeAccountForRequest(nil, model)
+	}
+	if cached, ok := c.Get(claudeNativeRouteContextKey); ok {
+		if decision, ok := cached.(claudeNativeRouteDecision); ok && decision.model == model {
+			return decision.native
+		}
+	}
+	native := h.hasNativeClaudeAccountForRequest(c, model)
+	c.Set(claudeNativeRouteContextKey, claudeNativeRouteDecision{model: model, native: native})
+	return native
+}
+
+// resolveNativeClaudeRequestModel resolves an optional client alias to a
+// Claude-native target for the native Messages path. OpenAI/Codex mappings are
+// intentionally ignored when the requested ID is already claude-*.
+func (h *Handler) resolveNativeClaudeRequestModel(c *gin.Context, requested string) string {
+	requested = strings.TrimSpace(requested)
+	if strings.HasPrefix(strings.ToLower(requested), "claude-") || h == nil || h.store == nil {
+		return requested
+	}
+	ctx := context.Background()
+	if c != nil && c.Request != nil {
+		ctx = c.Request.Context()
+	}
+	mapped, ok := resolveConfiguredModelMapping(requested, h.store.GetModelMapping(), h.supportedModelIDs(ctx))
+	if ok && strings.HasPrefix(strings.ToLower(strings.TrimSpace(mapped)), "claude-") {
+		return strings.TrimSpace(mapped)
+	}
+	return requested
+}
+
 // resolveMessagesRoutingBody 用廉价 stub 完成模型映射与 effort/tier 提取，
 // 避免在选号前把整段 Anthropic messages 转成有损 Codex Responses。
 func (h *Handler) resolveMessagesRoutingBody(rawBody []byte, requestedModel string, supportedModels []string, preserveModel ...bool) []byte {
+	return h.resolveMessagesRoutingBodyForRequest(nil, rawBody, requestedModel, supportedModels, preserveModel...)
+}
+
+func (h *Handler) resolveMessagesRoutingBodyForRequest(c *gin.Context, rawBody []byte, requestedModel string, supportedModels []string, preserveModel ...bool) []byte {
 	mappingJSON := ""
 	if h != nil && h.store != nil {
 		mappingJSON = h.store.GetModelMapping()
 	}
-	mapped := strings.TrimSpace(requestedModel)
-	if len(preserveModel) == 0 || !preserveModel[0] {
-		mapped = resolveAnthropicModel(requestedModel, mappingJSON, supportedModels)
+	nativeClaudeModel := h.resolveNativeClaudeRequestModel(c, requestedModel)
+	nativeClaudeRoute := h.nativeClaudeRouteForRequest(c, requestedModel)
+	preserveRequestedModel := len(preserveModel) > 0 && preserveModel[0]
+	if c != nil && requestUpstreamChannel(c) == database.UpstreamChannelTraeCN {
+		preserveRequestedModel = true
+	}
+	mapped := resolveAnthropicModel(requestedModel, mappingJSON, supportedModels)
+	if preserveRequestedModel {
+		mapped = strings.TrimSpace(requestedModel)
+	}
+	// 原生 Claude 路由:若存在能服务该模型的 Claude Code OAuth 账号,则保持原生
+	// 模型 ID,交由 claude 账号原生透传;否则维持既有 Codex 翻译兜底(claude-* →
+	// gpt-5.4),不影响没有 claude 账号、靠 Codex 服务 /v1/messages 的用户。
+	if nativeClaudeRoute {
+		mapped = nativeClaudeModel
 	}
 	stub, err := sjson.SetBytes([]byte(`{}`), "model", mapped)
 	if err != nil {
@@ -130,7 +393,14 @@ func (h *Handler) resolveMessagesRoutingBody(rawBody []byte, requestedModel stri
 			stub, _ = sjson.SetBytes(stub, "service_tier", upstreamTier)
 		}
 	}
-	return h.applyMessagesModelMapping(stub, supportedModels, preserveModel...)
+	if nativeClaudeRoute {
+		// A Claude-native attempt must not be remapped again through the global
+		// Codex table (for example claude-sonnet-* -> gpt-*). Keep only the
+		// normalized effort field in the routing stub.
+		stub, _ = sjson.DeleteBytes(stub, "reasoning_effort")
+		return stub
+	}
+	return h.applyMessagesModelMapping(stub, supportedModels, preserveRequestedModel)
 }
 
 type anthropicCodexTranslation struct {
@@ -206,21 +476,45 @@ func (h *Handler) Messages(c *gin.Context) {
 		rejectAnthropicMessagesRequest(c, http.StatusRequestEntityTooLarge, "invalid_request_error", "Request body too large")
 		return
 	}
+	// Keep the ingress body immutable for NewAPI signature verification, but
+	// canonicalize the Claude payload before model routing and Prompt Filter so
+	// the reviewed user-controlled bytes are the same bytes sent upstream. The
+	// native OAuth transport adds only its fixed trusted Claude Code preamble
+	// after this point; fallback Codex/relay routes never receive that preamble.
+	//
+	// 该规范化是 **Claude 出站策略**（剥离 service_tier / inference_geo / speed /
+	// safety_identifier、上限校验、双向控制符净化），只对真正会走 Claude 原生透传
+	// 的请求生效。/v1/messages 同时服务 Codex 翻译、Grok 与 Antigravity 中转，无差别
+	// 套用会跨渠道吞掉合法字段——例如 service_tier 默认不放行，Codex 账号的
+	// priority/fast 档位会被静默删掉，连带用量归因一起丢。没有 Claude 账号的部署
+	// 因此拿到的是与改动前逐字节一致的入站体。
+	claudeSecurityConfig := h.store.ClaudeSecurityConfig()
+	canonicalBody := rawBody
+	nativeClaudeRoute := h.nativeClaudeRouteForRequest(c, gjson.GetBytes(rawBody, "model").String())
+	if nativeClaudeRoute && !h.hasNativeClaudeAccountMatching(c, gjson.GetBytes(rawBody, "model").String(), true) {
+		normalized, canonicalErr := normalizeClaudeRequestBody(rawBody, claudeSecurityConfig)
+		if canonicalErr != nil {
+			rejectAnthropicMessagesRequest(c, http.StatusBadRequest, "invalid_request_error", canonicalErr.Error())
+			return
+		}
+		canonicalBody = normalized
+	}
 
 	// 基本验证
-	model := gjson.GetBytes(rawBody, "model").String()
+	model := gjson.GetBytes(canonicalBody, "model").String()
 	if model == "" {
 		rejectAnthropicMessagesRequest(c, http.StatusBadRequest, "invalid_request_error", "model is required")
 		return
 	}
-	if !gjson.GetBytes(rawBody, "messages").Exists() {
+	if !gjson.GetBytes(canonicalBody, "messages").Exists() {
 		rejectAnthropicMessagesRequest(c, http.StatusBadRequest, "invalid_request_error", "messages is required")
 		return
 	}
-	if h.inspectPromptFilterAnthropic(c, rawBody, "/v1/messages", model) {
+	if h.inspectPromptFilterAnthropic(c, canonicalBody, "/v1/messages", model) {
 		return
 	}
 
+	reviewedClaudeBody := canonicalBody
 	isStream := gjson.GetBytes(rawBody, "stream").Bool()
 	continuousRetryPolicy := continuousRetryPolicyForCall(nil)
 	rememberContinuousRetryPolicyForRequest(c, continuousRetryPolicy)
@@ -230,7 +524,7 @@ func (h *Handler) Messages(c *gin.Context) {
 	// Codex / OpenAI 中转仍按需翻译成 Codex-safe Responses。
 	supportedModels := h.supportedModelIDs(c.Request.Context())
 	preserveTraeCNModel := requestUpstreamChannel(c) == database.UpstreamChannelTraeCN
-	routingBody := h.resolveMessagesRoutingBody(rawBody, model, supportedModels, preserveTraeCNModel)
+	routingBody := h.resolveMessagesRoutingBodyForRequest(c, canonicalBody, model, supportedModels, preserveTraeCNModel)
 	originalModel := model
 	effectiveModel := effectiveRequestModel(routingBody, model)
 	if isMediaOnlyModel(effectiveModel) {
@@ -253,7 +547,6 @@ func (h *Handler) Messages(c *gin.Context) {
 	accountFilter := accountFilterForResponsesModel(effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
 	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
 	accountFilter = h.applyUpstreamChannelFilter(c, effectiveModel, accountFilter)
-	accountFilter = excludeAntigravityAccountsFilter(accountFilter)
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)
 	// scope 并发位在选中账号后才能占，请求退出时统一释放（issue #439 v2）。
 	defer h.ReleaseAPIKeyScopeConcurrency(c)
@@ -269,11 +562,20 @@ func (h *Handler) Messages(c *gin.Context) {
 	serviceTier := extractServiceTier(routingBody)
 	ruleIdentity := h.payloadRuleIdentity(c)
 	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
+	if nativeClaudeRoute {
+		sessionIdentity = resolveClaudeRequestSessionIdentity(c.Request.Header, rawBody)
+	}
 	var codexTranslation anthropicCodexTranslation
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
 	resinPlatform := resinPlatformForSessionIdentity(sessionIdentity, apiKeyID)
+	// 与 ccbridge 的请求级身份一致性设计相同：在换号循环外确定一次，
+	// 但保留本项目的 API Key 隔离和无显式会话时的每请求隔离语义。
+	claudeSessionID := ""
+	if nativeClaudeRoute {
+		claudeSessionID = claudeUpstreamSessionID(resolveUpstreamSessionID(apiKeyID, sessionIdentity.upstreamSeed, sessionIdentity.explicitUpstreamID, false))
+	}
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -284,6 +586,7 @@ func (h *Handler) Messages(c *gin.Context) {
 	var lastBody []byte
 	retryExclusions := newRetryAccountExclusions()
 	var wsHTTPFallback websocketHTTPFallbackState
+	antigravityRefreshRetried := map[int64]bool{}
 
 	var lastUpstreamCancel context.CancelFunc
 	defer func() {
@@ -296,6 +599,7 @@ func (h *Handler) Messages(c *gin.Context) {
 	var affinityGuard auth.SessionAffinityGuard
 	grokQualityAttempts := 0
 	traeRefreshRetried := map[int64]bool{}
+	var lastClaudePolicyErr *Error
 	for attempt := 0; ; attempt++ {
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
@@ -304,6 +608,13 @@ func (h *Handler) Messages(c *gin.Context) {
 		}
 		if account == nil {
 			if !claimContinuousRetryTerminal(c, continuousRetryProtocolAnthropic) {
+				return
+			}
+			if lastClaudePolicyErr != nil {
+				if isStream && writeCommittedAnthropicRetryError(c, ErrorTypeInvalidRequest, lastClaudePolicyErr.Message) {
+					return
+				}
+				sendAnthropicError(c, lastClaudePolicyErr.HTTPStatus, ErrorTypeInvalidRequest, lastClaudePolicyErr.Message)
 				return
 			}
 			if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
@@ -348,8 +659,15 @@ func (h *Handler) Messages(c *gin.Context) {
 		attemptEffectiveModel := effectiveModel
 		useWebsocket := h.shouldUseWebsocketForHTTP() && !wsHTTPFallback.ForceHTTP() && !isRelayAccount
 		upstreamEndpoint := "/v1/responses"
-		if isRelayAccount {
+		if account.IsClaudeOAuth() {
+			// Native Claude accounts do not use the relay/Codex endpoint even
+			// though IsRelayStyle is true for scheduler isolation.
+			upstreamEndpoint = "/v1/messages"
+		} else if isRelayAccount {
 			upstreamEndpoint = relayUpstreamEndpointForProtocol(account, GrokProtocolMessages, attemptEffectiveModel)
+		}
+		if account.IsAntigravityAPI() {
+			upstreamEndpoint = antigravityUpstreamEndpoint(true)
 		}
 
 		apiKey := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
@@ -376,18 +694,83 @@ func (h *Handler) Messages(c *gin.Context) {
 		}
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
 		upstreamCtx = WithResinPlatform(upstreamCtx, resinPlatform)
+		upstreamCtx = context.WithValue(upstreamCtx, encryptedContentSessionKey{}, sessionIdentity.affinityID)
 		// 身份按 attempt 附加实际选中账号维度：account_* 门随重试换号重新匹配（issue #410）。
 		attemptIdentity := ruleIdentity.WithSelectedAccount(account, h.store)
 		upstreamCtx = WithPayloadRuleIdentity(upstreamCtx, attemptIdentity)
+		if account.IsClaudeOAuth() {
+			if claudeSessionID == "" {
+				claudeSessionID = claudeUpstreamSessionID(upstreamSessionID)
+			}
+			upstreamCtx = WithClaudeSessionID(upstreamCtx, claudeSessionID)
+		}
 		lastUpstreamCancel = upstreamCancel
-		ttftGuard := newFirstTokenTimeoutGuard(currentFirstTokenTimeout(), upstreamCancel)
+		attemptFirstTokenTimeout := claudeFirstTokenTimeoutFor(h.store, account)
+		ttftGuard := newFirstTokenTimeoutGuard(attemptFirstTokenTimeout, upstreamCancel)
 		var resp *http.Response
 		var reqErr error
-		if isRelayAccount {
+		if account.IsClaudeOAuth() {
+			// 首字前保活：长推理期间让下游能区分"上游在思考"与"连接已死"。
+			activateClaudeStreamKeepalive(c.Request.Context(), h.store, account, isStream)
+			// Claude Code OAuth 账号本身说 Anthropic Messages API：不翻译成 Codex，
+			// 直接把原始入站 body 透传到 api.anthropic.com/v1/messages；返回的响应
+			// 已是原生 Anthropic SSE，打上原生路由标记复用既有透传链路。
+			claudeRequestBody := canonicalBody
+			if account.IsClaudeAPIKey() {
+				claudeRequestBody = rawBody
+			} else {
+				normalized, normalizeErr := normalizeClaudeRequestBody(claudeRequestBody, claudeSecurityConfig)
+				if normalizeErr != nil {
+					ttftGuard.Stop()
+					h.store.Release(account)
+					if isStream && writeCommittedAnthropicRetryError(c, "invalid_request_error", normalizeErr.Error()) {
+						return
+					}
+					sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", normalizeErr.Error())
+					return
+				}
+				claudeRequestBody = normalized
+			}
+			if !account.IsClaudeAPIKey() && !bytes.Equal(claudeRequestBody, reviewedClaudeBody) {
+				// Recheck changed prompt content once; transport-only normalization and
+				// retries of an already reviewed payload do not repeat external review.
+				if !sameAnthropicPromptContent(claudeRequestBody, reviewedClaudeBody) && h.inspectPromptFilterAnthropic(c, claudeRequestBody, "/v1/messages", model) {
+					ttftGuard.Stop()
+					h.store.Release(account)
+					return
+				}
+				reviewedClaudeBody = claudeRequestBody
+			}
+			if nativeModel := h.resolveNativeClaudeRequestModel(c, model); nativeModel != "" && !strings.EqualFold(nativeModel, model) {
+				if rewritten, rewriteErr := sjson.SetBytes(claudeRequestBody, "model", nativeModel); rewriteErr == nil {
+					claudeRequestBody = rewritten
+				}
+			}
+			resp, reqErr = executeHTTPWithContinuousRetryKeepalive(upstreamCtx, func() (*http.Response, error) {
+				claudeFpMode := account.EffectiveClaudeFingerprintMode(h.store.ClaudeFingerprintModeDefault())
+				clientPolicy := h.store.ClaudeClientPolicyForAccount(account)
+				// 上游以无效 thinking 签名拒绝时，剥离 thinking 块后在同一账号重试一次，
+				// 不进入换号重试（换号无法修复客户端带来的坏签名）。
+				execute := func(ctx context.Context, body []byte) (*http.Response, error) {
+					return ExecuteClaudeMessagesRequestWithPolicy(ctx, account, body, proxyURL, downstreamHeaders, claudeFpMode, clientPolicy, claudeSecurityConfig)
+				}
+				var r *http.Response
+				var e error
+				if account.IsClaudeAPIKey() {
+					r, e = execute(upstreamCtx, claudeRequestBody)
+				} else {
+					r, e = executeClaudeWithThinkingSignatureRetry(upstreamCtx, claudeRequestBody, execute)
+				}
+				if e == nil {
+					markClaudeNativeRoute(r)
+				}
+				return r, e
+			})
+		} else if isRelayAccount {
 			upstreamBody := routingBody
 			if !account.IsGrokAPI() {
 				var translateErr error
-				upstreamBody, translateErr = h.translateAnthropicMessagesToCodexOnce(&codexTranslation, rawBody, supportedModels, preserveTraeCNModel)
+				upstreamBody, translateErr = h.translateAnthropicMessagesToCodexOnce(&codexTranslation, canonicalBody, supportedModels, preserveTraeCNModel)
 				if translateErr != nil {
 					ttftGuard.Stop()
 					h.store.Release(account)
@@ -398,17 +781,28 @@ func (h *Handler) Messages(c *gin.Context) {
 					return
 				}
 			}
-			if !account.IsTraeCNAPI() {
-				if mappedBody, mappedModel, ok := h.applyAccountModelMappingToBody(upstreamBody, account); ok {
-					upstreamBody = mappedBody
-					attemptEffectiveModel = mappedModel
+			if account.IsAntigravityAPI() {
+				// Messages 入站已翻译成 Responses 形态，正是 Antigravity 适配器的入参；
+				// 回程走下面的 Responses→Messages 翻译（issue #595）。该翻译只吃
+				// SSE——翻译恒置 stream:true，非流式客户端也是在网关侧聚合的，
+				// 所以上游一律取流，不跟随下游 stream 标志。
+				// Antigravity 只认原生公共模型 ID，不做别名映射。
+				resp, reqErr = executeHTTPWithContinuousRetryKeepalive(upstreamCtx, func() (*http.Response, error) {
+					return ExecuteAntigravityResponsesRequest(upstreamCtx, account, attemptEffectiveModel, upstreamBody, true, proxyURL)
+				})
+			} else {
+				if !account.IsTraeCNAPI() {
+					if mappedBody, mappedModel, ok := h.applyAccountModelMappingToBody(upstreamBody, account); ok {
+						upstreamBody = mappedBody
+						attemptEffectiveModel = mappedModel
+					}
 				}
+				resp, reqErr = executeHTTPWithContinuousRetryKeepalive(upstreamCtx, func() (*http.Response, error) {
+					return ExecuteRelayStyleProtocolRequestWithStore(upstreamCtx, h.store, account, GrokProtocolMessages, rawBody, upstreamBody, proxyURL, downstreamHeaders)
+				})
 			}
-			resp, reqErr = executeHTTPWithContinuousRetryKeepalive(upstreamCtx, func() (*http.Response, error) {
-				return ExecuteRelayStyleProtocolRequestWithStore(upstreamCtx, h.store, account, GrokProtocolMessages, rawBody, upstreamBody, proxyURL, downstreamHeaders)
-			})
 		} else {
-			codexBody, translateErr := h.translateAnthropicMessagesToCodexOnce(&codexTranslation, rawBody, supportedModels, preserveTraeCNModel)
+			codexBody, translateErr := h.translateAnthropicMessagesToCodexOnce(&codexTranslation, canonicalBody, supportedModels, preserveTraeCNModel)
 			if translateErr != nil {
 				ttftGuard.Stop()
 				h.store.Release(account)
@@ -427,10 +821,16 @@ func (h *Handler) Messages(c *gin.Context) {
 		durationMs := int(time.Since(start).Milliseconds())
 
 		if reqErr != nil {
+			if apiKeyModelRequestError(reqErr) != nil {
+				ttftGuard.Stop()
+				h.store.Release(account)
+				sendAPIKeyModelRequestQuotaError(c, reqErr)
+				return
+			}
 			timedOut := ttftGuard.TimedOut()
 			ttftGuard.Stop()
 			if timedOut {
-				reqErr = firstTokenTimeoutError(currentFirstTokenTimeout())
+				reqErr = firstTokenTimeoutError(attemptFirstTokenTimeout)
 			}
 			kind := classifyTransportFailure(reqErr)
 			if wsHTTPFallback.ForceHTTP() && !useWebsocket {
@@ -477,11 +877,22 @@ func (h *Handler) Messages(c *gin.Context) {
 
 			if !retryable {
 				var structured *Error
-				if errors.As(reqErr, &structured) && structured.HTTPStatus == http.StatusBadRequest {
+				if errors.As(reqErr, &structured) && structured.Code == claudeClientPolicyErrorCode {
+					// The gateway-side client policy is per account (overrides differ),
+					// so a denial only disqualifies this candidate. Try the remaining
+					// pool before surfacing the policy error to the caller.
+					lastClaudePolicyErr = structured
+					retryExclusions.MarkHard(account.ID())
+					if attempt < maxRetries {
+						log.Printf("Claude 客户端策略拒绝账号 %d，换号重试 (attempt %s, /v1/messages): %s", account.ID(), retryAttemptProgress(attempt, maxRetries), structured.Message)
+						continue
+					}
+				}
+				if errors.As(reqErr, &structured) && (structured.HTTPStatus == http.StatusBadRequest || structured.HTTPStatus == http.StatusUpgradeRequired) {
 					if isStream && writeCommittedAnthropicRetryError(c, "invalid_request_error", structured.Message) {
 						return
 					}
-					sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", structured.Message)
+					sendAnthropicError(c, structured.HTTPStatus, "invalid_request_error", structured.Message)
 					return
 				}
 				if isStream && writeCommittedAnthropicRetryError(c, "api_error", "Upstream request failed") {
@@ -538,10 +949,51 @@ func (h *Handler) Messages(c *gin.Context) {
 					log.Printf("Trae CN token refresh failed after upstream 401 (account=%d): %v", account.ID(), refreshErr)
 				}
 			}
-			if kind := classifyHTTPFailure(resp.StatusCode); kind != "" {
+			// Anthropic's Claude Code model gate is a client compatibility issue,
+			// not an account failure. Stop before ReportRequestFailure,
+			// SyncClaudeUsageState, retry exclusions, or model/account cooldowns.
+			if account.IsClaudeOAuth() && !account.IsClaudeAPIKey() && isClaudeClientCompatibilityError(resp.StatusCode, errBody) {
+				h.store.Release(account)
+				h.store.UnbindSessionAffinity(affinityKey, account.ID())
+				message := usageLogErrorMessage(resp.StatusCode, errBody)
+				if message == "" || message == fmt.Sprintf("HTTP %d", resp.StatusCode) {
+					message = "Claude Code 客户端版本不支持该模型，请运行 claude update 后重试"
+				}
+				h.logUsageForRequest(c, &database.UsageLogInput{
+					AccountID: account.ID(), Endpoint: "/v1/messages", Model: model,
+					EffectiveModel: attemptEffectiveModel, StatusCode: resp.StatusCode,
+					DurationMs: durationMs, InboundEndpoint: "/v1/messages", UpstreamEndpoint: upstreamEndpoint,
+					Stream: isStream, ViaWebsocket: useWebsocket, UpstreamErrorKind: "client_compatibility", ErrorMessage: message,
+				})
+				if isStream && writeCommittedAnthropicRetryError(c, ErrorTypeInvalidRequest, message) {
+					return
+				}
+				sendAnthropicError(c, http.StatusBadRequest, ErrorTypeInvalidRequest, message)
+				return
+			}
+			// Antigravity 的 401 是过期 access token，刷新后同号重试一次即可恢复
+			// （与 /v1/responses 一致）。
+			if resp.StatusCode == http.StatusUnauthorized && account.IsAntigravityAPI() && account.AntigravityAuthKind() == auth.AntigravityAuthKindOAuth && !antigravityRefreshRetried[account.ID()] {
+				antigravityRefreshRetried[account.ID()] = true
+				if refreshErr := h.store.RefreshAntigravityAccount(c.Request.Context(), account); refreshErr == nil {
+					h.store.Release(account)
+					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					log.Printf("Antigravity OAuth token refreshed after upstream 401 (account=%d, endpoint=/v1/messages)", account.ID())
+					continue
+				} else {
+					log.Printf("Antigravity OAuth refresh failed after upstream 401 (account=%d, endpoint=/v1/messages): %v", account.ID(), refreshErr)
+				}
+			}
+			if kind := classifyHTTPFailure(resp.StatusCode); kind != "" && !antigravityNonPenalizingUpstreamFailure(account, resp.StatusCode, errBody) {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
-			SyncCodexUsageState(h.store, account, resp)
+			// Claude 的 429 credits_required 是模型级计费门槛:只冷却该模型,不按账号级限流处理
+			// (否则会连累该号的其它可用模型)。命中则跳过账号级用量/限流同步。
+			if account.IsClaudeOAuth() && HandleClaudeModelBillingRejection(h.store, account, attemptEffectiveModel, resp.StatusCode, errBody) {
+				log.Printf("Claude 模型 %s 需购买 usage credits(credits_required),已对该模型冷却 %s(不影响账号其它模型)", attemptEffectiveModel, claudeCreditsRequiredCooldown)
+			} else {
+				syncAnthropicUsageStateForAccount(h.store, account, resp)
+			}
 			h.store.Release(account)
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			retryExclusions.MarkHTTPFailure(account.ID(), resp.StatusCode, errBody, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
@@ -651,7 +1103,38 @@ func (h *Handler) Messages(c *gin.Context) {
 		if isGrokNativeRouteResponse(resp) {
 			downstreamFlusher, _ := c.Writer.(http.Flusher)
 			streamAttempt := h.newContinuousRetryStreamAttempt(isStream && continuousRetryBuffersAttempts(continuousRetryPolicy), c.Writer, downstreamFlusher)
+			// Non-stream responses are committed by forwardGrokNativeResponseTo;
+			// copy Claude's safe headers before that commit so net/http can send
+			// them. Stream headers are copied after the successful attempt below
+			// to avoid exposing a buffered/retried attempt.
+			if account.IsClaudeOAuth() && (!isStream || !continuousRetryBuffersAttempts(continuousRetryPolicy)) {
+				copyClaudeNativeResponseHeaders(c, resp.Header)
+			}
 			usage, outcome, wroteAnyBody, firstTokenMs := forwardGrokNativeResponseTo(c, resp, GrokProtocolMessages, isStream, start, ttftGuard.Stop, streamAttempt.writerOr(c.Writer), streamAttempt.flusherOr(downstreamFlusher))
+			if account.IsClaudeOAuth() {
+				// Anthropic 的 input_tokens 不含缓存命中/写入，转换成计费层的总输入口径。
+				applyAnthropicUsageSemantics(usage)
+			}
+			outcome = normalizeNativeFailureMessageForAccount(account, outcome)
+			outcome = claudeNativeFirstTokenOutcome(ttftGuard, firstTokenMs, outcome, attemptFirstTokenTimeout)
+			logClaudeFirstTokenLatency(account, attemptEffectiveModel, reasoningEffort, firstTokenMs, outcome, start)
+			// The native forwarder consumes the body before returning. Synchronize
+			// Anthropic's unified quota headers now, once per attempt, so Claude
+			// usage remains fresh without adding a write before first token.
+			syncAnthropicUsageStateForAccount(h.store, account, resp)
+			promptPolicyIncidentID := ""
+			if account.IsClaudeOAuth() && outcome.logStatusCode != http.StatusOK && len(outcome.failurePayload) > 0 {
+				// Native Claude error frames can be HTTP 200, so the normal HTTP
+				// error branch never gets a chance to apply model cooldowns or
+				// create an incident. Reuse the response.failed classifier here.
+				if isExplicitUpstreamCyberPolicy(outcome.failurePayload) {
+					promptPolicyIncidentID = acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, "/v1/messages", model, responseFailedErrorBody(outcome.failurePayload), upstreamCyberPolicyAttempt{
+						Transport: upstreamPromptPolicyTransport(isStream, useWebsocket), StatusCode: outcome.logStatusCode,
+						AccountID: account.ID(), AttemptIndex: attempt + 1,
+					}))
+				}
+				outcome = h.applyClaudeNativeFailureCooldown(account, outcome, resp, attemptEffectiveModel)
+			}
 			totalDuration := int(time.Since(start).Milliseconds())
 			ttftGuard.Stop()
 			resp.Body.Close()
@@ -659,6 +1142,23 @@ func (h *Handler) Messages(c *gin.Context) {
 			if shouldTransparentRetryStreamWithBudgets(outcome, &generalRetries, &rateLimitRetries, maxRetries, attemptMaxRateLimitRetries, downstreamWrote, c.Request.Context().Err(), nil, continuousRetryPolicy) {
 				rememberContinuousRetryStreamFailure(c.Request.Context(), outcome, outcome.failurePayload)
 				_ = streamAttempt.Close()
+				retryLog := database.UsageLogInput{
+					AccountID: account.ID(), Endpoint: "/v1/messages", Model: model,
+					EffectiveModel: attemptEffectiveModel, StatusCode: outcome.logStatusCode,
+					DurationMs: totalDuration, FirstTokenMs: firstTokenMs, ReasoningEffort: reasoningEffort,
+					InboundEndpoint: "/v1/messages", UpstreamEndpoint: upstreamEndpoint,
+					Stream: isStream, ViaWebsocket: false, AttemptIndex: attempt + 1,
+					IsRetryAttempt: true, PromptPolicyIncidentID: promptPolicyIncidentID,
+					UpstreamErrorKind: outcome.failureKind,
+					ErrorMessage:      usageLogFailureMessage(outcome.logStatusCode, outcome.failureMessage),
+				}
+				if usage != nil {
+					retryLog.PromptTokens, retryLog.CompletionTokens, retryLog.TotalTokens = usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens
+					retryLog.InputTokens, retryLog.OutputTokens = usage.InputTokens, usage.OutputTokens
+					retryLog.ReasoningTokens, retryLog.CachedTokens = usage.ReasoningTokens, usage.CachedTokens
+					applyUsageCacheWritesToLog(&retryLog, usage)
+				}
+				h.logUsageForRequest(c, &retryLog)
 				h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
 				h.store.Release(account)
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
@@ -676,6 +1176,9 @@ func (h *Handler) Messages(c *gin.Context) {
 					return
 				}
 				copyGrokNativeResponseHeaders(c, resp.Header)
+				if account.IsClaudeOAuth() && isStream && continuousRetryBuffersAttempts(continuousRetryPolicy) {
+					copyClaudeNativeResponseHeaders(c, resp.Header)
+				}
 				if commitErr := h.commitStreamAttempt(c, streamAttempt); commitErr != nil {
 					if isContinuousRetryLocalFailure(commitErr) {
 						outcome = overlayContinuousRetryLocalFailure(outcome, commitErr)
@@ -701,11 +1204,13 @@ func (h *Handler) Messages(c *gin.Context) {
 				DurationMs: totalDuration, FirstTokenMs: firstTokenMs, ReasoningEffort: reasoningEffort,
 				InboundEndpoint: "/v1/messages", UpstreamEndpoint: upstreamEndpoint,
 				Stream: isStream, ViaWebsocket: false, AttemptIndex: attempt + 1,
+				PromptPolicyIncidentID: promptPolicyIncidentID,
 			}
 			if usage != nil {
 				logInput.PromptTokens, logInput.CompletionTokens, logInput.TotalTokens = usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens
 				logInput.InputTokens, logInput.OutputTokens = usage.InputTokens, usage.OutputTokens
 				logInput.ReasoningTokens, logInput.CachedTokens = usage.ReasoningTokens, usage.CachedTokens
+				applyUsageCacheWritesToLog(logInput, usage)
 			}
 			if outcome.logStatusCode != http.StatusOK {
 				logInput.UpstreamErrorKind = outcome.failureKind
@@ -769,12 +1274,49 @@ func (h *Handler) Messages(c *gin.Context) {
 			streamAttempt = h.newContinuousRetryStreamAttempt(continuousRetryBuffersAttempts(continuousRetryPolicy), c.Writer, flusher)
 			streamWriter := h.newAttemptStreamFlushWriter(c, streamAttempt, c.Writer, flusher)
 			var pendingFirstTokenEvents bytes.Buffer
+			// downstreamMu 串行化翻译写路径与其共享状态(writeErr/wroteAnyBody/
+			// streamWriter):下面的下游保活 goroutine 与翻译回调并发写同一个
+			// ResponseWriter,必须互斥,否则注释可能插进半个 SSE 事件里。
+			var downstreamMu sync.Mutex
+			// 首个内容帧之后上游长推理/等工具边界期间可能数十秒无可转发帧,与
+			// /v1/responses 一样定期写标准 SSE 注释,避免反代/CDN/隧道把健康长流
+			// 当空闲连接掐断(issue #623)。缓冲式持续重试下 streamWriter 写的是
+			// 私有缓冲,真实下游心跳由 request 级 keepalive 负责,不再起第二个。
+			stopDownstreamKeepalive := func() {}
+			if !continuousRetryBuffersAttempts(continuousRetryPolicy) {
+				stopDownstreamKeepalive = startDownstreamSSEKeepalive(c.Request.Context(), downstreamSSEKeepaliveInterval, func() bool {
+					downstreamMu.Lock()
+					defer downstreamMu.Unlock()
+					if writeErr != nil || c.Request.Context().Err() != nil {
+						return false
+					}
+					// 首个真实字节前不能写注释,否则会提前提交 HTTP 200,
+					// 破坏首包前 response.failed 的真实状态码与换号重试语义。
+					if !wroteAnyBody {
+						return true
+					}
+					if err := streamWriter.WriteSSEComment(downstreamSSEKeepaliveComment); err != nil {
+						// 下游已断:翻译回调只会在下一帧到达时才发现,上游静默期间
+						// 会一直阻塞在读上,这里主动取消上游读让本 attempt 尽快收尾。
+						writeErr = err
+						upstreamCancel()
+						return false
+					}
+					return true
+				})
+			}
 			// contentStarted 用严格口径（isFirstTokenResult）跟踪"首个真实内容帧"，
 			// 专供流提交决策（缓冲/重试窗口/failed 抑制）使用；ttftRecorded 按
 			// first_token_mode 可能是 loose 口径，只用于首字统计。loose 模式会把
 			// output_item.added 等纯结构帧当"首字"，若拿它做流提交门，结构帧一到
 			// 就落盘 200，首包前静默重试窗口被过早关闭（issue #435）。
 			readErr = readSSEStreamWithContinuousRetryKeepalive(c.Request.Context(), resp.Body, func(sseEvent string, data []byte) bool {
+				downstreamMu.Lock()
+				defer downstreamMu.Unlock()
+				// 保活写失败已判定下游断开:不再翻译/写入,停止读取。
+				if writeErr != nil {
+					return false
+				}
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
 
@@ -868,6 +1410,14 @@ func (h *Handler) Messages(c *gin.Context) {
 
 				// 翻译并写入
 				events := translator.translateEvent(data)
+				if translator.toolInputError != nil {
+					terminalFailurePayload = malformedToolArgumentsFailurePayload(translator.toolInputError)
+					gotTerminal = true
+					if visibleBody {
+						writeErr = writeAnthropicStreamErrorEvent(streamWriter, "api_error", translator.toolInputError.Error(), nil)
+					}
+					return false
+				}
 				if len(events) > 0 {
 					var payload bytes.Buffer
 					for _, evt := range events {
@@ -900,6 +1450,8 @@ func (h *Handler) Messages(c *gin.Context) {
 
 				return !isResponsesTerminalEvent(eventType)
 			})
+			// stop 会等保活 goroutine 完整退出,之后的收尾写入不再有并发方。
+			stopDownstreamKeepalive()
 			// 仅在真的写过 body 时才做收尾 flush：flusher.Flush 会先提交 HTTP 200 header，
 			// 零写入时提前 flush 会让循环外按真实错误码返回的 JSON 失效（status 已定型为 200）。
 			if writeErr == nil && wroteAnyBody {
@@ -935,6 +1487,11 @@ func (h *Handler) Messages(c *gin.Context) {
 					return false
 				}
 				accumulator.apply(translator.translateEvent(data))
+				if translator.toolInputError != nil {
+					terminalFailurePayload = malformedToolArgumentsFailurePayload(translator.toolInputError)
+					gotTerminal = true
+					return false
+				}
 
 				ttftGuard.MarkProgress(eventType)
 				if !ttftRecorded && isFirstTokenResultForMode(parsed, currentFirstTokenMode()) {
@@ -976,7 +1533,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		outcome = overlayContinuousRetryLocalFailure(outcome, readErr, writeErr)
 		terminalFailurePayload, _ = resolvePreContentRetryErrorCandidate(terminalFailurePayload, preContentErrorCandidate, contentStarted, wroteAnyBody, gotTerminal, readErr, c.Request.Context().Err(), writeErr)
 		if ttftGuard.TimedOut() && !ttftRecorded && !gotTerminal {
-			outcome = firstTokenTimeoutOutcome(currentFirstTokenTimeout())
+			outcome = firstTokenTimeoutOutcome(attemptFirstTokenTimeout)
 		}
 		ttftGuard.Stop()
 		if len(terminalFailurePayload) > 0 && !outcome.terminalLocal {
@@ -1029,7 +1586,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			log.Printf("上游流在首包前断开，重试 (attempt %s, account %d, /v1/messages): %s",
 				retryAttemptProgress(attempt, maxRetries), account.ID(), outcome.failureMessage)
 			recyclePooledClient(account, proxyURL)
-			SyncCodexUsageState(h.store, account, resp)
+			syncAnthropicUsageStateForAccount(h.store, account, resp)
 			if isFirstTokenTimeoutOutcome(outcome) {
 				retryExclusions.MarkSoftFirstTokenTimeout(account.ID())
 			} else {
@@ -1147,11 +1704,15 @@ func (h *Handler) Messages(c *gin.Context) {
 			logInput.OutputTokens = usage.OutputTokens
 			logInput.ReasoningTokens = usage.ReasoningTokens
 			logInput.CachedTokens = usage.CachedTokens
+			applyUsageCacheWritesToLog(logInput, usage)
 		}
 		h.logUsageForRequest(c, logInput)
 
 		resp.Body.Close()
-		SyncCodexUsageState(h.store, account, resp)
+		syncAnthropicUsageStateForAccount(h.store, account, resp)
+		if !outcome.penalize && outcome.logStatusCode == http.StatusOK && account.IsClaudeOAuth() {
+			NoteClaudeGatedModelSuccess(h.store, account, attemptEffectiveModel)
+		}
 		if outcome.penalize {
 			recyclePooledClient(account, proxyURL)
 			h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
@@ -1167,4 +1728,13 @@ func (h *Handler) Messages(c *gin.Context) {
 		}
 		return
 	}
+}
+
+func sameAnthropicPromptContent(a, b []byte) bool {
+	for _, field := range []string{"messages", "system", "tools"} {
+		if gjson.GetBytes(a, field).Raw != gjson.GetBytes(b, field).Raw {
+			return false
+		}
+	}
+	return true
 }

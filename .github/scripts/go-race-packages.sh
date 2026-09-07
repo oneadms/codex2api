@@ -1,26 +1,29 @@
 #!/usr/bin/env bash
 # Print the `go test` selector args for one test-race shard so heavy packages
-# do not share a 2-core runner. The admin package alone takes ~12min under
-# -race on a 2-core runner (long tail of 1.5-5s tests, no single hot spot),
-# which collided with the 12m go-test timeout — so it is further split in two
-# by test-name initial (^Test[A-L] ≈ 45% of measured runtime, ^Test[^A-L] the
-# rest; the two regexes are complementary, no test can be silently skipped).
-# The `rest` shard is everything except the dedicated shards.
+# do not share a 2-core runner.
+#
+# Shard sizing (measured locally under -race, 2026-09-04, after the SQLite
+# schema-template fast path removed the ~1.2s per-test migration cost):
+#   proxy ≈ 95s total, split by test-name initial (^Test[A-G] ≈ 53%, the rest
+#   ≈ 47%; the two regexes are complementary so no test can be silently
+#   skipped); admin ≈ 60s; database ≈ 50s; promptfilter ≈ 40s once its
+#   CPU-bound single-threaded fixtures skip under -race; `rest` is everything
+#   else. Keep each shard well under the 12m go-test timeout on CI runners.
 set -euo pipefail
 
 shard="${1:-}"
 case "$shard" in
-  admin-a-l)
-    echo "-run ^Test[A-L] ./admin"
+  proxy-a-g)
+    echo "-run ^Test[A-G] ./proxy/..."
     ;;
-  admin-m-z)
-    echo "-run ^Test[^A-L] ./admin"
+  proxy-h-z)
+    echo "-run ^Test[^A-G] ./proxy/..."
+    ;;
+  admin)
+    echo ./admin
     ;;
   database)
     echo ./database
-    ;;
-  proxy)
-    echo ./proxy/...
     ;;
   promptfilter)
     echo ./security/promptfilter

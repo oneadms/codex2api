@@ -551,7 +551,7 @@ func (db *DB) InsertGrokAccountIfAbsent(ctx context.Context, name string, creden
 	if len(identityKeys) == 0 {
 		return 0, 0, errors.New("grok credential has no stable identity")
 	}
-	encoded, err := json.Marshal(credentialCopy)
+	encoded, err := json.Marshal(encryptSensitiveCredentials(credentialCopy))
 	if err != nil {
 		return 0, 0, err
 	}
@@ -665,7 +665,7 @@ func (db *DB) ReauthGrokAccount(ctx context.Context, accountID int64, credential
 			}
 		}
 
-		encoded, marshalErr := json.Marshal(merged)
+		encoded, marshalErr := json.Marshal(encryptSensitiveCredentials(merged))
 		if marshalErr != nil {
 			return marshalErr
 		}
@@ -848,7 +848,7 @@ func (db *DB) UpdateAccountCredentialsCAS(ctx context.Context, accountID, expect
 		// Keep the compatibility JSON field synchronized with the canonical
 		// column in the same write that publishes the rotated credential.
 		merged["credential_family_id"] = familyID
-		encoded, marshalErr := json.Marshal(merged)
+		encoded, marshalErr := json.Marshal(encryptSensitiveCredentials(merged))
 		if marshalErr != nil {
 			return marshalErr
 		}
@@ -928,7 +928,7 @@ func (db *DB) ReplaceAccountCredentialsCAS(ctx context.Context, accountID, expec
 			familyID = "cf_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 		}
 		merged["credential_family_id"] = familyID
-		encoded, marshalErr := json.Marshal(merged)
+		encoded, marshalErr := json.Marshal(encryptSensitiveCredentials(merged))
 		if marshalErr != nil {
 			return marshalErr
 		}
@@ -976,6 +976,7 @@ func (db *DB) MergeAccountCredentialsForGeneration(ctx context.Context, accountI
 		"antigravity_sync_error": {}, "antigravity_sync_warning": {}, "antigravity_last_sync_attempt_at": {},
 		"antigravity_permanent_refresh_error": {},
 		"antigravity_catalog_source":          {}, "antigravity_catalog_verified": {},
+		"antigravity_catalog_updated_at": {}, "antigravity_quota": {},
 		"antigravity_capabilities": {}, "antigravity_capability_last_probe_at": {},
 	}
 	filtered := make(map[string]any, len(updates))
@@ -1006,7 +1007,7 @@ func (db *DB) MergeAccountCredentialsForGeneration(ctx context.Context, accountI
 		if current != expectedGeneration {
 			return nil
 		}
-		encoded, marshalErr := json.Marshal(mergeCredentialMaps(decodeCredentials(raw), filtered))
+		encoded, marshalErr := json.Marshal(encryptSensitiveCredentials(mergeCredentialMaps(decodeCredentials(raw), filtered)))
 		if marshalErr != nil {
 			return marshalErr
 		}

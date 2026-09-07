@@ -9,6 +9,7 @@ import StatCard from '../components/StatCard'
 import UsageStatsSummary from '../components/UsageStatsSummary'
 import TimeRangeSelector from '../components/TimeRangeSelector'
 import ChannelFilter, { useUsageChannel, type UsageChannel } from '../components/ChannelFilter'
+import { useVisibleChannels } from '../visibleChannels'
 import ChannelLogo from '../components/ChannelLogo'
 import SystemHealthBar from '../components/SystemHealthBar'
 import type {
@@ -80,6 +81,7 @@ export default function Dashboard() {
   const { t } = useTranslation()
   const [timeRange, setTimeRange] = useState<TimeRangeKey>('1h')
   const [channel, setChannel] = useUsageChannel()
+  const { isChannelVisible } = useVisibleChannels()
   const channelRef = useRef<UsageChannel>(channel)
   const [showPoolRunway, setShowPoolRunway] = useState(getInitialPoolRunwayVisibility)
   const [chartData, setChartData] = useState<ChartAggregation | null>(null)
@@ -273,9 +275,10 @@ export default function Dashboard() {
   const errorCount = effectiveCounts?.error ?? 0
   const todayRequests = effectiveCounts?.today_requests ?? 0
   const channelBreakdown = !channel && stats?.channels
-    ? (['codex', 'grok', 'antigravity', 'traecn'] as const)
+    ? (['codex', 'grok', 'antigravity', 'traecn', 'claude'] as const)
+        .filter((key) => isChannelVisible(key))
         .map((key) => ({ key, counts: stats.channels?.[key] }))
-        .filter((item): item is { key: 'codex' | 'grok' | 'antigravity' | 'traecn'; counts: StatsChannelCounts } =>
+        .filter((item): item is { key: 'codex' | 'grok' | 'antigravity' | 'traecn' | 'claude'; counts: StatsChannelCounts } =>
           Boolean(item.counts && item.counts.total > 0))
     : []
 
@@ -379,7 +382,8 @@ export default function Dashboard() {
                     key={key}
                     className="inline-flex items-center gap-1.5 rounded-full bg-muted/80 px-3 py-1 font-semibold text-foreground ring-1 ring-border/50"
                     title={t('dashboard.heroChannelTitle', {
-                      channel: key === 'grok' ? 'Grok' : key === 'antigravity' ? 'Antigravity' : key === 'traecn' ? 'TRAECN' : 'Codex',
+                      // Preserve the provider identity in the tooltip for every channel.
+                      channel: key === 'claude' ? 'Claude' : key === 'grok' ? 'Grok' : key === 'antigravity' ? 'Antigravity' : key === 'traecn' ? 'TRAECN' : 'Codex',
                       available: counts.available,
                       total: counts.total,
                       requests: counts.today_requests,

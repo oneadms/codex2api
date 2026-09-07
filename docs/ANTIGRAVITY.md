@@ -4,7 +4,7 @@
 
 ## Overview
 
-Codex2API can manage Google Antigravity accounts as a dedicated upstream channel and expose their models through the OpenAI-compatible `/v1/responses` and `/v1/models` surfaces. Antigravity accounts are isolated from Codex and Grok account groups and can be selected explicitly with an API key whose upstream channel is `antigravity`.
+Codex2API can manage Google Antigravity accounts as a dedicated upstream channel and expose their models through the OpenAI-compatible `/v1/responses`, `/v1/chat/completions`, `/v1/messages`, and `/v1/models` surfaces. Antigravity accounts are isolated from Codex and Grok account groups and can be selected explicitly with an API key whose upstream channel is `antigravity`.
 
 Two credential shapes are supported:
 
@@ -67,7 +67,15 @@ Account groups are channel-isolated: an Antigravity account can only join an Ant
 
 ## Supported gateway endpoints
 
-Antigravity inference is currently admitted only through `/v1/responses`; its models are exposed through `/v1/models` and the Codex model manifest. `/v1/responses/compact`, `/v1/chat/completions`, and `/v1/messages` explicitly exclude Antigravity accounts because no compatible adapter exists for those transports. The official Codex executors also reject Antigravity credentials before any network request as a provider-boundary safeguard.
+Antigravity inference is admitted through `/v1/responses`, `/v1/chat/completions`, and `/v1/messages`; its models are exposed through `/v1/models` and the Codex model manifest. Chat and Messages translate their inbound body into a Responses payload before dispatch, which is exactly what the `v1internal` adapter consumes, so all three transports share one admission gate and one adapter. `/v1/responses/compact` still excludes Antigravity accounts because no compaction adapter exists, and the official Codex executors reject Antigravity credentials before any network request as a provider-boundary safeguard.
+
+## Function tools
+
+Responses function tools are bridged into Gemini `functionDeclarations`. Dropping them is not a safe degradation: the upstream still receives the system instruction describing those tools, answers with a call it was never allowed to declare, and terminates the turn as `MALFORMED_FUNCTION_CALL`. Built-in Codex tools (web search, image generation, computer use) have no `v1internal` equivalent and are still ignored. Operators can pin the bridge off for diagnostics, which makes a `tool_choice` that forces a function fail closed with a 400 instead:
+
+```bash
+ANTIGRAVITY_FUNCTION_TOOLS_ENABLED=false
+```
 
 ## API Key Interactions request assumption
 
@@ -141,6 +149,9 @@ OAuth documents include the access/refresh/ID tokens, project, OAuth client sele
 - `GET /api/admin/accounts/:id/antigravity/state` is read-only and never calls Google. It returns credential kind, catalog source/verification, identity/project status, sanitized permissions/quota, generation-fenced capability observations, timestamps, and warnings.
 - `POST /api/admin/accounts/:id/antigravity/sync` refreshes the Google identity/control plane for OAuth accounts. For API-key accounts it only persists the declared/default local catalog with `verified: false`; it does not fabricate remote catalog, quota, permission, project, or Interactions verification.
 - `POST /api/admin/accounts/:id/antigravity/capabilities/probe` performs one bounded non-stream request against the first configured/default model with a one-token output limit. This explicit action consumes a small amount of generation quota. Only a successful HTTP/JSON response persists `verified: true`; transport, status, content-type, or envelope failures remain unverified. State reads and sync never silently run it.
+- `GET /api/admin/accounts/:id/test?model=<published-id>` is the shared connection test, now wired for Antigravity. It sends the configured test prompt through the same Cloud Code executor as live dispatch (endpoint fallback, 429/503 quota mapping, one refresh-and-retry on 401 for OAuth accounts) and streams `test_start` / `content` / `test_complete` or `error` SSE events, so the account page's "Test connection" button shows the model's actual reply. The model must be one of the account's published IDs; without `model` it prefers the global test model, then the cheapest `*-flash-*-low` tier. A success clears cooldown/error state; 429/503 record a per-model cooldown instead of marking the account failed. Batch and recycle-bin tests use the same path.
+- `GET/PUT /api/admin/settings/channel-tests` stores per-channel connection-test defaults for Antigravity and Claude (`{"antigravity":{"test_model","test_content","test_concurrency"},"claude":{...}}`, persisted in `system_settings.channel_test_config`). `test_concurrency` (0~200, 0 = global) is applied to batch tests whose accounts all belong to that channel; mixed batches keep the global concurrency. The model must be in the tested account's catalog or automatic selection is used; empty content falls back to the global test content. The response also carries `model_choices` (union of the pool's catalogs) and `default_test_content` for the settings page. Grok and Codex keep using the global `test_model` / `test_content`.
+- `GET/PUT /api/admin/settings/antigravity` stores channel settings in `system_settings.antigravity_config`. `model_redirects` maps a bare logical model to one of its own fixed tiers (`{"gemini-3.8-flash":"gemini-3.8-flash-high"}`); a request that names the bare model without `reasoning.effort` then runs as that tier on every entry point (Responses fold, Chat Completions, Messages, API-key Interactions). `redirect_overrides_effort` makes the redirect win even when the request carries an explicit effort. Suffixed tier IDs are never redirected, and the response lists `choices` (each logical model with its default level and tier IDs) for the settings page.
 
 ## Relevant admin endpoints
 

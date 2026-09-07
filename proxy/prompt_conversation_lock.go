@@ -124,7 +124,11 @@ func verifiedPromptConversationLockIdentity(c *gin.Context, policyContext verifi
 	if platform == "" || userID == "" || len(fingerprint) != 32 {
 		return promptConversationLockIdentity{}, false
 	}
-	digest := sha256.Sum256([]byte("prompt-conversation-lock-v1\x00" + platform + "\x00" + userID + "\x00" + fingerprint))
+	lockMaterial := "prompt-conversation-lock-v1\x00" + platform + "\x00" + userID + "\x00" + fingerprint
+	if policyContext.Meta.ChannelID > 0 {
+		lockMaterial = "prompt-conversation-lock-v2\x00" + platform + "\x00" + userID + "\x00" + strconv.Itoa(policyContext.Meta.ChannelID) + "\x00" + fingerprint
+	}
+	digest := sha256.Sum256([]byte(lockMaterial))
 	return promptConversationLockIdentity{
 		Kind:    database.PromptConversationLockIdentityNewAPI,
 		LockKey: hex.EncodeToString(digest[:]), Platform: platform, NewAPIUserID: userID,

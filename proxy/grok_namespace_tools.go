@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Grok（xAI）上游的 /responses 反序列化器只接受 function/web_search/x_search/… 等工具变体，
@@ -1064,7 +1065,7 @@ func newGrokNamespaceReverser(body io.ReadCloser, streaming bool, aliases map[st
 			_ = pw.Close()
 			return
 		}
-		reverser := &grokStreamReverser{aliases: aliases, customItems: make(map[string]bool), toolSearchItems: make(map[string]bool), clientItemIDs: make(map[string]string), inputBytes: make(map[string]int)}
+		reverser := newGrokStreamReverser(aliases)
 		reader := bufio.NewReader(body)
 		for {
 			line, err := reader.ReadBytes('\n')
@@ -1095,7 +1096,19 @@ type grokStreamReverser struct {
 	toolSearchItems map[string]bool
 	clientItemIDs   map[string]string
 	inputBytes      map[string]int
+	createdAt       int64
 	failed          bool
+}
+
+func newGrokStreamReverser(aliases map[string]grokNsIdentity) *grokStreamReverser {
+	return &grokStreamReverser{
+		aliases:         aliases,
+		customItems:     make(map[string]bool),
+		toolSearchItems: make(map[string]bool),
+		clientItemIDs:   make(map[string]string),
+		inputBytes:      make(map[string]int),
+		createdAt:       time.Now().Unix(),
+	}
 }
 
 func (r *grokStreamReverser) rememberClientItemID(upstreamID, callID, itemType string) {
@@ -1117,6 +1130,7 @@ func (r *grokStreamReverser) rememberClientItemID(upstreamID, callID, itemType s
 func (r *grokStreamReverser) rewriteLine(line []byte) []byte {
 	if !bytes.Contains(line, []byte(`"function_call"`)) &&
 		!bytes.Contains(line, []byte(`"response.function_call_arguments.`)) &&
+		!bytes.Contains(line, []byte(`"response.created"`)) &&
 		!bytes.Contains(line, []byte(`"response.completed"`)) &&
 		!bytes.Contains(line, []byte(`"response.incomplete"`)) {
 		return line
@@ -1142,6 +1156,17 @@ func (r *grokStreamReverser) rewriteLine(line []byte) []byte {
 		return nil
 	}
 	switch eventType {
+	case "response.created":
+		if response, ok := event["response"].(map[string]any); ok {
+			if value, ok := response["created_at"].(float64); ok {
+				createdAt := int64(value)
+				if createdAt > 0 && float64(createdAt) == value {
+					r.createdAt = createdAt
+				}
+			}
+		}
+		// Capturing response metadata must not change the provider's original frame.
+		return line
 	case "response.output_item.added", "response.output_item.done":
 		if item, ok := event["item"].(map[string]any); ok {
 			name := grokNsStringField(item, "name")
@@ -1229,8 +1254,8 @@ func (r *grokStreamReverser) failureLine(head, gap, suffix []byte, source map[st
 	failure := map[string]any{
 		"type": "response.failed",
 		"response": map[string]any{
-			"object": "response", "status": "failed", "status_code": 400,
-			"output": []any{},
+			"object": "response", "created_at": r.createdAt,
+			"status": "failed", "status_code": 400, "output": []any{},
 			"error": map[string]any{
 				"type": "invalid_request_error", "code": "invalid_prompt", "param": "tools", "status_code": 400,
 				"message": "tool_input_too_large: codex2api stopped an oversized tool call after " + strconv.Itoa(r.inputBytes[itemID]) + " bytes (limit " + strconv.Itoa(grokToolCallHardLimitBytes) + "). Split the work into smaller batches.",

@@ -13,8 +13,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/tidwall/gjson"
 )
 
 func TestAntigravityResponsesReasoningEffortMapsToSafeThinkingBudget(t *testing.T) {
@@ -123,7 +125,7 @@ func TestAntigravityResponsesUsesOfficialEnvelopeWithoutForcedCredits(t *testing
 		t.Fatalf("userAgent = %#v", got["userAgent"])
 	}
 	request := got["request"].(map[string]any)
-	if request["sessionId"] != antigravityOfficialSessionID {
+	if !isAntigravitySessionID(request["sessionId"]) {
 		t.Fatalf("sessionId = %#v", request["sessionId"])
 	}
 	requestID, _ := got["requestId"].(string)
@@ -330,7 +332,10 @@ func TestAntigravityResponsesLargeMixedToolsKeepOrdinaryHiUsable(t *testing.T) {
 	}
 }
 
-func TestAntigravityResponsesIgnoresAutomaticFunctionToolsByDefault(t *testing.T) {
+// Silently dropping declarations still ships the tool-describing system
+// instruction upstream, so the model answers with a call it was never allowed
+// to declare and the turn dies as MALFORMED_FUNCTION_CALL (issue #595).
+func TestAntigravityResponsesForwardsFunctionToolsByDefault(t *testing.T) {
 	t.Setenv(antigravityFunctionToolsEnv, "")
 	got, err := responsesToGeminiInternal([]byte(`{
 		"input":"hi",
@@ -341,8 +346,32 @@ func TestAntigravityResponsesIgnoresAutomaticFunctionToolsByDefault(t *testing.T
 		t.Fatal(err)
 	}
 	request := got["request"].(map[string]any)
+	tools, ok := request["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("function declarations were dropped by default: %#v", request)
+	}
+	declarations := tools[0].(map[string]any)["functionDeclarations"].([]any)
+	if len(declarations) != 1 || declarations[0].(map[string]any)["name"] != "lookup" {
+		t.Fatalf("functionDeclarations = %#v", declarations)
+	}
+	if mode := request["toolConfig"].(map[string]any)["functionCallingConfig"].(map[string]any)["mode"]; mode != "AUTO" {
+		t.Fatalf("function calling mode = %#v", mode)
+	}
+}
+
+func TestAntigravityResponsesFunctionToolsRemainPinnableOff(t *testing.T) {
+	t.Setenv(antigravityFunctionToolsEnv, "false")
+	got, err := responsesToGeminiInternal([]byte(`{
+		"input":"hi",
+		"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],
+		"tool_choice":"auto"
+	}`), "project", "gemini-3.6-flash-tiered")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := got["request"].(map[string]any)
 	if _, ok := request["tools"]; ok {
-		t.Fatalf("experimental function declarations were enabled by default: %#v", request)
+		t.Fatalf("explicitly disabled bridge still forwarded declarations: %#v", request)
 	}
 	contents := request["contents"].([]any)
 	if len(contents) != 1 || extractGeminiRequestText(contents[0]) != "hi" {
@@ -351,7 +380,7 @@ func TestAntigravityResponsesIgnoresAutomaticFunctionToolsByDefault(t *testing.T
 }
 
 func TestAntigravityResponsesRejectsForcedToolsWhileBridgeDisabled(t *testing.T) {
-	t.Setenv(antigravityFunctionToolsEnv, "")
+	t.Setenv(antigravityFunctionToolsEnv, "false")
 	_, err := responsesToGeminiInternal([]byte(`{
 		"input":"hi",
 		"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],
@@ -359,6 +388,30 @@ func TestAntigravityResponsesRejectsForcedToolsWhileBridgeDisabled(t *testing.T)
 	}`), "project", "gemini-3.6-flash-tiered")
 	if err == nil || !strings.Contains(err.Error(), "forced function tools") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+// Codex and the Anthropic bridge echo reasoning items back as history. They
+// carry no Gemini-representable payload, but rejecting them would 400 every
+// multi-turn tool conversation (issue #595).
+func TestAntigravityResponsesSkipsEchoedReasoningItems(t *testing.T) {
+	got, err := responsesToGeminiInternal([]byte(`{
+		"input":[
+			{"type":"message","role":"user","content":"look it up"},
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}],"encrypted_content":"gAAAAopaque"},
+			{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"query\":\"value\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"found"}
+		]
+	}`), "project", "gemini-3-flash-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := got["request"].(map[string]any)["contents"].([]any)
+	if len(contents) != 3 {
+		t.Fatalf("reasoning item was not skipped cleanly: %#v", contents)
+	}
+	if contents[1].(map[string]any)["role"] != "model" || contents[2].(map[string]any)["role"] != "user" {
+		t.Fatalf("tool round trip lost its roles: %#v", contents)
 	}
 }
 
@@ -583,6 +636,28 @@ func TestAntigravityJSONResponseDoesNotFabricateCompletion(t *testing.T) {
 	if !strings.Contains(string(out), `"status":"failed"`) || strings.Contains(string(out), `"status":"completed"`) {
 		t.Fatalf("unexpected response: %s", out)
 	}
+	createdAt := gjson.GetBytes(out, "created_at")
+	if createdAt.Type != gjson.Number || createdAt.Int() <= 0 || createdAt.Int() > time.Now().Unix() || createdAt.Float() != float64(createdAt.Int()) {
+		t.Fatalf("created_at = %s, want Unix seconds; response=%s", createdAt.Raw, out)
+	}
+}
+
+func TestAntigravityJSONResponseUsesCapturedCreatedAt(t *testing.T) {
+	const capturedCreatedAt int64 = 1710000000
+	body, err := newAntigravityJSONResponseBodyAt(io.NopCloser(strings.NewReader(`{
+		"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]
+	}`)), "gemini-test", capturedCreatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer body.Close()
+	out, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gjson.GetBytes(out, "created_at").Int(); got != capturedCreatedAt {
+		t.Fatalf("created_at = %d, want captured value %d; response=%s", got, capturedCreatedAt, out)
+	}
 }
 
 func TestAntigravityJSONResponseConvertsFunctionCall(t *testing.T) {
@@ -691,7 +766,7 @@ func TestAntigravityOAuthWireUsesOfficialIdentity(t *testing.T) {
 		t.Fatalf("body userAgent = %#v", gotBody["userAgent"])
 	}
 	request := gotBody["request"].(map[string]any)
-	if request["sessionId"] != antigravityOfficialSessionID {
+	if !isAntigravitySessionID(request["sessionId"]) {
 		t.Fatalf("sessionId = %#v", request["sessionId"])
 	}
 	if _, exists := gotBody["enabledCreditTypes"]; exists {
@@ -1121,8 +1196,14 @@ func TestAntigravitySSELifecycleAndBufferedTerminal(t *testing.T) {
 			t.Fatalf("missing %s: %s", eventType, got)
 		}
 	}
-	if !strings.Contains(got, `"delta":"hello"`) || !strings.Contains(got, `"output_text":"hello"`) {
-		t.Fatalf("buffered terminal text is incomplete: %s", got)
+	if !strings.Contains(got, `"delta":"hel"`) || !strings.Contains(got, `"delta":"lo"`) || !strings.Contains(got, `"output_text":"hello"`) {
+		t.Fatalf("incremental deltas or terminal text are incomplete: %s", got)
+	}
+	if strings.Index(got, `"delta":"hel"`) > strings.Index(got, `"delta":"lo"`) {
+		t.Fatalf("deltas are out of order: %s", got)
+	}
+	if strings.Count(got, `"type":"response.output_item.added"`) != 1 || strings.Count(got, `"type":"response.content_part.added"`) != 1 {
+		t.Fatalf("message item must be opened exactly once: %s", got)
 	}
 	if strings.Count(got, `"type":"response.completed"`) != 1 {
 		t.Fatalf("completed count = %d, body=%s", strings.Count(got, `"type":"response.completed"`), got)
@@ -1133,6 +1214,7 @@ func TestAntigravitySSELifecycleAndBufferedTerminal(t *testing.T) {
 	if !strings.Contains(got, `"model":"gemini-test"`) || !strings.Contains(got, `"sequence_number":0`) {
 		t.Fatalf("stable response metadata missing: %s", got)
 	}
+	assertSyntheticResponseCreatedAt(t, out, "response.completed")
 }
 
 func TestAntigravitySSEConvertsFunctionCallLifecycle(t *testing.T) {
@@ -1182,6 +1264,7 @@ func TestAntigravitySSESafetyFailureDoesNotPenalizeAccount(t *testing.T) {
 	if len(failedPayload) == 0 {
 		t.Fatalf("response.failed missing from stream: %s", raw)
 	}
+	assertSyntheticResponseCreatedAt(t, raw, "response.failed")
 	if !bytes.Contains(failedPayload, []byte(`"code":"content_filter"`)) || !bytes.Contains(failedPayload, []byte(`"status_code":400`)) {
 		t.Fatalf("safety failure payload = %s", failedPayload)
 	}
@@ -1239,8 +1322,8 @@ func TestAntigravitySSESafetyTerminalFails(t *testing.T) {
 	}
 }
 
-func TestAntigravitySSEPriorTextIsNotLeakedWhenLaterSafetyFrameArrives(t *testing.T) {
-	input := "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"sensitive-prefix\"}]}}]}\n\n" +
+func TestAntigravitySSELaterSafetyFrameFailsAfterIncrementalDeltas(t *testing.T) {
+	input := "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"already-streamed\"}]}}]}\n\n" +
 		"data: {\"candidates\":[{\"finishReason\":\"SAFETY\"}]}\n\n"
 	body := newAntigravitySSEResponseBody(io.NopCloser(strings.NewReader(input)))
 	defer body.Close()
@@ -1249,8 +1332,17 @@ func TestAntigravitySSEPriorTextIsNotLeakedWhenLaterSafetyFrameArrives(t *testin
 		t.Fatal(err)
 	}
 	got := string(out)
-	if !strings.Contains(got, `"type":"response.failed"`) || strings.Contains(got, "sensitive-prefix") || strings.Contains(got, `"type":"response.completed"`) {
-		t.Fatalf("later safety frame did not fail closed: %s", got)
+	// Text that arrived before the rejection was already forwarded as a delta;
+	// the stream must still terminate as failed, never as completed, and must
+	// not close the text part as if it were a finished answer.
+	if !strings.Contains(got, `"delta":"already-streamed"`) {
+		t.Fatalf("earlier text was not streamed incrementally: %s", got)
+	}
+	if !strings.Contains(got, `"type":"response.failed"`) || strings.Contains(got, `"type":"response.completed"`) || strings.Contains(got, `"type":"response.output_text.done"`) {
+		t.Fatalf("later safety frame did not terminate the stream as failed: %s", got)
+	}
+	if strings.Index(got, `"type":"response.failed"`) < strings.Index(got, `"delta":"already-streamed"`) {
+		t.Fatalf("failure must follow the streamed delta: %s", got)
 	}
 }
 
@@ -1309,5 +1401,76 @@ func TestAntigravitySSEPromptSafetyWithoutCandidateFails(t *testing.T) {
 	got := string(out)
 	if !strings.Contains(got, "response.failed") || strings.Contains(got, "response.completed") || !strings.Contains(got, "safety policy") {
 		t.Fatalf("prompt safety result = %s", got)
+	}
+}
+
+// isAntigravitySessionID reports whether v has the native session id shape:
+// a "-" followed by a decimal 63-bit value.
+func isAntigravitySessionID(v any) bool {
+	s, ok := v.(string)
+	if !ok || len(s) < 2 || s[0] != '-' {
+		return false
+	}
+	for _, r := range s[1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func TestAntigravitySessionIDIsStablePerConversationAndDistinctAcrossConversations(t *testing.T) {
+	first, err := responsesToGeminiInternal([]byte(`{"input":[{"role":"user","content":"hello there"}],"prompt_cache_key":"thread-a"}`), "project", "gemini-3.7-flash-high")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := responsesToGeminiInternal([]byte(`{"input":[{"role":"user","content":"hello there"},{"role":"assistant","content":"hi"},{"role":"user","content":"more"}],"prompt_cache_key":"thread-a"}`), "project", "gemini-3.7-flash-high")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := responsesToGeminiInternal([]byte(`{"input":[{"role":"user","content":"hello there"}],"prompt_cache_key":"thread-b"}`), "project", "gemini-3.7-flash-high")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionOf := func(env map[string]any) string {
+		request := env["request"].(map[string]any)
+		id, _ := request["sessionId"].(string)
+		return id
+	}
+	if !isAntigravitySessionID(sessionOf(first)) {
+		t.Fatalf("sessionId shape = %q", sessionOf(first))
+	}
+	if sessionOf(first) != sessionOf(again) {
+		t.Fatalf("same prompt_cache_key produced different session ids: %q vs %q", sessionOf(first), sessionOf(again))
+	}
+	if sessionOf(first) == sessionOf(other) {
+		t.Fatalf("different prompt_cache_key shared a session id: %q", sessionOf(first))
+	}
+}
+
+func TestAntigravitySessionIDFallsBackToFirstUserTurn(t *testing.T) {
+	sessionOf := func(body string) string {
+		env, err := responsesToGeminiInternal([]byte(body), "project", "gemini-3.7-flash-high")
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := env["request"].(map[string]any)
+		id, _ := request["sessionId"].(string)
+		return id
+	}
+	turnOne := sessionOf(`{"instructions":"be brief","input":[{"role":"user","content":"first question"}]}`)
+	turnTwo := sessionOf(`{"instructions":"be brief","input":[{"role":"user","content":"first question"},{"role":"assistant","content":"answer"},{"role":"user","content":"follow up"}]}`)
+	unrelated := sessionOf(`{"input":[{"role":"user","content":"another conversation"}]}`)
+	if turnOne != turnTwo {
+		t.Fatalf("conversation continuation changed the session id: %q vs %q", turnOne, turnTwo)
+	}
+	if turnOne == unrelated {
+		t.Fatalf("unrelated conversations shared a session id: %q", turnOne)
+	}
+	if !isAntigravitySessionID(turnOne) || turnOne == "-3750763034362895579" {
+		t.Fatalf("session id must be derived, not the legacy constant: %q", turnOne)
+	}
+	if metadataSeeded := sessionOf(`{"input":"x","metadata":{"session_id":"sess-1"}}`); metadataSeeded != antigravitySessionIDFromSeed("metadata.session_id:sess-1") {
+		t.Fatalf("metadata.session_id was not used as the seed: %q", metadataSeeded)
 	}
 }

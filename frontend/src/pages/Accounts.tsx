@@ -1,20 +1,42 @@
 import type { ChangeEvent, DragEvent, ReactNode } from "react";
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo } from "react";
-import { createPortal } from "react-dom";
+import { memo, useCallback, useEffect, useRef, useState, useMemo } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { api, getAdminKey, resetAdminAuthState } from "../api";
 import type { ProxyRow } from "../api";
-import { ProxyPoolSelect } from "../components/ProxyPoolSelect";
+import { ProxyField } from "../components/ProxyField";
+import AccountProxyBadge from "../components/AccountProxyBadge";
+import AccountProxyQuickEditor from "../components/AccountProxyQuickEditor";
+import {
+  buildProxyBindingContext,
+  type ProxyBindingContext,
+} from "../lib/accountProxyBinding";
 import Modal from "../components/Modal";
 import ChannelLogo from "../components/ChannelLogo";
+import { useVisibleChannels } from "../visibleChannels";
 import ModelLogo from "../components/ModelLogo";
 import OperationResultsModal from "../components/OperationResultsModal";
 import { cn } from "@/lib/utils";
+import TestConnectionModal from "../components/TestConnectionModal";
+import {
+  DEFAULT_TEST_MODEL,
+  exactModelMappingAliases,
+  extractTextModels,
+  formatAccountName,
+  isConnectionTestModel,
+  uniqueTestModels,
+} from "../lib/connectionTestModels";
 import GrokAccounts from "./GrokAccounts";
 import AntigravityAccounts from "./AntigravityAccounts";
 import TraeCNAccounts from "./TraeCNAccounts";
+import ClaudeAccounts from "./ClaudeAccounts";
 import { mergeAccountLiveState, useAccountLiveState } from "../hooks/useAccountLiveState";
 import PageHeader from "../components/PageHeader";
+import {
+  HeaderActionMenu,
+  type HeaderActionMenuItem,
+  type HeaderActionMenuSection,
+} from "../components/HeaderActionMenu";
+import ColumnSettingsMenu from "../components/ColumnSettingsMenu";
 import { CompactStat } from "../components/CompactStat";
 import Pagination from "../components/Pagination";
 import StateShell from "../components/StateShell";
@@ -186,6 +208,7 @@ import {
   resolveAccountOverlayKind,
 } from "../components/AccountStateOverlay";
 import CodexInviteView from "../components/CodexInviteView";
+import InviteGuideModal from "../components/InviteGuideModal";
 import Sub2APIImportModal from "../components/Sub2APIImportModal";
 import AccountQuotaDistributionChart from "../components/AccountQuotaDistributionChart";
 import AccountRateLimitRecoveryChart from "../components/AccountRateLimitRecoveryChart";
@@ -326,6 +349,7 @@ const ACCOUNT_TABLE_COLUMNS = [
   "email",
   "tags",
   "groups",
+  "proxy",
   "priority",
   "plan",
   "status",
@@ -670,29 +694,6 @@ function parseModelMappingText(value: string): ModelMappingParseResult {
   return { ok: true, value: trimmed };
 }
 
-function exactModelMappingAliases(
-  value?: string,
-  supportedModels: string[] = [],
-): string[] {
-  const parsed = parseModelMappingEntries(value ?? "");
-  if (!parsed.ok) return [];
-  const supported = new Set(
-    supportedModels.map((model) => model.trim().toLowerCase()).filter(Boolean),
-  );
-  return parsed.entries
-    .filter((entry) => {
-      const alias = entry.from.trim();
-      const target = entry.to.trim().toLowerCase();
-      return (
-        alias &&
-        !alias.includes("*") &&
-        isConnectionTestModel(alias) &&
-        (supported.size === 0 || supported.has(target))
-      );
-    })
-    .map((entry) => entry.from.trim());
-}
-
 function serializeModelMappingEntries(
   entries: ModelMappingEntry[],
 ): ModelMappingParseResult {
@@ -736,13 +737,6 @@ function mergeModelLists(current: string[], incoming: string[]): string[] {
     result.push(value);
   }
   return result;
-}
-
-function formatAccountName(account: AccountRow): string {
-  if (account.openai_responses_api || account.grok_api) {
-    return account.name?.trim() || `ID ${account.id}`;
-  }
-  return account.email || account.name || `ID ${account.id}`;
 }
 
 function isOAuthAccount(account: AccountRow | null): boolean {
@@ -992,6 +986,7 @@ interface AccountRowActions {
   openSchedulerEditor: (account: AccountRow) => void;
   openQuickConfig: (account: AccountRow) => void;
   openQuickGroupEditor: (account: AccountRow) => void;
+  openQuickProxyEditor: (account: AccountRow) => void;
   openUsage: (account: AccountRow) => void;
   // 直接打开用量弹窗的官方统计 tab（成本列的官方胶囊）。
   openOfficialUsage: (account: AccountRow) => void;
@@ -1052,6 +1047,7 @@ const AccountTableRow = memo(function AccountTableRow({
   visibleColumns,
   showEmailDomainTags,
   allGroups,
+  proxyCtx,
   healthBuckets,
   lazyMode,
   refreshing,
@@ -1066,6 +1062,7 @@ const AccountTableRow = memo(function AccountTableRow({
   visibleColumns: Record<AccountTableColumn, boolean>;
   showEmailDomainTags: boolean;
   allGroups: AccountGroup[];
+  proxyCtx: ProxyBindingContext;
   healthBuckets: AccountHealthBucket[] | undefined;
   lazyMode: boolean;
   refreshing: boolean;
@@ -1317,6 +1314,17 @@ const AccountTableRow = memo(function AccountTableRow({
                                 />
                               </TableCell>
                             )}
+                            {visibleColumns.proxy && (
+                              <TableCell className="min-w-[120px] max-w-[180px]">
+                                <AccountProxyBadge
+                                  account={account}
+                                  ctx={proxyCtx}
+                                  onClick={() =>
+                                    actions.openQuickProxyEditor(account)
+                                  }
+                                />
+                              </TableCell>
+                            )}
                             {visibleColumns.priority && (
                               <TableCell>
                                 <SchedulerPriorityBadge account={account} />
@@ -1532,6 +1540,7 @@ const AccountCardItem = memo(function AccountCardItem({
   selected,
   detailOpen,
   allGroups,
+  proxyCtx,
   lazyMode,
   showEmailDomainTags,
   healthBuckets,
@@ -1547,6 +1556,7 @@ const AccountCardItem = memo(function AccountCardItem({
   selected: boolean;
   detailOpen: boolean;
   allGroups: AccountGroup[];
+  proxyCtx: ProxyBindingContext;
   lazyMode: boolean;
   showEmailDomainTags: boolean;
   healthBuckets: AccountHealthBucket[] | undefined;
@@ -1564,6 +1574,7 @@ const AccountCardItem = memo(function AccountCardItem({
       selected={selected}
       detailOpen={detailOpen}
       allGroups={allGroups}
+      proxyCtx={proxyCtx}
       lazyMode={lazyMode}
       showEmailDomainTags={showEmailDomainTags}
       healthBuckets={healthBuckets}
@@ -1576,6 +1587,7 @@ const AccountCardItem = memo(function AccountCardItem({
       onOpenDetail={() => actions.openDetail(account)}
       onEdit={() => actions.openSchedulerEditor(account)}
       onEditGroups={() => actions.openQuickGroupEditor(account)}
+      onEditProxy={() => actions.openQuickProxyEditor(account)}
       onUsage={() => actions.openUsage(account)}
       onOpenOfficialUsage={() => actions.openOfficialUsage(account)}
       onTest={() => actions.openTesting(account)}
@@ -1593,7 +1605,7 @@ const AccountCardItem = memo(function AccountCardItem({
 });
 
 export default function Accounts() {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS;
   const [showAdd, setShowAdd] = useState(false);
   // providerView 由路由驱动，刷新浏览器后停留在当前上游视图。
@@ -1634,7 +1646,14 @@ export default function Accounts() {
       ? "antigravity"
       : normalizedPath.endsWith("/accounts/traecn")
         ? "traecn"
-        : "codex";
+        : normalizedPath.endsWith("/accounts/claude")
+          ? "claude"
+          : "codex";
+  const { channels: visibleChannels, isChannelVisible } = useVisibleChannels();
+  // 设置页隐藏了某个渠道后，直接打开它的账号路由要回落到 Codex 视图。
+  useEffect(() => {
+    if (!isChannelVisible(providerView)) navigate("/accounts", { replace: true });
+  }, [isChannelVisible, navigate, providerView]);
   const setProviderView = useCallback(
     (view: UpstreamChannel) => {
       navigate(
@@ -1644,7 +1663,9 @@ export default function Accounts() {
             ? "/accounts/antigravity"
             : view === "traecn"
               ? "/accounts/traecn"
-            : "/accounts",
+            : view === "claude"
+              ? "/accounts/claude"
+              : "/accounts",
       );
     },
     [navigate],
@@ -1789,7 +1810,6 @@ export default function Accounts() {
   const [editCustomHeadersText, setEditCustomHeadersText] = useState("");
   const [editCodexFingerprintMode, setEditCodexFingerprintMode] =
     useState<CodexFingerprintMode>("off");
-  const [testingProxyKey, setTestingProxyKey] = useState<string | null>(null);
   // 代理池条目：账号表单里"从代理池选择"下拉的数据源。加载失败静默留空
   // （选择器为空时自动隐藏，不影响手动填代理）。
   const [proxyPool, setProxyPool] = useState<ProxyRow[]>([]);
@@ -1843,6 +1863,9 @@ export default function Accounts() {
   const [dragging, setDragging] = useState(false);
   const dragCounter = useRef(0);
   const [showExportPicker, setShowExportPicker] = useState(false);
+  // 导出时是否带上账号绑定的代理。默认关闭：代理 URL 常含明文用户名密码，
+  // 只有在确实要迁移「号池 + 代理绑定关系」时才该打开。
+  const [exportIncludeProxy, setExportIncludeProxy] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [showMigrate, setShowMigrate] = useState(false);
   const [showAnalysisCharts, setShowAnalysisCharts] = useState(
@@ -1879,6 +1902,11 @@ export default function Accounts() {
     failed: 0,
     done: false,
   });
+  // 导入后的邀请积分引导。ids 是本次导入新建的账号,后端会过滤出能发邀请的。
+  const [inviteGuide, setInviteGuide] = useState<{ show: boolean; ids: number[] }>({
+    show: false,
+    ids: [],
+  });
   const [addMethod, setAddMethod] = useState<
     "rt" | "st" | "at" | "session" | "openai" | "oauth" | "agentIdentity"
   >("oauth");
@@ -1901,6 +1929,9 @@ export default function Accounts() {
   const [sessionProxyUrl, setSessionProxyUrl] = useState("");
   // 允许重复添加：勾选后本次添加/导入跳过去重，强制新建（添加弹窗与导入弹窗共用）。
   const [allowDuplicate, setAllowDuplicate] = useState(false);
+  // 采用文件内代理：勾选后 JSON 文件里带的 proxy_url 生效，并自动注册进代理池。
+  // 只对 JSON 系格式有意义，TXT 一行一个 token 物理上带不了代理。
+  const [importFileProxies, setImportFileProxies] = useState(false);
   const [openAIForm, setOpenAIForm] =
     useState<AddOpenAIResponsesAccountRequest>({
       base_url: "https://api.openai.com",
@@ -1947,6 +1978,10 @@ export default function Accounts() {
   );
   const [quickGroupIds, setQuickGroupIds] = useState<number[]>([]);
   const [quickGroupSubmitting, setQuickGroupSubmitting] = useState(false);
+  // 代理徽章点开的快速绑定弹窗：只改 proxy_url 一个字段。
+  const [quickProxyAccount, setQuickProxyAccount] = useState<AccountRow | null>(
+    null,
+  );
   // OAuth 账号“支持模型”白名单编辑器状态;空白名单表示该账号可调度所有模型。
   const [modelsAccount, setModelsAccount] = useState<AccountRow | null>(null);
   const [modelsDraft, setModelsDraft] = useState<string[]>([]);
@@ -1969,6 +2004,24 @@ export default function Accounts() {
     [allGroups],
   );
   const [apiKeys, setAPIKeys] = useState<APIKeyRow[]>([]);
+  // 代理徽章的判定上下文。fail-closed(钉住的托管代理已不在启用池)只在代理池
+  // 开启时成立,所以开关与全局代理都得跟着代理池一起进来。
+  const [proxyPoolEnabled, setProxyPoolEnabled] = useState(false);
+  const [globalProxyURL, setGlobalProxyURL] = useState("");
+  // 单个对象且引用稳定:memo 行组件的 props 里不能出现每轮新建的数组/对象,
+  // 否则整表 memo 失效(账号页性能优化的既有教训)。
+  // 分组用全量而非 codexGroups:后端解析组代理时不看渠道,迁移前挂在别的渠道组里
+  // 的存量成员照样吃那条组代理,按渠道过滤会把它误报成"无组代理"。
+  const proxyBindingCtx = useMemo<ProxyBindingContext>(
+    () =>
+      buildProxyBindingContext({
+        proxies: proxyPool,
+        groups: allGroups,
+        poolEnabled: proxyPoolEnabled,
+        globalProxy: globalProxyURL,
+      }),
+    [proxyPool, allGroups, proxyPoolEnabled, globalProxyURL],
+  );
   const [lazyMode, setLazyMode] = useState(false);
   const [accountPortalEnabled, setAccountPortalEnabled] = useState(false);
   const [panelPendingCount, setPanelPendingCount] = useState(0);
@@ -2049,107 +2102,30 @@ export default function Accounts() {
   const selectAllRef = useRef<HTMLInputElement>(null);
   const { toast, showToast } = useToast();
   const { confirm, confirmDialog } = useConfirmDialog();
-  const ipApiLang = i18n.language?.startsWith("zh") ? "zh-CN" : "en";
-
-  const handleTestProxyUrl = async (rawUrl: string, testKey: string) => {
-    const url = rawUrl.trim();
-    if (!url) {
-      showToast(t("accounts.proxyUrlRequired"), "error");
-      return;
-    }
-    if (testingProxyKey !== null) return;
-
-    setTestingProxyKey(testKey);
-    try {
-      const result = await api.testProxy(url, undefined, ipApiLang);
-      if (!result.success) {
-        showToast(
-          t("accounts.proxyTestFailed", {
-            error: result.error || t("accounts.proxyTestUnknownError"),
-          }),
-          "error",
-        );
-        return;
-      }
-
-      const location =
-        result.location ||
-        [result.country, result.region, result.city].filter(Boolean).join(" ");
-      showToast(
-        t("accounts.proxyTestSuccess", {
-          ip: result.ip || "-",
-          location: location || "-",
-          latency: result.latency_ms ?? 0,
-        }),
-      );
-    } catch (error) {
-      showToast(
-        t("accounts.proxyTestFailed", { error: getErrorMessage(error) }),
-        "error",
-      );
-    } finally {
-      setTestingProxyKey((current) => (current === testKey ? null : current));
-    }
-  };
-
+  // 代理字段统一走 ProxyField(手填+测试+代理池下拉),与 Grok/Claude/Antigravity 同构。
   const renderProxyInput = ({
     value,
     onChange,
-    testKey,
     label = t("accounts.proxyUrl"),
     placeholder = t("accounts.proxyUrlPlaceholder"),
     disabled = false,
   }: {
     value: string;
     onChange: (value: string) => void;
-    testKey: string;
     label?: string;
     placeholder?: string;
     disabled?: boolean;
-  }) => {
-    const isTesting = testingProxyKey === testKey;
-    const testDisabled = disabled || !value.trim() || testingProxyKey !== null;
-    const hasProxyPool = proxyPool.length > 0;
-
-    return (
-      <div className="space-y-2.5">
-        <label className="block text-sm font-semibold text-muted-foreground">
-          {label}
-        </label>
-        {/* 第一行：手动填写代理 URL + 测试 */}
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
-          <Input
-            className="min-w-0 flex-1"
-            placeholder={placeholder}
-            value={value}
-            disabled={disabled}
-            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-              onChange(event.target.value)
-            }
-          />
-          <Button
-            type="button"
-            variant="outline"
-            className="shrink-0 justify-center gap-1.5 sm:min-w-[108px]"
-            disabled={testDisabled}
-            onClick={() => void handleTestProxyUrl(value, testKey)}
-          >
-            <Zap className={`size-3.5 ${isTesting ? "animate-pulse" : ""}`} />
-            {isTesting ? t("accounts.testingProxy") : t("accounts.testProxy")}
-          </Button>
-        </div>
-        {/* 第二行：从代理池选择（有池条目时单独占一行，与上方 URL 输入左对齐） */}
-        {hasProxyPool ? (
-          <ProxyPoolSelect
-            className="w-full"
-            proxies={proxyPool}
-            disabled={disabled}
-            onSelect={onChange}
-          />
-        ) : null}
-      </div>
-    );
-  };
+  }) => (
+    <ProxyField
+      value={value}
+      onChange={onChange}
+      proxies={proxyPool}
+      label={label}
+      labelClassName="text-sm"
+      placeholder={placeholder}
+      disabled={disabled}
+    />
+  );
 
   const renderCustomHeadersTextarea = ({
     value,
@@ -2625,6 +2601,8 @@ export default function Accounts() {
         if (cancelled) return;
         setLazyMode(settings.lazy_mode);
         setAccountPortalEnabled(Boolean(settings.public_account_portal_page_enabled));
+        setProxyPoolEnabled(Boolean(settings.proxy_pool_enabled));
+        setGlobalProxyURL((settings.proxy_url ?? "").trim());
       })
       .catch(() => undefined);
     return () => { cancelled = true; };
@@ -3828,6 +3806,18 @@ export default function Accounts() {
     }
   };
 
+  // maybeOpenInviteGuide 在导入结束后按设置决定是否弹出邀请积分引导。
+  // 开关读失败时不弹:宁可少一次引导,也不要在设置不可用时打扰用户。
+  const maybeOpenInviteGuide = useCallback(async (ids: number[]) => {
+    try {
+      const settings = await api.getInviteGuideSettings();
+      if (!settings.enabled) return;
+    } catch {
+      return;
+    }
+    setInviteGuide({ show: true, ids });
+  }, []);
+
   // readImportSSE 读取单批导入的 SSE 进度流。baseline 是此前已完成批次的累计值,
   // 本批实时进度叠加其上;markDoneOnComplete=false 时(还有后续批次)不置 done,
   // 让进度条跨批保持运行态。本批结束后把本批终值累加进 baseline(原地修改)。
@@ -3842,6 +3832,12 @@ export default function Accounts() {
       failed: number;
     },
     markDoneOnComplete = true,
+    // createdIDs 原地收集本次导入新建的账号 ID(complete 事件下发),跨批累加,
+    // 供导入结束后拉取邀请收益方案。
+    createdIDs?: number[],
+    // proxySummary 原地累加代理注册结果(complete 事件下发),跨批累加,
+    // 供导入结束后在 toast 里汇报。
+    proxySummary?: { imported: number; skipped: number; warnings: string[] },
   ) => {
     const base = baseline ?? {
       current: 0,
@@ -3894,7 +3890,22 @@ export default function Accounts() {
             updated: number;
             duplicate: number;
             failed: number;
+            created_ids?: number[];
+            proxies_imported?: number;
+            proxies_skipped?: number;
+            warning?: string;
           };
+          if (event.type === "complete" && createdIDs && event.created_ids?.length) {
+            createdIDs.push(...event.created_ids);
+          }
+          if (event.type === "complete" && proxySummary) {
+            proxySummary.imported += event.proxies_imported ?? 0;
+            proxySummary.skipped += event.proxies_skipped ?? 0;
+            // 同一条告警在多批之间会重复出现，去重后再展示。
+            if (event.warning && !proxySummary.warnings.includes(event.warning)) {
+              proxySummary.warnings.push(event.warning);
+            }
+          }
           last = {
             current: event.current ?? 0,
             total: event.total ?? 0,
@@ -3985,6 +3996,13 @@ export default function Accounts() {
       duplicate: 0,
       failed: 0,
     };
+    // 本次导入(含所有批次)新建的账号 ID,用于导入完成后的邀请收益引导。
+    const importedAccountIDs: number[] = [];
+    // 本次导入注册进代理池的代理统计,跨批累加后在结束 toast 里汇报。
+    const proxySummary = { imported: 0, skipped: 0, warnings: [] as string[] };
+    // 只有 JSON 系格式的文件才可能携带代理,后端也只对这两种格式认这个开关。
+    const carriesFileProxies =
+      importFileProxies && (format === "json" || format === "json_at");
 
     try {
       for (let i = 0; i < batches.length; i++) {
@@ -3993,6 +4011,7 @@ export default function Accounts() {
         if (format !== "txt") formData.append("format", format);
         const trimmedImportProxy = (proxyOverride ?? importProxyUrl).trim();
         if (trimmedImportProxy) formData.append("proxy_url", trimmedImportProxy);
+        if (carriesFileProxies) formData.append("import_proxy", "true");
         const routedHeaders = applyOptionalWorkspaceRouteHeader(
           parsedCustomHeaders.value,
           workspaceOverride,
@@ -4015,7 +4034,13 @@ export default function Accounts() {
         // 只有最后一批完成后才标记 done,让进度条在多批之间保持运行态。
         const isLastBatch = i === batches.length - 1;
         if (res.headers.get("content-type")?.includes("text/event-stream")) {
-          await readImportSSE(res, totals, isLastBatch);
+          await readImportSSE(
+            res,
+            totals,
+            isLastBatch,
+            importedAccountIDs,
+            proxySummary,
+          );
         } else {
           const data = await res.json();
           if (!res.ok) {
@@ -4034,11 +4059,38 @@ export default function Accounts() {
           totals.updated += data.updated ?? 0;
           totals.duplicate += data.duplicate ?? 0;
           totals.failed += data.failed ?? 0;
+          // 纯 Agent Identity 文件走的是这条非流式分支,代理统计同样在这里下发。
+          proxySummary.imported += data.proxies_imported ?? 0;
+          proxySummary.skipped += data.proxies_skipped ?? 0;
+          if (data.warning && !proxySummary.warnings.includes(data.warning)) {
+            proxySummary.warnings.push(data.warning);
+          }
           setImportProgress({ show: true, ...totals, done: isLastBatch });
           if (isLastBatch) void reload();
         }
       }
-      showToast(t("accounts.importCompleted"));
+      // Toast 只有一个槽位,连续调用会互相顶掉——代理结果和告警必须拼进同一条。
+      if (carriesFileProxies) {
+        const parts = [
+          t("accounts.importCompleted"),
+          t("accounts.importProxySummary", {
+            imported: proxySummary.imported,
+            skipped: proxySummary.skipped,
+          }),
+          ...proxySummary.warnings,
+        ];
+        showToast(
+          parts.join(" "),
+          proxySummary.warnings.length > 0 ? "error" : "success",
+        );
+      } else {
+        showToast(t("accounts.importCompleted"));
+      }
+      // 引导只在有新建账号时触发;开关状态由后端判定,前端拿到 enabled=false
+      // 就不展示,避免把开关语义复制两份。
+      if (importedAccountIDs.length > 0) {
+        void maybeOpenInviteGuide(importedAccountIDs);
+      }
     } catch (error) {
       setImportProgress({
         show: true,
@@ -4337,9 +4389,12 @@ export default function Accounts() {
         filter: "healthy" | "all";
         ids?: number[];
         channel: "codex";
+        includeProxy?: boolean;
       } = {
         filter: scope === "healthy" ? "healthy" : "all",
         channel: "codex",
+        // TXT 只导出 refresh_token,带上代理也写不进去,徒然让响应多带一份明文口令。
+        includeProxy: format === "json" && exportIncludeProxy,
       };
       if (scope === "selected") {
         params.ids = Array.from(selected);
@@ -5768,6 +5823,7 @@ export default function Accounts() {
     openSchedulerEditor,
     openQuickConfig: (account) => setQuickConfigAccount(account),
     openQuickGroupEditor,
+    openQuickProxyEditor: (account) => setQuickProxyAccount(account),
     openUsage: (account) => {
       setUsageInitialPage("overview");
       setUsageAccount(account);
@@ -5794,6 +5850,7 @@ export default function Accounts() {
       openSchedulerEditor: (a) => rowActionsImplRef.current?.openSchedulerEditor(a),
       openQuickConfig: (a) => rowActionsImplRef.current?.openQuickConfig(a),
       openQuickGroupEditor: (a) => rowActionsImplRef.current?.openQuickGroupEditor(a),
+      openQuickProxyEditor: (a) => rowActionsImplRef.current?.openQuickProxyEditor(a),
       openUsage: (a) => rowActionsImplRef.current?.openUsage(a),
       openOfficialUsage: (a) => rowActionsImplRef.current?.openOfficialUsage(a),
       openTesting: (a) => rowActionsImplRef.current?.openTesting(a),
@@ -5813,23 +5870,33 @@ export default function Accounts() {
   // 四个账号视图共用同一切换器（独立页面通过 headerSlot 注入）。
   // 滑块动画 + 品牌 logo，与仪表盘渠道过滤器视觉一致。
   // useMemo 保持引用稳定,否则每轮渲染的新元素会击穿独立账号页的 memo 边界。
-  const providerSwitcher = useMemo(() => (
-    <div className="relative grid w-full max-w-[620px] grid-cols-4 items-center rounded-lg border border-border bg-muted/40 p-0.5">
-      <span
-        aria-hidden
-        className="absolute inset-y-0.5 left-0.5 w-[calc((100%-4px)/4)] rounded-md bg-background shadow-sm transition-transform duration-300 ease-out"
-        style={{
-          transform: `translateX(${providerView === "grok" ? 100 : providerView === "antigravity" ? 200 : providerView === "traecn" ? 300 : 0}%)`,
-        }}
-      />
-      {(
+  const providerSwitcherOptions = useMemo(
+    () =>
+      (
         [
           ["codex", t("accounts.providerViewCodex")],
           ["grok", t("accounts.providerViewGrok")],
           ["antigravity", t("accounts.providerViewAntigravity")],
+          ["claude", t("accounts.providerViewClaude")],
           ["traecn", t("accounts.providerViewTraeCN")],
         ] as const
-      ).map(([key, label]) => (
+      ).filter(([key]) => visibleChannels.includes(key)),
+    [t, visibleChannels],
+  );
+  const providerSwitcher = useMemo(() => (
+    <div
+      className="relative grid w-full max-w-[560px] items-center rounded-lg border border-border bg-muted/40 p-0.5"
+      style={{ gridTemplateColumns: `repeat(${providerSwitcherOptions.length}, minmax(0, 1fr))` }}
+    >
+      <span
+        aria-hidden
+        className="absolute inset-y-0.5 left-0.5 rounded-md bg-background shadow-sm transition-transform duration-300 ease-out"
+        style={{
+          width: `calc((100% - 4px) / ${providerSwitcherOptions.length})`,
+          transform: `translateX(${Math.max(0, providerSwitcherOptions.findIndex(([key]) => key === providerView)) * 100}%)`,
+        }}
+      />
+      {providerSwitcherOptions.map(([key, label]) => (
         <button
           key={key}
           type="button"
@@ -5847,7 +5914,7 @@ export default function Accounts() {
         </button>
       ))}
     </div>
-  ), [providerView, setProviderView, t]);
+  ), [providerView, setProviderView, t, providerSwitcherOptions]);
 
   if (providerView === "grok") {
     // key 触发渠道切换时整块内容淡入过渡，切换器由 headerSlot 常驻不闪。
@@ -5895,6 +5962,14 @@ export default function Accounts() {
     return (
       <div key="provider-traecn" className="animate-channel-switch-in">
         <TraeCNAccounts headerSlot={providerSwitcher} />
+      </div>
+    );
+  }
+
+  if (providerView === "claude") {
+    return (
+      <div key="provider-claude" className="animate-channel-switch-in">
+        <ClaudeAccounts headerSlot={providerSwitcher} />
       </div>
     );
   }
@@ -5962,6 +6037,7 @@ export default function Accounts() {
             description={t("accounts.description")}
             onRefresh={() => void reload()}
             hideTitle
+            actionsBelow
             titleAdornment={
               <div className="flex items-center gap-2">
                 {providerSwitcher}
@@ -6735,6 +6811,7 @@ export default function Accounts() {
                     </button>
                   </div>
                   <ColumnSettingsMenu
+                    columnOrder={ACCOUNT_TABLE_COLUMNS}
                     columns={visibleColumns}
                     onToggle={(column) =>
                       setVisibleColumns((current) => ({
@@ -6752,6 +6829,7 @@ export default function Accounts() {
                       plan: t("accounts.plan"),
                       tags: t("accounts.tagsLabel"),
                       groups: t("accounts.groupsLabel"),
+                      proxy: t("accounts.proxyColumn"),
                       priority: t("accounts.schedulerPriorityColumn"),
                       status: t("accounts.status"),
                       today: t("accounts.todayStats"),
@@ -7025,6 +7103,7 @@ export default function Accounts() {
               <StateShell
                 variant="section"
                 isEmpty={accounts.length === 0}
+                emptyIcon={<ChannelLogo channel="codex" size={30} />}
                 emptyTitle={t("accounts.noData")}
                 emptyDescription={t("accounts.noDataDesc")}
                 action={
@@ -7051,6 +7130,7 @@ export default function Accounts() {
                         selected={selected.has(account.id)}
                         detailOpen={detailAccountId === account.id}
                         allGroups={allGroups}
+                        proxyCtx={proxyBindingCtx}
                         lazyMode={lazyMode}
                         showEmailDomainTags={showEmailDomainTags}
                         healthBuckets={healthBars[String(account.id)]}
@@ -7119,6 +7199,11 @@ export default function Accounts() {
                                 ? "↓"
                                 : "↑"
                               : ""}
+                          </TableHead>
+                        )}
+                        {visibleColumns.proxy && (
+                          <TableHead className="text-[13px] font-semibold">
+                            {t("accounts.proxyColumn")}
                           </TableHead>
                         )}
                         {visibleColumns.priority && (
@@ -7294,6 +7379,7 @@ export default function Accounts() {
                           visibleColumns={visibleColumns}
                           showEmailDomainTags={showEmailDomainTags}
                           allGroups={allGroups}
+                          proxyCtx={proxyBindingCtx}
                           healthBuckets={healthBars[String(account.id)]}
                           lazyMode={lazyMode}
                           refreshing={refreshingIds.has(account.id)}
@@ -7570,7 +7656,6 @@ export default function Accounts() {
                 </div>
                 {renderProxyInput({
                   value: addForm.proxy_url,
-                  testKey: "add-refresh-token",
                   onChange: (value) =>
                     setAddForm((form) => ({
                       ...form,
@@ -7604,7 +7689,6 @@ export default function Accounts() {
                 </div>
                 {renderProxyInput({
                   value: addForm.proxy_url,
-                  testKey: "add-session-token",
                   onChange: (value) =>
                     setAddForm((form) => ({
                       ...form,
@@ -7641,7 +7725,6 @@ export default function Accounts() {
                 </div>
                 {renderProxyInput({
                   value: atForm.proxy_url,
-                  testKey: "add-access-token",
                   onChange: (value) =>
                     setAtForm((form) => ({
                       ...form,
@@ -7675,7 +7758,6 @@ export default function Accounts() {
                 </div>
                 {renderProxyInput({
                   value: sessionProxyUrl,
-                  testKey: "add-session-json",
                   label: t("accounts.importProxyLabel"),
                   onChange: setSessionProxyUrl,
                 })}
@@ -7874,7 +7956,6 @@ export default function Accounts() {
                 })}
                 {renderProxyInput({
                   value: openAIForm.proxy_url,
-                  testKey: "add-openai-responses",
                   onChange: (value) =>
                     setOpenAIForm((form) => ({
                       ...form,
@@ -7986,7 +8067,6 @@ export default function Accounts() {
 
                 {renderProxyInput({
                   value: agentIdentityProxyUrl,
-                  testKey: "add-agent-identity",
                   onChange: setAgentIdentityProxyUrl,
                 })}
               </div>
@@ -8014,7 +8094,6 @@ export default function Accounts() {
                     </div>
                     {renderProxyInput({
                       value: oauthProxyUrl,
-                      testKey: "oauth-generate",
                       label: t("accounts.oauthProxyUrl"),
                       placeholder: t("accounts.oauthProxyUrlPlaceholder"),
                       onChange: setOauthProxyUrl,
@@ -8131,7 +8210,6 @@ export default function Accounts() {
             <div className="mb-4 space-y-1.5">
               {renderProxyInput({
                 value: importProxyUrl,
-                testKey: "import-batch",
                 label: t("accounts.importProxyLabel"),
                 onChange: setImportProxyUrl,
               })}
@@ -8155,6 +8233,18 @@ export default function Accounts() {
                 />
                 {t("accounts.allowDuplicate")}
               </label>
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  className="size-3.5"
+                  checked={importFileProxies}
+                  onChange={(e) => setImportFileProxies(e.target.checked)}
+                />
+                {t("accounts.importFileProxies")}
+              </label>
+              <p className="text-[11px] text-muted-foreground">
+                {t("accounts.importFileProxiesHint")}
+              </p>
               <div className="space-y-1.5 pt-1">
                 <label className="text-xs font-medium text-foreground">
                   {t("accounts.importGroupsLabel")}
@@ -8401,6 +8491,30 @@ export default function Accounts() {
                     </div>
                   </button>
                 </div>
+              </div>
+              {/* 代理配置只对 JSON 导出生效，TXT 只有 refresh_token 一列。 */}
+              <div className="border-t border-border pt-3">
+                <label className="flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 size-3.5 shrink-0"
+                    checked={exportIncludeProxy}
+                    onChange={(e) => setExportIncludeProxy(e.target.checked)}
+                  />
+                  <span className="min-w-0">
+                    <span className="font-medium text-foreground">
+                      {t("accounts.exportIncludeProxy")}
+                    </span>
+                    <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                      {t("accounts.exportIncludeProxyHint")}
+                    </span>
+                  </span>
+                </label>
+                {exportIncludeProxy && (
+                  <p className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-600 dark:text-amber-400">
+                    {t("accounts.exportIncludeProxyWarning")}
+                  </p>
+                )}
               </div>
             </div>
           </Modal>
@@ -8978,7 +9092,6 @@ export default function Accounts() {
                     <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs space-y-4">
                       {renderProxyInput({
                         value: editOpenAIForm.proxy_url,
-                        testKey: "edit-openai-responses",
                         onChange: (value) =>
                           setEditOpenAIForm((form) => ({
                             ...form,
@@ -9017,7 +9130,6 @@ export default function Accounts() {
                         </div>
                         {renderProxyInput({
                           value: editOAuthProxyUrl,
-                          testKey: "edit-oauth-generate",
                           label: t("accounts.oauthProxyUrl"),
                           placeholder: t("accounts.oauthProxyUrlPlaceholder"),
                           onChange: setEditOAuthProxyUrl,
@@ -9447,7 +9559,6 @@ export default function Accounts() {
                         <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors md:col-span-2">
                           {renderProxyInput({
                             value: editProxyUrl,
-                            testKey: "edit-account-proxy",
                             onChange: setEditProxyUrl,
                           })}
                         </div>
@@ -9595,6 +9706,19 @@ export default function Accounts() {
               </div>
             ) : null}
           </Modal>
+
+          <AccountProxyQuickEditor
+            account={quickProxyAccount}
+            accountLabel={
+              quickProxyAccount ? formatAccountName(quickProxyAccount) : ""
+            }
+            proxies={proxyPool}
+            ctx={proxyBindingCtx}
+            onClose={() => setQuickProxyAccount(null)}
+            onSaved={async () => {
+              await reload();
+            }}
+          />
 
           <Modal
             show={Boolean(quickGroupAccount)}
@@ -10313,6 +10437,8 @@ export default function Accounts() {
                                       ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
                                       : group.channel === "traecn"
                                         ? "bg-orange-50 text-orange-700 dark:bg-orange-950 dark:text-orange-300"
+                                      : group.channel === "claude"
+                                        ? "bg-orange-50 text-orange-700 dark:bg-orange-950 dark:text-orange-300"
                                         : "bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
                                 }`}
                               >
@@ -10323,6 +10449,8 @@ export default function Accounts() {
                                     ? t("accounts.providerViewAntigravity")
                                     : group.channel === "traecn"
                                       ? t("accounts.providerViewTraeCN")
+                                    : group.channel === "claude"
+                                      ? t("accounts.providerViewClaude")
                                       : t("accounts.providerViewCodex")}
                               </span>
                               <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-semibold text-muted-foreground">
@@ -10414,10 +10542,12 @@ export default function Accounts() {
                         groupDraft.id !== null &&
                         (allGroups.find((g) => g.id === groupDraft.id)
                           ?.member_count ?? 0) > 0;
+                      const groupChannelBase = ["codex", "grok", "antigravity", "claude"] as const;
+                      const groupChannels = [...groupChannelBase, "traecn"] as const;
                       return (
                         <>
                           <div className="flex gap-2">
-                            {(["codex", "grok", "antigravity", "traecn"] as const).map((channel) => (
+                            {groupChannels.map((channel) => (
                               <button
                                 key={channel}
                                 type="button"
@@ -10441,6 +10571,8 @@ export default function Accounts() {
                                     ? t("accounts.providerViewAntigravity")
                                     : channel === "traecn"
                                       ? t("accounts.providerViewTraeCN")
+                                    : channel === "claude"
+                                      ? t("accounts.providerViewClaude")
                                       : t("accounts.providerViewCodex")}
                               </button>
                             ))}
@@ -10597,6 +10729,20 @@ export default function Accounts() {
               </div>
             </div>
           </Modal>
+
+          <InviteGuideModal
+            show={inviteGuide.show}
+            accountIds={inviteGuide.ids}
+            onClose={() => setInviteGuide((p) => ({ ...p, show: false }))}
+            onGoInvite={(accountEmail) => {
+              setInviteGuide((p) => ({ ...p, show: false }));
+              navigate(
+                accountEmail
+                  ? `/accounts/invite?account=${encodeURIComponent(accountEmail)}`
+                  : "/accounts/invite",
+              );
+            }}
+          />
 
           <Modal
             show={importProgress.show}
@@ -11018,6 +11164,9 @@ function RecycleBinView({
     }
     setExporting(true);
     try {
+      // 回收站导出不带代理:这里是"恢复误删账号"的入口,不是迁移入口,没有
+      // 承载勾选项的弹窗,默认不外泄代理里的明文口令。需要迁移代理绑定关系
+      // 请用账号页的导出。
       const data = await api.exportRecycleBinAccounts(ids);
       if (data.length === 0) {
         showToast(t("accounts.exportNoAccounts"), "error");
@@ -11384,9 +11533,11 @@ function RecycleBinView({
                         </TableCell>
                         <TableCell>
                           <Badge variant="secondary">
-                            {row.openai_responses_api
-                              ? t("accounts.recycleBinTypeRelay")
-                              : t("accounts.recycleBinTypeOauth")}
+                            {row.claude_api
+                              ? t("accounts.providerViewClaude")
+                              : row.openai_responses_api
+                                ? t("accounts.recycleBinTypeRelay")
+                                : t("accounts.recycleBinTypeOauth")}
                           </Badge>
                         </TableCell>
                         <TableCell>
@@ -11581,6 +11732,7 @@ function recycleBinRowToAccountRow(row: RecycleBinAccountRow): AccountRow {
     plan_type: row.plan_type,
     status: "deleted",
     openai_responses_api: row.openai_responses_api,
+    claude_api: row.claude_api,
     base_url: row.base_url,
     models: row.models,
     proxy_url: "",
@@ -12334,217 +12486,6 @@ function isSubscriptionPlan(planType?: string): boolean {
   );
 }
 
-interface HeaderActionMenuItem {
-  key: string;
-  label: string;
-  icon: ReactNode;
-  disabled?: boolean;
-  title?: string;
-  destructive?: boolean;
-  onSelect: () => void;
-}
-
-interface HeaderActionMenuSection {
-  key: string;
-  label?: string;
-  items: HeaderActionMenuItem[];
-}
-
-function HeaderActionMenu({
-  label,
-  icon,
-  items,
-  sections,
-  align = "end",
-  compact = false,
-  triggerVariant = "outline",
-}: {
-  label: string;
-  icon: ReactNode;
-  items?: HeaderActionMenuItem[];
-  sections?: HeaderActionMenuSection[];
-  align?: "start" | "end";
-  compact?: boolean;
-  triggerVariant?: "outline" | "default" | "ghost" | "secondary" | "destructive";
-}) {
-  const [open, setOpen] = useState(false);
-  const [menuPos, setMenuPos] = useState<{
-    top: number;
-    left: number;
-    openUpward: boolean;
-  } | null>(null);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const resolvedSections: HeaderActionMenuSection[] =
-    sections && sections.length > 0
-      ? sections.filter((section) => section.items.length > 0)
-      : items && items.length > 0
-        ? [{ key: "default", items }]
-        : [];
-
-  const updateMenuPosition = useCallback(() => {
-    const trigger = rootRef.current;
-    if (!trigger) return;
-    const rect = trigger.getBoundingClientRect();
-    const menuWidth = Math.min(288, window.innerWidth - 16);
-    const gap = 8;
-    const spaceBelow = window.innerHeight - rect.bottom - gap;
-    const spaceAbove = rect.top - gap;
-    // Prefer opening downward; flip up when near the bottom of the viewport.
-    const openUpward = spaceBelow < 240 && spaceAbove > spaceBelow;
-    let left =
-      align === "start" ? rect.left : rect.right - menuWidth;
-    left = Math.max(8, Math.min(left, window.innerWidth - menuWidth - 8));
-    const top = openUpward ? rect.top - gap : rect.bottom + gap;
-    setMenuPos({ top, left, openUpward });
-  }, [align]);
-
-  useLayoutEffect(() => {
-    if (!open) {
-      setMenuPos(null);
-      return;
-    }
-    updateMenuPosition();
-  }, [open, updateMenuPosition]);
-
-  useEffect(() => {
-    if (!open) return;
-
-    const handlePointerDown = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (
-        rootRef.current?.contains(target) ||
-        menuRef.current?.contains(target)
-      ) {
-        return;
-      }
-      setOpen(false);
-    };
-
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setOpen(false);
-      }
-    };
-
-    const handleReposition = () => updateMenuPosition();
-
-    document.addEventListener("mousedown", handlePointerDown);
-    document.addEventListener("keydown", handleEscape);
-    window.addEventListener("resize", handleReposition);
-    // Capture scroll from nested table shells so the portal menu stays aligned.
-    window.addEventListener("scroll", handleReposition, true);
-
-    return () => {
-      document.removeEventListener("mousedown", handlePointerDown);
-      document.removeEventListener("keydown", handleEscape);
-      window.removeEventListener("resize", handleReposition);
-      window.removeEventListener("scroll", handleReposition, true);
-    };
-  }, [open, updateMenuPosition]);
-
-  const renderItem = (item: HeaderActionMenuItem) => (
-    <button
-      key={item.key}
-      type="button"
-      role="menuitem"
-      disabled={item.disabled}
-      title={item.title}
-      className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-        item.destructive
-          ? "text-destructive hover:bg-destructive/10"
-          : "text-foreground hover:bg-accent/70"
-      }`}
-      onClick={() => {
-        if (item.disabled) return;
-        setOpen(false);
-        item.onSelect();
-      }}
-    >
-      <span
-        className={`flex size-5 shrink-0 items-center justify-center ${
-          item.destructive ? "text-destructive" : "text-muted-foreground"
-        }`}
-      >
-        {item.icon}
-      </span>
-      <span className="min-w-0 flex-1 truncate">{item.label}</span>
-    </button>
-  );
-
-  const menu =
-    open && menuPos
-      ? createPortal(
-          <div
-            ref={menuRef}
-            data-slot="action-menu-popover"
-            className="fixed z-[200] max-h-[min(70dvh,480px)] w-[min(18rem,calc(100vw-2rem))] overflow-y-auto overflow-x-hidden rounded-xl border border-border bg-popover p-1.5 shadow-[0_18px_40px_hsl(222_30%_18%/0.18)] backdrop-blur-sm"
-            style={
-              menuPos.openUpward
-                ? {
-                    left: menuPos.left,
-                    bottom: window.innerHeight - menuPos.top,
-                  }
-                : {
-                    left: menuPos.left,
-                    top: menuPos.top,
-                  }
-            }
-          >
-            <div role="menu" className="space-y-1">
-              {resolvedSections.map((section, sectionIndex) => (
-                <div key={section.key}>
-                  {section.label ? (
-                    <div
-                      className={`px-2.5 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground ${
-                        sectionIndex > 0
-                          ? "mt-1.5 border-t border-border/70 pt-2"
-                          : "pt-0.5"
-                      }`}
-                    >
-                      {section.label}
-                    </div>
-                  ) : sectionIndex > 0 ? (
-                    <div className="my-1 border-t border-border/70" />
-                  ) : null}
-                  <div className="space-y-0.5">
-                    {section.items.map(renderItem)}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>,
-          document.body,
-        )
-      : null;
-
-  return (
-    <div ref={rootRef} className="relative shrink-0">
-      <Button
-        type="button"
-        variant={triggerVariant}
-        size="sm"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={label}
-        onClick={() => setOpen((current) => !current)}
-        className={compact ? "px-2.5" : undefined}
-      >
-        {icon}
-        {!compact ? (
-          <>
-            {label}
-            <ChevronDown
-              className={`size-3.5 transition-transform ${open ? "rotate-180" : ""}`}
-            />
-          </>
-        ) : null}
-      </Button>
-      {menu}
-    </div>
-  );
-}
-
 function OperationProgressToast({
   progress,
   onClose,
@@ -13239,85 +13180,13 @@ function GroupChipList({
   return <div className="mt-1.5 flex flex-wrap gap-1">{content}</div>;
 }
 
-function ColumnSettingsMenu({
-  columns,
-  onToggle,
-  onReset,
-  resetTitle,
-  labels,
-  title,
-}: {
-  columns: Record<AccountTableColumn, boolean>;
-  onToggle: (column: AccountTableColumn) => void;
-  onReset: () => void;
-  resetTitle: string;
-  labels: Record<AccountTableColumn, string>;
-  title: string;
-}) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const handler = (event: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
-
-  return (
-    <div ref={rootRef} className="relative">
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={() => setOpen((current) => !current)}
-        title={title}
-      >
-        <SlidersHorizontal className="size-3.5" />
-        {title}
-      </Button>
-      {open ? (
-        <div className="absolute right-0 top-[calc(100%+0.5rem)] z-50 w-48 max-w-[calc(100vw-2.5rem)] overflow-hidden rounded-lg border border-border bg-popover p-1.5 shadow-lg">
-          <button
-            type="button"
-            className="mb-1 flex w-full items-center justify-center rounded-md px-2.5 py-1.5 text-xs font-semibold text-primary transition-colors hover:bg-accent/70"
-            onClick={onReset}
-          >
-            {resetTitle}
-          </button>
-          {ACCOUNT_TABLE_COLUMNS.map((column) => (
-            <button
-              key={column}
-              type="button"
-              role="menuitemcheckbox"
-              aria-checked={columns[column]}
-              className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-accent/70"
-              onClick={() => onToggle(column)}
-            >
-              <span
-                className={`flex size-4 shrink-0 items-center justify-center rounded border ${columns[column] ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background"}`}
-              >
-                {columns[column] ? <Check className="size-3" /> : null}
-              </span>
-              <span className="min-w-0 flex-1 truncate">{labels[column]}</span>
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 function AccountMobileCard({
   account,
   sequence,
   selected,
   detailOpen = false,
   allGroups,
+  proxyCtx,
   lazyMode,
   showEmailDomainTags,
   healthBuckets,
@@ -13330,6 +13199,7 @@ function AccountMobileCard({
   onOpenDetail,
   onEdit,
   onEditGroups,
+  onEditProxy,
   onUsage,
   onTest,
   onRefresh,
@@ -13348,6 +13218,7 @@ function AccountMobileCard({
   selected: boolean;
   detailOpen?: boolean;
   allGroups: AccountGroup[];
+  proxyCtx: ProxyBindingContext;
   lazyMode: boolean;
   showEmailDomainTags: boolean;
   healthBuckets: AccountHealthBucket[] | undefined;
@@ -13360,6 +13231,7 @@ function AccountMobileCard({
   onOpenDetail: () => void;
   onEdit: () => void;
   onEditGroups: () => void;
+  onEditProxy: () => void;
   onUsage: () => void;
   onTest: () => void;
   onRefresh: () => void;
@@ -13675,6 +13547,13 @@ function AccountMobileCard({
             onClick={onEditGroups}
             emptyLabel={t("accounts.groupQuickEdit")}
           />
+          <div className="mt-1.5 flex">
+            <AccountProxyBadge
+              account={account}
+              ctx={proxyCtx}
+              onClick={onEditProxy}
+            />
+          </div>
         </div>
 
         <div className="mt-auto border-t border-border/70 bg-muted/15 p-4">
@@ -13941,6 +13820,15 @@ function AccountMobileCard({
             emptyLabel={t("accounts.groupQuickEdit")}
           />
         )}
+        {(!visibleColumns || visibleColumns.proxy) && (
+          <div className="mt-1.5 flex">
+            <AccountProxyBadge
+              account={account}
+              ctx={proxyCtx}
+              onClick={onEditProxy}
+            />
+          </div>
+        )}
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-1.5">
@@ -14121,507 +14009,6 @@ function formatHealthTier(healthTier?: string, t?: any) {
     default:
       return t("accounts.unknown");
   }
-}
-
-// ==================== 测试连接弹窗 ====================
-
-interface TestEvent {
-  type: "test_start" | "content" | "test_complete" | "error";
-  text?: string;
-  model?: string;
-  success?: boolean;
-  error?: string;
-}
-
-function formatTestErrorMessage(message: string) {
-  const normalized = message.trim();
-  const jsonStart = normalized.indexOf("{");
-
-  if (jsonStart === -1) {
-    return normalized;
-  }
-
-  const prefix = normalized
-    .slice(0, jsonStart)
-    .trim()
-    .replace(/[：:]\s*$/, "");
-  const jsonText = normalized.slice(jsonStart);
-
-  try {
-    const parsed = JSON.parse(jsonText);
-    const prettyJson = JSON.stringify(parsed, null, 2);
-    return prefix ? `${prefix}\n${prettyJson}` : prettyJson;
-  } catch {
-    return normalized;
-  }
-}
-
-function formatTestOutput(text: string) {
-  try {
-    const parsed = JSON.parse(text);
-    return JSON.stringify(parsed, null, 2);
-  } catch {
-    return text;
-  }
-}
-
-const DEFAULT_TEST_MODEL = "gpt-5.4";
-
-function isConnectionTestModel(model: string) {
-  const value = model.trim().toLowerCase();
-  return value !== "" && !value.includes("image");
-}
-
-function extractTextModels(
-  modelsResp: Awaited<ReturnType<typeof api.getModels>>,
-) {
-  if (modelsResp.items && modelsResp.items.length > 0) {
-    return modelsResp.items
-      .filter(
-        (item) =>
-          item.enabled &&
-          item.category !== "image" &&
-          !item.id.includes("image"),
-      )
-      .map((item) => item.id);
-  }
-  return (modelsResp.models ?? []).filter(isConnectionTestModel);
-}
-
-function uniqueTestModels(
-  models: string[],
-  preferredModel?: string,
-  includeDefault = true,
-) {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  const candidates = [
-    preferredModel ?? "",
-    ...models,
-    ...(includeDefault ? [DEFAULT_TEST_MODEL] : []),
-  ];
-
-  for (const model of candidates) {
-    const value = model.trim();
-    if (!isConnectionTestModel(value) || seen.has(value)) continue;
-    seen.add(value);
-    result.push(value);
-  }
-  return result;
-}
-
-function TestConnectionModal({
-  account,
-  onClose,
-  onSettled,
-  successHint,
-  restoreOnSuccess,
-}: {
-  account: AccountRow;
-  onClose: () => void;
-  onSettled: () => void;
-  successHint?: string;
-  restoreOnSuccess?: boolean;
-}) {
-  const { t } = useTranslation();
-  const { showToast } = useToast();
-  const [output, setOutput] = useState<string[]>([]);
-  const [status, setStatus] = useState<
-    "connecting" | "streaming" | "success" | "error"
-  >("connecting");
-  const [errorMsg, setErrorMsg] = useState("");
-  const [model, setModel] = useState("");
-  const [selectedModel, setSelectedModel] = useState("");
-  const [modelOptions, setModelOptions] = useState<string[]>([]);
-  const [modelOptionsReady, setModelOptionsReady] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
-  const outputEndRef = useRef<HTMLDivElement>(null);
-  const settledRef = useRef(false);
-  const onSettledRef = useRef(onSettled);
-  onSettledRef.current = onSettled;
-
-  const markSettled = useCallback(() => {
-    if (settledRef.current) return;
-    settledRef.current = true;
-    onSettledRef.current();
-  }, []);
-
-  // Grok 与 openai_responses 同属"账号自带模型清单"的 relay 风格账号，
-  // 测试模型选择逻辑一致（用 account.models 而非上游 /v1/models 全量）。
-  const isOpenAIResponsesAccount = Boolean(
-    account.openai_responses_api || account.grok_api,
-  );
-
-  const modelSelectOptions = useMemo(
-    () =>
-      uniqueTestModels(
-        modelOptions,
-        selectedModel,
-        !isOpenAIResponsesAccount,
-      ).map((item) => ({ label: item, value: item })),
-    [isOpenAIResponsesAccount, modelOptions, selectedModel],
-  );
-
-  useEffect(() => {
-    let active = true;
-
-    const loadModels = async () => {
-      try {
-        const settings = await api.getSettings();
-        if (!active) return;
-
-        if (isOpenAIResponsesAccount) {
-          const accountModels = (account.models ?? []).filter(
-            isConnectionTestModel,
-          );
-          const mappingAliases = exactModelMappingAliases(
-            account.model_mapping,
-            accountModels,
-          );
-          const testModels = uniqueTestModels(
-            [...mappingAliases, ...accountModels],
-            undefined,
-            false,
-          );
-          const preferredModel =
-            testModels.find(
-              (item) =>
-                item.toLowerCase() === settings.test_model.toLowerCase(),
-            ) ??
-            mappingAliases[0] ??
-            accountModels[0];
-          const nextModels = uniqueTestModels(
-            testModels,
-            preferredModel,
-            false,
-          );
-          setModelOptions(nextModels);
-          setSelectedModel((current) => current || nextModels[0] || "");
-          return;
-        }
-
-        const modelsResp = await api.getModels();
-        if (!active) return;
-        const upstreamModels = extractTextModels(modelsResp);
-        const preferredModel = isConnectionTestModel(settings.test_model)
-          ? settings.test_model
-          : DEFAULT_TEST_MODEL;
-        const nextModels = uniqueTestModels(upstreamModels, preferredModel);
-        setModelOptions(nextModels);
-        setSelectedModel(
-          (current) => current || nextModels[0] || DEFAULT_TEST_MODEL,
-        );
-      } catch {
-        if (!active) return;
-        if (isOpenAIResponsesAccount) {
-          const accountModels = (account.models ?? []).filter(
-            isConnectionTestModel,
-          );
-          const mappingAliases = exactModelMappingAliases(
-            account.model_mapping,
-            accountModels,
-          );
-          const fallbackModels = uniqueTestModels(
-            [...mappingAliases, ...accountModels],
-            undefined,
-            false,
-          );
-          setModelOptions(fallbackModels);
-          setSelectedModel((current) => current || fallbackModels[0] || "");
-        } else {
-          const fallbackModels = uniqueTestModels([], DEFAULT_TEST_MODEL);
-          setModelOptions(fallbackModels);
-          setSelectedModel((current) => current || fallbackModels[0]);
-        }
-      } finally {
-        if (active) {
-          setModelOptionsReady(true);
-        }
-      }
-    };
-
-    void loadModels();
-
-    return () => {
-      active = false;
-    };
-  }, [account.model_mapping, account.models, isOpenAIResponsesAccount]);
-
-  useEffect(() => {
-    if (!modelOptionsReady || !selectedModel) return;
-
-    // 重置状态（StrictMode 二次 mount 时清理上一次的残留）
-    setOutput([]);
-    setStatus("connecting");
-    setErrorMsg("");
-    setModel(selectedModel);
-    settledRef.current = false;
-
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    const run = async () => {
-      if (controller.signal.aborted) return;
-
-      try {
-        const params = new URLSearchParams({ model: selectedModel });
-        if (restoreOnSuccess) {
-          params.set("restore_on_success", "true");
-        }
-        const res = await fetch(
-          `/api/admin/accounts/${account.id}/test?${params.toString()}`,
-          {
-            signal: controller.signal,
-            headers: getAdminKey() ? { "X-Admin-Key": getAdminKey() } : {},
-          },
-        );
-
-        if (!res.ok) {
-          const body = await res.text();
-          let msg = `HTTP ${res.status}`;
-          try {
-            const parsed = JSON.parse(body);
-            if (parsed.error) msg = parsed.error;
-          } catch {
-            /* ignore */
-          }
-          setStatus("error");
-          setErrorMsg(msg);
-          markSettled();
-          return;
-        }
-
-        const reader = res.body?.getReader();
-        if (!reader) {
-          setStatus("error");
-          setErrorMsg(t("accounts.browserStreamingUnsupported"));
-          markSettled();
-          return;
-        }
-
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let receivedTerminalEvent = false;
-
-        const processEventLines = (lines: string[]) => {
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith("data: ")) continue;
-
-            try {
-              const event: TestEvent = JSON.parse(trimmed.slice(6));
-
-              switch (event.type) {
-                case "test_start":
-                  setModel(event.model || selectedModel);
-                  setStatus("streaming");
-                  break;
-                case "content":
-                  if (event.text) {
-                    setOutput((prev) => [...prev, event.text!]);
-                  }
-                  break;
-                case "test_complete":
-                  receivedTerminalEvent = true;
-                  setStatus(event.success ? "success" : "error");
-                  break;
-                case "error":
-                  receivedTerminalEvent = true;
-                  setStatus("error");
-                  setErrorMsg(event.error || t("accounts.unknownError"));
-                  break;
-              }
-            } catch {
-              /* ignore non-JSON lines */
-            }
-          }
-        };
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) {
-            buffer += decoder.decode();
-            break;
-          }
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-          processEventLines(lines);
-        }
-
-        if (buffer.trim()) {
-          processEventLines([buffer]);
-        }
-
-        if (receivedTerminalEvent) {
-          // 等服务端关闭 SSE 后再刷新列表：后端会在连接结束时提交状态并失效
-          // 账号快照，提前刷新会重新读到“未采样”的旧缓存。
-          markSettled();
-        } else {
-          setStatus("error");
-          setErrorMsg(t("accounts.connectionEndedUnexpectedly"));
-          markSettled();
-        }
-      } catch (err: unknown) {
-        if (err instanceof DOMException && err.name === "AbortError") return;
-        setStatus("error");
-        setErrorMsg(
-          err instanceof Error ? err.message : t("accounts.connectionFailed"),
-        );
-        markSettled();
-      }
-    };
-
-    // 延迟 50ms 启动，确保 StrictMode cleanup 有足够时间执行 abort
-    const timer = window.setTimeout(() => {
-      void run();
-    }, 50);
-
-    return () => {
-      window.clearTimeout(timer);
-      controller.abort();
-    };
-  }, [
-    account.id,
-    markSettled,
-    modelOptionsReady,
-    restoreOnSuccess,
-    selectedModel,
-    t,
-  ]);
-
-  useEffect(() => {
-    outputEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [output]);
-
-  const statusText = {
-    connecting: t("accounts.connecting"),
-    streaming: t("accounts.receivingResponse"),
-    success: t("accounts.testSuccess"),
-    error: t("accounts.testFailed"),
-  }[status];
-  const StatusIcon = {
-    connecting: Loader2,
-    streaming: Loader2,
-    success: CheckCircle,
-    error: XCircle,
-  }[status];
-  const statusIconSpin = status === "connecting" || status === "streaming";
-
-  const statusColor = {
-    connecting: "text-muted-foreground",
-    streaming: "text-blue-500",
-    success: "text-emerald-500",
-    error: "text-red-500",
-  }[status];
-  const formattedErrorMsg = errorMsg ? formatTestErrorMessage(errorMsg) : "";
-  const handleCopyFailureDetails = async () => {
-    try {
-      await copyTextToClipboard(formattedErrorMsg);
-      showToast(t("common.copied"));
-    } catch {
-      showToast(t("common.copyFailed"), "error");
-    }
-  };
-
-  return (
-    <Modal
-      show={true}
-      title={t("accounts.testConnectionTitle", {
-        account: formatAccountName(account),
-      })}
-      onClose={() => {
-        abortRef.current?.abort();
-        onClose();
-      }}
-      footer={
-        <Button
-          variant="outline"
-          onClick={() => {
-            abortRef.current?.abort();
-            onClose();
-          }}
-        >
-          {t("common.close")}
-        </Button>
-      }
-      contentClassName="sm:max-w-[680px]"
-    >
-      <div className="space-y-4">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <span
-            className={`flex items-center gap-1.5 text-sm font-semibold ${statusColor}`}
-          >
-            <StatusIcon
-              className={cn("size-4", statusIconSpin && "animate-spin")}
-            />
-            {statusText}
-          </span>
-          <Select
-            className="w-52 max-w-full"
-            compact
-            value={selectedModel}
-            onValueChange={setSelectedModel}
-            options={modelSelectOptions}
-            placeholder={model || t("settings.testModel")}
-            disabled={!modelOptionsReady || modelSelectOptions.length === 0}
-          />
-        </div>
-
-        {(output.length > 0 ||
-          status === "connecting" ||
-          status === "streaming") && (
-          <div
-            className="min-h-[80px] max-h-[240px] overflow-auto rounded-lg border border-border bg-muted/30 p-3 text-[13px] leading-relaxed whitespace-pre-wrap break-all"
-            style={{ fontFamily: "var(--font-geist-mono)" }}
-          >
-            {output.length === 0 && status === "connecting" && (
-              <span className="text-muted-foreground animate-pulse">
-                {t("accounts.sendingTestRequest")}
-              </span>
-            )}
-            {output.join("")}
-            <div ref={outputEndRef} />
-          </div>
-        )}
-
-        {errorMsg && (
-          <div className="rounded-xl border border-red-200 bg-red-50 p-3.5 text-red-600 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-400">
-            <div className="mb-2 flex items-center justify-between gap-3">
-              <div className="text-sm font-semibold">
-                {t("accounts.failureDetails")}
-              </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-7 shrink-0 px-2 text-red-600 hover:bg-red-100 hover:text-red-700 dark:text-red-400 dark:hover:bg-red-900/40 dark:hover:text-red-300"
-                onClick={() => void handleCopyFailureDetails()}
-                title={t("common.copy")}
-              >
-                <Copy className="size-3.5" />
-                {t("common.copy")}
-              </Button>
-            </div>
-            <pre
-              className="max-h-[34vh] overflow-auto text-[13px] leading-relaxed whitespace-pre-wrap break-all"
-              style={{ fontFamily: "var(--font-geist-mono)" }}
-            >
-              {formattedErrorMsg}
-            </pre>
-          </div>
-        )}
-
-        {status === "success" && (
-          <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-400">
-            <RotateCcw className="size-4 shrink-0" />
-            {successHint ?? t("accounts.testAutoReset")}
-          </div>
-        )}
-      </div>
-    </Modal>
-  );
 }
 
 interface ResetTimeLabel {

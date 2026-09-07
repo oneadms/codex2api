@@ -33,6 +33,7 @@ const (
 	AccountGroupChannelGrok        = "grok"
 	AccountGroupChannelAntigravity = "antigravity"
 	AccountGroupChannelTraeCN      = "traecn"
+	AccountGroupChannelClaude      = "claude"
 )
 
 // NormalizeAccountGroupChannel 归一分组渠道,空/非法一律按 codex。
@@ -44,6 +45,8 @@ func NormalizeAccountGroupChannel(channel string) string {
 		return AccountGroupChannelAntigravity
 	case AccountGroupChannelTraeCN:
 		return AccountGroupChannelTraeCN
+	case AccountGroupChannelClaude:
+		return AccountGroupChannelClaude
 	}
 	return AccountGroupChannelCodex
 }

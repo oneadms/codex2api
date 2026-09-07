@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
+  AlertTriangle,
   ArrowUpRight,
   Check,
   ChevronDown,
@@ -19,7 +20,9 @@ import {
 } from 'lucide-react'
 
 import { api } from '@/api'
+import ChannelLogo from '../components/ChannelLogo'
 import ModelLogo from '../components/ModelLogo'
+import Modal from '../components/Modal'
 import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
 import { StatTile } from '../components/StatTile'
@@ -28,6 +31,8 @@ import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 import { useToast } from '../hooks/useToast'
+import { postAdminSSE } from '../hooks/useOperationProgress'
+import { applyModelRefreshEvent, readModelRefreshSSE, type ModelRefreshProgress } from '../lib/modelRefreshStream'
 import { getErrorMessage } from '../utils/error'
 import type { ModelPricingOverride, OfficialPricingSyncConfig } from '@/types'
 import {
@@ -37,12 +42,46 @@ import {
 
 type Row = {
   model: string
+  channel?: string
   source: string
   pricing: ModelPricingOverride
   canonical_model?: string
   is_alias?: boolean
 }
 type SourceFilter = 'all' | 'custom' | 'synced' | 'default' | 'unsaved'
+type ChannelFilter = 'all' | 'codex' | 'grok' | 'antigravity' | 'claude'
+const CHANNEL_ORDER: Array<Exclude<ChannelFilter, 'all'>> = ['codex', 'grok', 'antigravity', 'claude']
+const CHANNEL_LABEL: Record<Exclude<ChannelFilter, 'all'>, string> = {
+  codex: 'Codex',
+  grok: 'Grok',
+  antigravity: 'Antigravity',
+  claude: 'Claude',
+}
+function rowChannel(r: Row): Exclude<ChannelFilter, 'all'> {
+  const c = (r.channel || '').toLowerCase()
+  if (c === 'grok' || c === 'antigravity' || c === 'claude') return c
+  return 'codex'
+}
+// 已见过的模型集(localStorage):用于给新出现的模型打"新"标。首次加载会播种、不标新。
+const SEEN_MODELS_KEY = 'model-pricing-seen-models-v1'
+function readSeenModels(): Set<string> | null {
+  if (typeof window === 'undefined') return new Set()
+  const raw = window.localStorage.getItem(SEEN_MODELS_KEY)
+  if (raw == null) return null
+  try {
+    return new Set((JSON.parse(raw) as string[]).map((m) => m.toLowerCase()))
+  } catch {
+    return new Set()
+  }
+}
+function writeSeenModels(models: string[]) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(SEEN_MODELS_KEY, JSON.stringify(models.map((m) => m.toLowerCase())))
+  } catch {
+    // ignore
+  }
+}
 
 type FieldDef = {
   key: keyof ModelPricingOverride
@@ -54,6 +93,8 @@ type FieldDef = {
 const PRIMARY_FIELDS: FieldDef[] = [
   { key: 'input', labelKey: 'settings.pricing.input', shortKey: 'settings.pricing.shortInput', tone: 'neutral' },
   { key: 'cached_input', labelKey: 'settings.pricing.cached', shortKey: 'settings.pricing.shortCached', tone: 'neutral' },
+  { key: 'cache_write_5m', labelKey: 'settings.pricing.cacheWrite5m', shortKey: 'settings.pricing.shortCacheWrite5m', tone: 'neutral' },
+  { key: 'cache_write_1h', labelKey: 'settings.pricing.cacheWrite1h', shortKey: 'settings.pricing.shortCacheWrite1h', tone: 'neutral' },
   { key: 'output', labelKey: 'settings.pricing.output', shortKey: 'settings.pricing.shortOutput', tone: 'neutral' },
 ]
 
@@ -115,7 +156,7 @@ function getOutputMultiplier(input: number, output: number): string | null {
   return `${ratio.toFixed(1).replace(/\.0$/, '')}x`
 }
 
-const PREFERRED_MODEL_ORDER = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] as const
+const PREFERRED_MODEL_ORDER = ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] as const
 
 function modelPreferredRank(model: string): number {
   const lower = model.trim().toLowerCase()
@@ -356,7 +397,7 @@ function BillingRulePreview({ pricing }: { pricing: ModelPricingOverride }) {
             {formatPreviewRate(preview.standard)}
           </div>
           <div className='mt-0.5 text-[10px] text-muted-foreground'>
-            in / cached / out · USD/M
+            input / cache read / output · USD/M
           </div>
         </div>
         {preview.long ? (
@@ -414,6 +455,183 @@ function BillingRulePreview({ pricing }: { pricing: ModelPricingOverride }) {
   )
 }
 
+// ModelCatalogModal 是"模型目录"弹窗:按 provider 分组、可搜索、点击某模型直接定位到
+// 价格行;可刷新账号真实可用模型;新出现的模型标"新",便于快速锁定。
+// 刷新进度面板：每渠道一行，显示已探测的套餐分组数、当前抽样账号，以及刷出来的新模型。
+function ModelRefreshProgressPanel({ progress, running }: { progress: ModelRefreshProgress; running: boolean }) {
+  const { t } = useTranslation()
+  const channels = CHANNEL_ORDER.filter((c) => progress[c]).map((c) => progress[c])
+  if (channels.length === 0) {
+    return (
+      <div className="flex items-center gap-2 rounded-xl border border-sky-500/20 bg-sky-500/5 p-3 text-xs text-sky-700 dark:text-sky-300">
+        <Loader2 className="size-3.5 animate-spin" />
+        {t('settings.pricing.refreshStarting')}
+      </div>
+    )
+  }
+  return (
+    <div className="space-y-1.5 rounded-xl border border-sky-500/20 bg-sky-500/5 p-3">
+      {channels.map((ch) => {
+        const label = CHANNEL_LABEL[ch.channel as Exclude<ChannelFilter, 'all'>] ?? ch.channel
+        const finished = ch.done || (!running && ch.total > 0 && ch.current >= ch.total)
+        const failed = Boolean(ch.error) || ch.failed > 0
+        return (
+          <div key={ch.channel} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+            <span className="flex w-24 shrink-0 items-center gap-1.5 font-semibold text-foreground/80">
+              {finished ? (
+                failed ? <AlertTriangle className="size-3.5 text-amber-500" /> : <Check className="size-3.5 text-emerald-500" />
+              ) : (
+                <Loader2 className="size-3.5 animate-spin text-sky-500" />
+              )}
+              <ChannelLogo channel={ch.channel as Exclude<ChannelFilter, 'all'>} size={14} />
+              {label}
+            </span>
+            <span className="text-muted-foreground">
+              {ch.total > 0
+                ? t('settings.pricing.refreshProbing', { current: ch.current, total: ch.total })
+                : finished
+                  ? t('settings.pricing.refreshNoAccounts')
+                  : t('settings.pricing.refreshStarting')}
+            </span>
+            {ch.lastPlan ? (
+              <span className="truncate font-mono text-[11px] text-muted-foreground">
+                {ch.lastPlan}
+                {ch.lastAccount ? ` · ${ch.lastAccount}` : ''}
+                {ch.lastStatus === 'failed' ? ` · ${t('settings.pricing.catalogRefreshChannelFailed')}${ch.lastError ? `: ${ch.lastError}` : ''}` : ''}
+              </span>
+            ) : null}
+            {ch.error ? <span className="text-[11px] text-amber-600 dark:text-amber-400">{ch.error}</span> : null}
+            {ch.added.map((m) => (
+              <span key={m} className="rounded-full bg-rose-500/15 px-1.5 py-0.5 font-mono text-[10px] font-bold text-rose-600 ring-1 ring-inset ring-rose-500/25 dark:text-rose-300">
+                +{m}
+              </span>
+            ))}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function ModelCatalogModal({
+  open,
+  onClose,
+  rows,
+  newModels,
+  query,
+  onQueryChange,
+  onJump,
+  onRefresh,
+  refreshing,
+  refreshProgress,
+  onAcknowledge,
+}: {
+  open: boolean
+  onClose: () => void
+  rows: Row[]
+  newModels: Set<string>
+  query: string
+  onQueryChange: (v: string) => void
+  onJump: (model: string) => void
+  onRefresh: () => void
+  refreshing: boolean
+  refreshProgress: ModelRefreshProgress | null
+  onAcknowledge: () => void
+}) {
+  const { t } = useTranslation()
+  const q = query.trim().toLowerCase()
+  const groups = useMemo(() => {
+    const map = new Map<string, Row[]>()
+    for (const r of rows) {
+      if (q && !r.model.toLowerCase().includes(q)) continue
+      const c = rowChannel(r)
+      const arr = map.get(c) || []
+      arr.push(r)
+      map.set(c, arr)
+    }
+    for (const arr of map.values()) arr.sort((a, b) => compareModelsNewestFirst(a.model, b.model))
+    return CHANNEL_ORDER.filter((c) => map.has(c)).map((c) => ({ channel: c, rows: map.get(c)! }))
+  }, [rows, q])
+
+  return (
+    <Modal
+      show={open}
+      onClose={onClose}
+      title={t('settings.pricing.catalogTitle')}
+      contentClassName="sm:max-w-[640px]"
+      footer={
+        <div className="flex w-full items-center justify-between gap-2">
+          <span className="text-xs text-muted-foreground">
+            {t('settings.pricing.catalogCount', { count: rows.length })}
+          </span>
+          <div className="flex items-center gap-2">
+            {newModels.size > 0 ? (
+              <Button variant="ghost" size="sm" onClick={onAcknowledge}>
+                {t('settings.pricing.catalogMarkSeen')}
+              </Button>
+            ) : null}
+            <Button variant="outline" size="sm" className="gap-1.5" onClick={onRefresh} disabled={refreshing}>
+              {refreshing ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />}
+              {t('settings.pricing.catalogRefresh')}
+            </Button>
+          </div>
+        </div>
+      }
+    >
+      <div className="space-y-3">
+        {refreshProgress ? <ModelRefreshProgressPanel progress={refreshProgress} running={refreshing} /> : null}
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={query}
+            onChange={(e) => onQueryChange(e.target.value)}
+            placeholder={t('settings.pricing.catalogSearch')}
+            className="pl-8"
+          />
+        </div>
+        {groups.length === 0 ? (
+          <p className="py-8 text-center text-sm text-muted-foreground">{t('settings.pricing.emptyFiltered')}</p>
+        ) : (
+          groups.map((group) => (
+            <div key={group.channel} className="space-y-1">
+              <div className="flex items-center gap-1.5 px-1 pt-1">
+                <ChannelLogo channel={group.channel} size={14} />
+                <span className="text-xs font-semibold text-foreground/80">{CHANNEL_LABEL[group.channel]}</span>
+                <span className="text-[10px] text-muted-foreground">{group.rows.length}</span>
+              </div>
+              <div className="grid gap-1 sm:grid-cols-2">
+                {group.rows.map((r) => {
+                  const isNew = newModels.has(r.model.toLowerCase())
+                  return (
+                    <button
+                      key={r.model}
+                      type="button"
+                      onClick={() => onJump(r.model)}
+                      className="flex items-center justify-between gap-2 rounded-lg border border-border/70 bg-background/60 px-2.5 py-1.5 text-left transition-colors hover:border-primary/40 hover:bg-accent/50"
+                    >
+                      <span className="truncate font-mono text-[12px] text-foreground">{r.model}</span>
+                      <span className="flex shrink-0 items-center gap-1">
+                        {isNew ? (
+                          <span className="rounded-full bg-rose-500/15 px-1.5 py-0.5 text-[9px] font-bold text-rose-600 ring-1 ring-inset ring-rose-500/25 dark:text-rose-300">
+                            {t('settings.pricing.newBadge')}
+                          </span>
+                        ) : null}
+                        <span className="tabular-nums text-[11px] text-muted-foreground">
+                          ${formatPriceDisplay(normalizePrice(r.pricing.input))}/${formatPriceDisplay(normalizePrice(r.pricing.output))}
+                        </span>
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </Modal>
+  )
+}
+
 export default function ModelPricing() {
   const { t } = useTranslation()
   const { showToast } = useToast()
@@ -424,6 +642,7 @@ export default function ModelPricing() {
   const [modelsDevUrl, setModelsDevUrl] = useState('')
   const [officialOpenAIUrl, setOfficialOpenAIUrl] = useState('')
   const [officialXAIUrl, setOfficialXAIUrl] = useState('')
+  const [officialClaudeUrl, setOfficialClaudeUrl] = useState('')
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [syncing, setSyncing] = useState(false)
@@ -435,10 +654,19 @@ export default function ModelPricing() {
     interval_minutes: 1440,
     include_openai: true,
     include_grok: true,
+    include_claude: true,
   })
   const [savingModel, setSavingModel] = useState('')
   const [query, setQuery] = useState('')
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all')
+  const [channelFilter, setChannelFilter] = useState<ChannelFilter>('all')
+  const [catalogOpen, setCatalogOpen] = useState(false)
+  const [catalogQuery, setCatalogQuery] = useState('')
+  const [jumpedModel, setJumpedModel] = useState('')
+  const [refreshingModels, setRefreshingModels] = useState(false)
+  const [refreshProgress, setRefreshProgress] = useState<ModelRefreshProgress | null>(null)
+  const refreshProgressHideTimer = useRef<number | null>(null)
+  const [seenBump, setSeenBump] = useState(0)
   const [syncOpen, setSyncOpen] = useState(false)
   const [expandedAdvanced, setExpandedAdvanced] = useState<Record<string, boolean>>({})
 
@@ -452,6 +680,7 @@ export default function ModelPricing() {
       setModelsDevUrl(res.models_dev_url)
       setOfficialOpenAIUrl(res.official_openai_url)
       setOfficialXAIUrl(res.official_xai_url)
+      setOfficialClaudeUrl(res.official_claude_url)
       setSyncUrl(res.sync_url || '')
       setOfficialConfig(res.official_sync_config)
       const d: Record<string, ModelPricingOverride> = {}
@@ -575,6 +804,7 @@ export default function ModelPricing() {
       const result = await api.syncOfficialModelPricing({
         include_openai: officialConfig.include_openai,
         include_grok: officialConfig.include_grok,
+        include_claude: officialConfig.include_claude,
       })
       showToast(t('settings.pricing.officialSyncDone', { applied: result.applied, skipped: result.skipped }))
       await load()
@@ -609,10 +839,19 @@ export default function ModelPricing() {
 
   const dirtyCount = counts.unsaved
 
+  // 各 provider(渠道)模型数量:仅当存在多于一个渠道时才显示渠道过滤条。
+  const channelCounts = useMemo(() => {
+    const m: Record<string, number> = { codex: 0, grok: 0, antigravity: 0, claude: 0 }
+    for (const r of rows) m[rowChannel(r)] += 1
+    return m
+  }, [rows])
+  const activeChannels = CHANNEL_ORDER.filter((c) => channelCounts[c] > 0)
+
   const filteredRows = useMemo(() => {
     const q = query.trim().toLowerCase()
     return rows
       .filter((r) => {
+        if (channelFilter !== 'all' && rowChannel(r) !== channelFilter) return false
         if (sourceFilter === 'unsaved') {
           if (!isDirty(drafts[r.model], r.pricing)) return false
         } else if (sourceFilter !== 'all' && r.source !== sourceFilter) {
@@ -623,7 +862,95 @@ export default function ModelPricing() {
       })
       .slice()
       .sort((a, b) => compareModelsNewestFirst(a.model, b.model))
-  }, [drafts, query, rows, sourceFilter])
+  }, [drafts, query, rows, sourceFilter, channelFilter])
+
+  // 当前视图下按 provider 分组(用于分组小标题)。
+  const groupedRows = useMemo(() => {
+    const groups = new Map<string, Row[]>()
+    for (const r of filteredRows) {
+      const c = rowChannel(r)
+      const arr = groups.get(c) || []
+      arr.push(r)
+      groups.set(c, arr)
+    }
+    return CHANNEL_ORDER.filter((c) => groups.has(c)).map((c) => ({ channel: c, rows: groups.get(c)! }))
+  }, [filteredRows])
+
+  // 新模型集:localStorage 里没见过的模型。首次加载(localStorage 为空)时播种、不标新。
+  const newModels = useMemo(() => {
+    const set = new Set<string>()
+    if (rows.length === 0) return set
+    const seen = readSeenModels()
+    if (seen === null) return set
+    for (const r of rows) {
+      if (!seen.has(r.model.toLowerCase())) set.add(r.model.toLowerCase())
+    }
+    return set
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, seenBump])
+
+  useEffect(() => {
+    // 首次加载后播种"已见"集,使后续新出现的模型才被标"新"。
+    if (rows.length > 0 && readSeenModels() === null) {
+      writeSeenModels(rows.map((r) => r.model))
+    }
+  }, [rows])
+
+  const jumpToModel = useCallback((model: string) => {
+    setCatalogOpen(false)
+    setChannelFilter('all')
+    setSourceFilter('all')
+    setQuery('')
+    setJumpedModel(model.toLowerCase())
+    requestAnimationFrame(() => {
+      const el = document.getElementById(`pricing-row-${model.toLowerCase()}`)
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      window.setTimeout(() => setJumpedModel(''), 2200)
+    })
+  }, [])
+
+  const refreshCatalogModels = useCallback(async () => {
+    setRefreshingModels(true)
+    if (refreshProgressHideTimer.current !== null) {
+      window.clearTimeout(refreshProgressHideTimer.current)
+      refreshProgressHideTimer.current = null
+    }
+    setRefreshProgress({})
+    try {
+      // 统一刷新所有渠道：按套餐分组抽样探测，SSE 逐组推送进度，刷出新模型立刻显示。
+      const response = await postAdminSSE('/models/refresh-all?stream=1')
+      const res = await readModelRefreshSSE(response, (event) => {
+        setRefreshProgress((prev) => applyModelRefreshEvent(prev ?? {}, event))
+      })
+      if (!res) throw new Error(t('settings.pricing.refreshNoSummary'))
+      const detail = res.channels
+        .map((ch) => {
+          const label = CHANNEL_LABEL[ch.channel as Exclude<ChannelFilter, 'all'>] ?? ch.channel
+          const status = ch.error
+            ? t('settings.pricing.catalogRefreshChannelFailed')
+            : t('settings.pricing.catalogRefreshChannelGroups', { count: ch.groups ?? 0 })
+          const added = ch.added.length ? ` +${ch.added.join(', ')}` : ''
+          return `${label} ${status}${added}`
+        })
+        .join(' · ')
+      const failed = res.channels.some((ch) => ch.error)
+      showToast(t('settings.pricing.catalogRefreshed', { count: res.model_count, detail }), failed ? 'error' : undefined)
+      await load()
+    } catch (error) {
+      showToast(getErrorMessage(error), 'error')
+    } finally {
+      setRefreshingModels(false)
+      refreshProgressHideTimer.current = window.setTimeout(() => {
+        setRefreshProgress(null)
+        refreshProgressHideTimer.current = null
+      }, 4000)
+    }
+  }, [load, showToast, t])
+
+  const acknowledgeNewModels = useCallback(() => {
+    writeSeenModels(rows.map((r) => r.model))
+    setSeenBump((n) => n + 1)
+  }, [rows])
 
   const sourceFilters: Array<{ id: SourceFilter; label: string; count: number }> = [
     { id: 'all', label: t('settings.pricing.filterAll'), count: counts.total },
@@ -645,17 +972,46 @@ export default function ModelPricing() {
         description={t('settings.pricing.desc')}
         onRefresh={() => void load()}
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1.5"
-            onClick={() => setSyncOpen((v) => !v)}
-          >
-            <CloudDownload className="size-3.5" />
-            {t('settings.pricing.syncTitle')}
-            <ChevronDown className={cn('size-3.5 transition-transform', syncOpen && 'rotate-180')} />
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              onClick={() => { setCatalogQuery(''); setCatalogOpen(true) }}
+            >
+              <ChevronsUpDown className="size-3.5" />
+              {t('settings.pricing.catalogTitle')}
+              {newModels.size > 0 ? (
+                <span className="ml-0.5 inline-flex min-w-4 items-center justify-center rounded-full bg-rose-500/90 px-1 text-[10px] font-bold text-white">
+                  {newModels.size}
+                </span>
+              ) : null}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              onClick={() => setSyncOpen((v) => !v)}
+            >
+              <CloudDownload className="size-3.5" />
+              {t('settings.pricing.syncTitle')}
+              <ChevronDown className={cn('size-3.5 transition-transform', syncOpen && 'rotate-180')} />
+            </Button>
+          </div>
         }
+      />
+      <ModelCatalogModal
+        open={catalogOpen}
+        onClose={() => setCatalogOpen(false)}
+        rows={rows}
+        newModels={newModels}
+        query={catalogQuery}
+        onQueryChange={setCatalogQuery}
+        onJump={jumpToModel}
+        onRefresh={() => void refreshCatalogModels()}
+        refreshing={refreshingModels}
+        refreshProgress={refreshProgress}
+        onAcknowledge={acknowledgeNewModels}
       />
 
       <StateShell
@@ -748,9 +1104,10 @@ export default function ModelPricing() {
 								<div className="mt-2 flex flex-wrap gap-3 text-[11px] font-semibold">
 									<a href={officialOpenAIUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">OpenAI <ArrowUpRight className="size-3" /></a>
 									<a href={officialXAIUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">xAI <ArrowUpRight className="size-3" /></a>
+									<a href={officialClaudeUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">Anthropic <ArrowUpRight className="size-3" /></a>
 								</div>
 							</div>
-							<Button className="shrink-0" onClick={() => void syncOfficial()} disabled={officialSyncing || (!officialConfig.include_openai && !officialConfig.include_grok)}>
+							<Button className="shrink-0" onClick={() => void syncOfficial()} disabled={officialSyncing || (!officialConfig.include_openai && !officialConfig.include_grok && !officialConfig.include_claude)}>
 								{officialSyncing ? <Loader2 className="size-3.5 animate-spin" /> : <CloudDownload className="size-3.5" />}
 								{officialSyncing ? t('settings.pricing.syncing') : t('settings.pricing.officialSyncNow')}
 							</Button>
@@ -763,6 +1120,10 @@ export default function ModelPricing() {
 							<label className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background/80 px-3 py-2.5">
 								<span className="text-sm font-medium">xAI / Grok</span>
 								<Switch checked={officialConfig.include_grok} onCheckedChange={(checked) => setOfficialConfig((cfg) => ({ ...cfg, include_grok: checked }))} />
+							</label>
+							<label className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background/80 px-3 py-2.5">
+								<span className="inline-flex items-center gap-1.5 text-sm font-medium"><ChannelLogo channel="claude" size={14} />Anthropic / Claude</span>
+								<Switch checked={officialConfig.include_claude} onCheckedChange={(checked) => setOfficialConfig((cfg) => ({ ...cfg, include_claude: checked }))} />
 							</label>
 						</div>
 						<div className="mt-3 flex flex-col gap-3 rounded-lg border border-border bg-background/80 p-3 sm:flex-row sm:items-center">
@@ -784,7 +1145,7 @@ export default function ModelPricing() {
 									onChange={(event) => setOfficialConfig((cfg) => ({ ...cfg, interval_minutes: Number(event.target.value) }))}
 								/>
 							</label>
-							<Button variant="outline" size="sm" onClick={() => void saveOfficialConfig()} disabled={officialSaving || (!officialConfig.include_openai && !officialConfig.include_grok)}>
+							<Button variant="outline" size="sm" onClick={() => void saveOfficialConfig()} disabled={officialSaving || (!officialConfig.include_openai && !officialConfig.include_grok && !officialConfig.include_claude)}>
 								{officialSaving ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
 								{t('common.save')}
 							</Button>
@@ -889,6 +1250,56 @@ export default function ModelPricing() {
                 </Button>
               </div>
 
+              {activeChannels.length > 1 ? (
+                <div
+                  className="flex max-w-full gap-0.5 overflow-x-auto rounded-xl bg-muted/50 p-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                  role="tablist"
+                  aria-label="provider"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={channelFilter === 'all'}
+                    onClick={() => setChannelFilter('all')}
+                    className={cn(
+                      'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-all',
+                      channelFilter === 'all' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+                    )}
+                  >
+                    {t('settings.pricing.filterAll')}
+                    <span className="tabular-nums rounded-md bg-background/60 px-1 py-px text-[10px] font-bold text-muted-foreground">
+                      {counts.total}
+                    </span>
+                  </button>
+                  {activeChannels.map((c) => {
+                    const active = channelFilter === c
+                    return (
+                      <button
+                        key={c}
+                        type="button"
+                        role="tab"
+                        aria-selected={active}
+                        onClick={() => setChannelFilter(c)}
+                        className={cn(
+                          'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-all',
+                          active ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+                        )}
+                      >
+                        <ChannelLogo channel={c} size={14} />
+                        {CHANNEL_LABEL[c]}
+                        <span
+                          className={cn(
+                            'tabular-nums rounded-md px-1 py-px text-[10px] font-bold',
+                            active ? 'bg-primary/10 text-primary' : 'bg-background/60 text-muted-foreground',
+                          )}
+                        >
+                          {channelCounts[c]}
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : null}
               <div
                 className="flex max-w-full gap-0.5 overflow-x-auto rounded-xl bg-muted/50 p-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
                 role="tablist"
@@ -937,7 +1348,7 @@ export default function ModelPricing() {
               isEmpty
               emptyTitle={t('settings.pricing.emptyTitle')}
               emptyDescription={
-                query || sourceFilter !== 'all'
+                query || sourceFilter !== 'all' || channelFilter !== 'all'
                   ? t('settings.pricing.emptyFiltered')
                   : t('settings.pricing.emptyDesc')
               }
@@ -960,7 +1371,16 @@ export default function ModelPricing() {
                 ) : null}
               </div>
 
-              {filteredRows.map((r) => {
+              {groupedRows.map((group) => (
+                <div key={group.channel} className="space-y-3.5">
+                  {channelFilter === 'all' && activeChannels.length > 1 ? (
+                    <div className="flex items-center gap-2 px-1 pt-1.5">
+                      <ChannelLogo channel={group.channel} size={16} />
+                      <span className="text-xs font-semibold text-foreground/80">{CHANNEL_LABEL[group.channel]}</span>
+                      <span className="tabular-nums text-[10px] font-medium text-muted-foreground">{group.rows.length}</span>
+                    </div>
+                  ) : null}
+                  {group.rows.map((r) => {
                 const draft = drafts[r.model] ?? {}
                 const dirty = isDirty(draft, r.pricing)
                 const advDirty = isAdvancedDirty(draft, r.pricing)
@@ -970,18 +1390,26 @@ export default function ModelPricing() {
                 const inputVal = normalizePrice(draft.input)
                 const outputVal = normalizePrice(draft.output)
                 const multiplier = getOutputMultiplier(inputVal, outputVal)
-                const hasLongContextPricing =
+                const pricingModel = (r.canonical_model?.trim() || r.model.trim()).toLowerCase()
+                const supportsLongContextPricing = pricingModel !== 'gpt-6-astra'
+                const advancedFields = supportsLongContextPricing
+                  ? ADVANCED_FIELDS
+                  : ADVANCED_FIELDS.filter((field) => !field.key.includes('_long'))
+                const hasLongContextPricing = supportsLongContextPricing && (
                   normalizePrice(draft.long_context_threshold_tokens) > 0 ||
                   normalizePrice(draft.input_long) > 0 ||
                   normalizePrice(draft.cached_input_long) > 0 ||
                   normalizePrice(draft.output_long) > 0
+                )
 
                 return (
                   <article
                     key={r.model}
+                    id={`pricing-row-${r.model.toLowerCase()}`}
                     className={cn(
-                      'group/card relative overflow-hidden rounded-xl border bg-card shadow-sm transition-all hover:border-border',
+                      'group/card relative overflow-hidden rounded-xl border bg-card shadow-sm transition-all hover:border-border scroll-mt-24',
                       dirty ? 'border-amber-500/30' : 'border-border/80',
+                      jumpedModel === r.model.toLowerCase() && 'ring-2 ring-primary ring-offset-2 ring-offset-background',
                     )}
                   >
                     <div className="p-4 sm:p-5">
@@ -994,6 +1422,11 @@ export default function ModelPricing() {
                               <h4 className="truncate font-mono text-[15px] font-semibold tracking-tight text-foreground sm:text-base">
                                 {r.model}
                               </h4>
+                              {newModels.has(r.model.toLowerCase()) ? (
+                                <span className="inline-flex items-center rounded-full bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-bold text-rose-600 ring-1 ring-inset ring-rose-500/25 dark:text-rose-300">
+                                  {t('settings.pricing.newBadge')}
+                                </span>
+                              ) : null}
                               {r.is_alias && r.canonical_model ? (
                                 <span className="inline-flex items-center gap-1 rounded-full bg-violet-500/10 px-2 py-0.5 text-[10px] font-bold text-violet-700 ring-1 ring-inset ring-violet-500/20 dark:text-violet-300">
                                   {t('settings.pricing.aliasOf', {
@@ -1132,7 +1565,7 @@ export default function ModelPricing() {
                         >
                           <div className="min-h-0 overflow-hidden">
                             <div className="grid grid-cols-1 gap-2.5 pt-2 min-[480px]:grid-cols-2 xl:grid-cols-4">
-                              {ADVANCED_FIELDS.map((field) => (
+                              {advancedFields.map((field) => (
                                 <PriceField
                                   key={field.key}
                                   field={field}
@@ -1170,7 +1603,9 @@ export default function ModelPricing() {
                     </div>
                   </article>
                 )
-              })}
+                  })}
+                </div>
+              ))}
             </div>
           )}
         </div>

@@ -60,7 +60,7 @@ import { cn } from "@/lib/utils";
 const PROXY_SCHEMES = ["http:", "https:", "socks5:", "socks5h:"];
 
 type BindFilter = "all" | "unbound" | "this" | "other";
-type BindKindFilter = "all" | UpstreamChannel;
+type BindKindFilter = "all" | "codex" | "grok" | "claude" | "antigravity" | "traecn";
 type StatusFilter = "all" | "enabled" | "disabled" | "error" | "untested";
 
 function accountDisplayName(account: AccountRow): string {
@@ -73,6 +73,7 @@ function accountDisplayName(account: AccountRow): string {
 function accountKindKey(account: AccountRow): string {
   if (account.traecn_api) return "traecn";
   if (account.antigravity_api) return "antigravity";
+  if (account.claude_api) return "claude";
   if (account.grok_api) return "grok";
   if (account.openai_responses_api) return "openai";
   if (account.agent_identity) return "agent";
@@ -1663,6 +1664,7 @@ export default function Proxies() {
                   ["codex", t("proxies.bindKindCodex")],
                   ["antigravity", t("proxies.bindKindAntigravity")],
                   ["traecn", t("proxies.bindKindTraeCN")],
+                  ["claude", t("proxies.bindKindClaude")],
                   ["", t("proxies.bindKindAll")],
                 ] as const
               ).map(([key, label]) => (
@@ -1847,6 +1849,7 @@ export default function Proxies() {
                       ["grok", t("proxies.bindKindGrok")],
                       ["antigravity", t("proxies.bindKindAntigravity")],
                       ["traecn", t("proxies.bindKindTraeCN")],
+                      ["claude", t("proxies.bindKindClaude")],
                     ] as const
                   ).map(([key, label]) => (
                     <button

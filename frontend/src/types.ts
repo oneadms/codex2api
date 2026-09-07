@@ -1,6 +1,141 @@
 export type ToastType = 'success' | 'error' | 'warning' | 'info'
 export type ISODateString = string
-export type UpstreamChannel = 'codex' | 'grok' | 'antigravity' | 'traecn'
+export type UpstreamChannel = 'codex' | 'grok' | 'antigravity' | 'traecn' | 'claude'
+
+// 管理台可见渠道设置（GET/PUT /settings/visible-channels）
+export interface ChannelTestSettings {
+  test_model: string
+  test_content: string
+  // 0 = 沿用全局 test_concurrency
+  test_concurrency: number
+}
+
+export interface ChannelTestSettingsResponse {
+  antigravity: ChannelTestSettings
+  claude: ChannelTestSettings
+  default_test_content: string
+  default_test_concurrency: number
+  model_choices?: Partial<Record<'antigravity' | 'claude', string[]>>
+}
+
+export interface AntigravityRedirectChoice {
+  model: string
+  default_level: string
+  tiers: string[]
+}
+
+export interface AntigravitySettingsResponse {
+  model_redirects: Record<string, string>
+  redirect_overrides_effort: boolean
+  choices: AntigravityRedirectChoice[]
+}
+
+export interface VisibleChannelsSettings {
+  channels: UpstreamChannel[]
+  all: UpstreamChannel[]
+  fallback: UpstreamChannel
+}
+
+/** Claude 凭据形态:oauth=可刷新 OAuth;setup_token=长效 Setup Token(仅推理,1 年,无 RT)。 */
+export type ClaudeAuthKind = 'oauth' | 'setup_token' | 'api_key'
+
+/** Claude Code OAuth：第一步返回授权 URL 与 state。 */
+export interface ClaudeAuthURLResponse {
+  auth_url: string
+  state: string
+  mode?: ClaudeAuthKind
+  redirect_uri?: string
+}
+
+/** Claude sessionKey(cookie)一键换号请求。 */
+export interface ClaudeSessionKeyExchangeRequest {
+  session_key: string
+  mode?: ClaudeAuthKind
+  name?: string
+  proxy_url?: string
+  use_proxy_pool?: boolean
+  timezone?: string
+}
+
+/** Claude Setup Token 批量粘贴导入请求。 */
+export interface ClaudeSetupTokenImportRequest {
+  text?: string
+  tokens?: string[]
+  name?: string
+  proxy_url?: string
+  use_proxy_pool?: boolean
+  timezone?: string
+  group_refs?: Array<{ name: string; channel: 'claude' }>
+}
+
+/** Claude Code OAuth：第二步用 state+code 换取 token 并入库。 */
+export interface ClaudeExchangeCodeRequest {
+  state: string
+  code: string
+  name?: string
+  proxy_url?: string
+  use_proxy_pool?: boolean
+  timezone?: string
+}
+
+/** Claude Code：直接导入 cmd/claude_login 产出的 token JSON。 */
+export interface ClaudeImportTokenRequest {
+  access_token?: string
+  api_key?: string
+  auth_kind?: ClaudeAuthKind
+  base_url?: string
+  /** OAuth 凭据必填;Setup Token(auth_kind=setup_token)没有 RT。 */
+  refresh_token?: string
+  email?: string
+  account_id?: string
+  expires_at?: string
+  name?: string
+  proxy_url?: string
+  use_proxy_pool?: boolean
+  timezone?: string
+  /** API Key 账号:账号级自定义出站请求头,最后套用;网关保留头(鉴权/Content-Type/Accept 等)会被拒绝。 */
+  custom_headers?: Record<string, string> | null
+  /** API Key 账号:可选的 Claude Code 客户端身份仿真;空=透传(默认)。OAuth 账号沿用指纹替换语义。 */
+  claude_fingerprint_mode?: 'preserve' | 'force' | ''
+}
+
+/** Versioned, provider-scoped Claude OAuth export. Secret-bearing fields are
+ * only returned by the administrator-only Claude export endpoint. */
+export interface ClaudeCredentialExportEntry extends ClaudeImportTokenRequest {
+  access_token: string
+  type: 'claude'
+  version: number
+  auth_kind: ClaudeAuthKind
+  plan_type?: string
+  models?: string[]
+  claude_fingerprint_mode?: 'preserve' | 'force' | ''
+  claude_user_agent?: string
+  fingerprint_headers?: Record<string, string>
+  tags?: string[]
+  group_refs?: Array<{ name: string; channel: 'claude' }>
+  enabled?: boolean
+}
+
+export interface ClaudeImportBundleItem {
+  id?: number
+  email?: string
+  ok: boolean
+  error?: string
+  warnings?: string[]
+}
+
+export interface ClaudeImportBundleResponse {
+  total: number
+  imported: number
+  failed: number
+  items: ClaudeImportBundleItem[]
+}
+
+export interface ClaudeAddAccountResponse {
+  message: string
+  id: number
+  email?: string
+}
 
 export interface ToastState {
   msg: string
@@ -41,6 +176,16 @@ export interface AccountUsageWindow {
   model_counts?: Record<string, number>
   model_success_counts?: Record<string, number>
   model_avg_first_token_ms?: Record<string, number>
+}
+
+/** Claude OAuth zero-spend quota bucket; model-scoped buckets include Fable. */
+export interface ClaudeUsageWindow {
+  name: string
+  label?: string
+  utilization: number
+  reset_at?: ISODateString
+  model_scoped?: boolean
+  model_family?: string
 }
 
 export interface GrokProductUsage {
@@ -89,6 +234,7 @@ export interface GrokPlanInfo {
 }
 
 export interface AccountRow {
+  upstream_request_id_header?: string | null
   detail_loaded?: boolean
   id: number
   name: string
@@ -109,9 +255,15 @@ export interface AccountRow {
   grok_api?: boolean
   antigravity_api?: boolean
   traecn_api?: boolean
+  claude_api?: boolean
+  /** Claude 凭据形态(仅 Claude 账号有值)。 */
+  claude_auth_kind?: ClaudeAuthKind | string
+  claude_base_url?: string
   antigravity_auth_kind?: 'oauth' | 'api_key' | string
   agent_identity?: boolean
   grok_auth_kind?: string
+  /** Safe, allowlisted User-Agent observed/generated for Claude upstream calls. */
+  claude_user_agent?: string
   grok_plan?: GrokPlanInfo
   grok_billing?: GrokBillingDetail
   // 上游逐请求返回的配额余量(x-ratelimit-* 头),运行时快照
@@ -136,6 +288,19 @@ export interface AccountRow {
   model_mapping?: string
   codex_client_metadata_mode?: CodexClientMetadataMode
   codex_fingerprint_mode?: CodexFingerprintMode
+  claude_fingerprint_mode?: 'preserve' | 'force' | ''
+  claude_client_platform?: 'any' | 'claude_code_cli_only'
+  claude_version_policy?: 'passthrough' | 'fixed' | 'minimum'
+  claude_client_version?: string
+  claude_client_platform_override?: 'any' | 'claude_code_cli_only' | ''
+  claude_version_policy_override?: 'passthrough' | 'fixed' | 'minimum' | ''
+  claude_client_version_override?: string
+  claude_usage_probe_at?: ISODateString
+  claude_usage_probe_error?: string
+  claude_usage_windows?: ClaudeUsageWindow[]
+  /** True once the OAuth usage probe has run for this row (even with no windows). */
+  claude_usage_windows_probed?: boolean
+  timezone?: string
   custom_headers?: Record<string, string> | null
   health_tier?: string
   scheduler_score?: number
@@ -273,6 +438,8 @@ export interface AccountListSummary {
   risky: number
   oauth: number
   api_key: number
+  /** Claude 渠道:长效 Setup Token 账号数。 */
+  setup_token?: number
   subscription_unlocked: number
   unauthorized_24h: number
   rate_limited_1h: number
@@ -477,6 +644,21 @@ export interface InviteResult {
 export interface InviteResponse {
   ok: boolean
   result: InviteResult
+  // recorded_emails 是本次成功写入邀请记录的邮箱；失败响应中可能缺失。
+  recorded_emails?: string[]
+}
+
+// InviteRecipientRecord 是一个已被邀请的收件人。后端按 trim + lower(email)
+// 做唯一约束；前端保留原始 email 仅用于展示，其余字段用于辅助辨认来源与时间。
+export interface InviteRecipientRecord {
+  email: string
+  state: string
+  sender_account_id?: number
+  invited_at?: ISODateString
+}
+
+export interface InviteRecipientsCheckResponse {
+  recipients: InviteRecipientRecord[]
 }
 
 // InviteGrant 是一条奖励条目（邀请人 / 受邀人各一条）。
@@ -523,9 +705,18 @@ export interface InviteEligibility {
   upstream_raw?: string
 }
 
+// InviteCacheMeta 说明这份结果是现拉的还是缓存的，以及取回的时刻。
+// source=upstream 表示刚打过上游；runtime/snapshot 分别来自运行态缓存与数据库快照。
+export interface InviteCacheMeta {
+  source: 'upstream' | 'runtime' | 'snapshot'
+  observed_at?: string
+  expires_at?: string
+}
+
 export interface InviteEligibilityResponse {
   ok: boolean
   result: InviteEligibility
+  cache?: InviteCacheMeta
 }
 
 // InviteTrackingItem 是一条已发邀请记录。
@@ -556,6 +747,53 @@ export interface InviteTracking {
 export interface InviteTrackingResponse {
   ok: boolean
   result: InviteTracking
+  cache?: InviteCacheMeta
+}
+
+// InviteGuideAccountPlan 是导入引导里单个账号的邀请收益评估。
+// state 语义：pending=还没探测出结果，eligible=有资格且还有奖励次数，
+// exhausted=有资格但本月奖励次数已用尽（发了也拿不到积分），ineligible=上游判定无资格。
+export type InviteGuideState = 'pending' | 'eligible' | 'exhausted' | 'ineligible'
+
+export interface InviteGuideAccountPlan {
+  id: number
+  email?: string
+  plan_type?: string
+  state: InviteGuideState
+  // remaining_* 缺失表示上游没给这个字段，与「明确为 0」不同。
+  remaining_send_capacity?: number
+  remaining_reward_capacity?: number
+  // grant_amount 是邀请人单次能拿到的额度，不含受邀人那一份。
+  grant_amount?: number
+  // 本月发送用量，来自资格接口的 time_frame_rules。与下面的 invites_* 不是同一个
+  // 窗口：这是「月」，那是邀请记录的 90 天。
+  monthly_sent?: number
+  monthly_send_total?: number
+  // 近 90 天的实际邀请记录。字段缺失表示「没有跟踪数据」，与「确实是 0」不同——
+  // 导入探测只抓资格不抓记录，多数账号本来就没有这部分数据。
+  invites_sent?: number
+  invites_accepted?: number
+  invites_pending?: number
+  potential_credits: number
+  offer_id?: string
+  title?: string
+  ineligible_reason?: string
+  suggested_invites: number
+  observed_at?: string
+}
+
+export interface InviteGuidePlan {
+  enabled: boolean
+  total: number
+  probed: number
+  pending: number
+  unprobed: number
+  eligible: number
+  probe_cap: number
+  total_reward_slots: number
+  total_potential_credits: number
+  email_budget: number
+  accounts: InviteGuideAccountPlan[]
 }
 
 export interface RecycleBinAccountRow {
@@ -566,6 +804,7 @@ export interface RecycleBinAccountRow {
   at_only?: boolean
   access_token_type?: string
   openai_responses_api?: boolean
+  claude_api?: boolean
   base_url?: string
   models?: string[]
   created_at: ISODateString
@@ -875,6 +1114,8 @@ export interface UpdateAntigravityAccountRequest {
 export interface AntigravityImportRequest {
   files: string[]
   proxy_url?: string
+  /** 把文件内携带的代理注册进代理池（该渠道一直会采用文件内代理，开关只控制是否入表）。 */
+  import_proxy?: boolean
   group_ids?: number[]
 }
 
@@ -898,6 +1139,10 @@ export interface AntigravityImportResponse {
   group_ids?: number[]
   warning?: string
   items: AntigravityImportItem[]
+  /** 以下三项仅在 import_proxy=true 时返回。 */
+  proxies_imported?: number
+  proxies_skipped?: number
+  proxy_warning?: string
 }
 
 export interface AntigravityCreateResponse extends MessageResponse {
@@ -1131,6 +1376,9 @@ export interface GrokSSOImportItem {
   id?: number
   ok: boolean
   error?: string
+  // 命中既有凭据身份时后端合并凭据而非新建：updated=已更新，revived=回收站账号已复活。
+  updated?: boolean
+  revived?: boolean
 }
 
 export interface GrokSSOImportResponse {
@@ -1146,6 +1394,8 @@ export interface GrokBatchImportRequest {
   base_url?: string
   models?: string[]
   proxy_url?: string
+  /** 采用文件内携带的代理，并把它们注册进代理池。 */
+  import_proxy?: boolean
   /** 添加/导入时直接绑定的账号分组；命中已存在账号时不改其分组。 */
   group_ids?: number[]
 }
@@ -1156,9 +1406,14 @@ export interface GrokBatchImportResponse {
   imported: number
   failed: number
   items: GrokSSOImportItem[]
+  /** 以下三项仅在 import_proxy=true 时返回。 */
+  proxies_imported?: number
+  proxies_skipped?: number
+  proxy_warning?: string
 }
 
 export interface UpdateAccountSchedulerRequest {
+  upstream_request_id_header?: string | null
   score_bias_override?: number | null
   base_concurrency_override?: number | null
   skip_warm_tier?: boolean
@@ -1175,6 +1430,11 @@ export interface UpdateAccountSchedulerRequest {
   scheduler_priority?: number | null
   custom_headers?: Record<string, string> | null
   codex_fingerprint_mode?: CodexFingerprintMode | null
+  claude_fingerprint_mode?: 'preserve' | 'force' | '' | null
+  claude_client_platform?: 'any' | 'claude_code_cli_only' | null
+  claude_version_policy?: 'passthrough' | 'fixed' | 'minimum' | null
+  claude_client_version?: string | null
+  timezone?: string | null
 }
 
 export interface BatchUpdateAccountsRequest extends UpdateAccountSchedulerRequest {
@@ -1255,6 +1515,26 @@ export interface WhamDailyUsageSplit {
   text_total_tokens?: number
 }
 
+// 单个 (model, speed) 在某一天的份额（wham daily-token-usage-breakdown 落库后按天换算）。
+// share 是当天内部的占比（0~1），只对这一天有意义，不能跨天相加；
+// credits/usd 是后端已按 share 分摊好的当天官方成本，跨天累加用这两个。
+// free 套餐 credits 恒为 0，但 share 仍然有效。speed 为 fast 即 priority 档。
+export interface WhamDailyUsageBreakdownEntry {
+  model: string
+  speed: 'standard' | 'fast' | string
+  share: number
+  credits: number
+  usd: number
+}
+
+// 按产品入口（cli / desktop_app / vscode / exec / web …）的当天份额，语义同上。
+export interface WhamDailyUsageSurfaceEntry {
+  surface: string
+  share: number
+  credits: number
+  usd: number
+}
+
 export interface WhamDailyUsageItem {
   day: string
   credits: number
@@ -1266,10 +1546,39 @@ export interface WhamDailyUsageItem {
   cached_input_tokens: number
   output_tokens: number
   total_tokens: number
-  // 当天的记录在上游结算前不含 token 明细，settled=false 时 token 数还不可信。
+  // settled=false 表示这天还在结算（当天 UTC 的行恒为未结算）：token 与 credits 可能
+  // 已经有值，但全天都在变，隔天回补后才稳定。
   settled: boolean
   clients: WhamDailyUsageSplit[]
   models: WhamDailyUsageSplit[]
+  // 模型×速度拆分是否已同步到这一天；旧快照没有这三个字段。
+  breakdown_available?: boolean
+  breakdown?: WhamDailyUsageBreakdownEntry[]
+  surfaces?: WhamDailyUsageSurfaceEntry[]
+}
+
+// 当前重置周期的官方成本与额度估算。估算 = 本周期已用官方成本 ÷ 实时已用百分比；
+// 百分比是整数，区间按 ±0.5% 推算，低于 10% 时不可靠。
+export interface WhamDailyUsageCycle {
+  // 窗口信息与实时百分比都拿到了；false 时看 reason。
+  available: boolean
+  reason?: 'no_window' | 'window_stale' | 'no_percent' | 'no_credits' | 'percent_too_low' | string
+  start_at?: string
+  reset_at?: string
+  window_seconds?: number
+  window_kind?: 'weekly' | 'monthly' | ''
+  used_percent?: number
+  used_percent_updated_at?: string
+  used_credits: number
+  used_usd: number
+  // 本周期内有官方结算数据的天数。
+  days: number
+  estimate?: {
+    usd: number
+    usd_low: number
+    usd_high: number
+    reliable: boolean
+  }
 }
 
 export interface WhamDailyUsageResponse {
@@ -1282,9 +1591,15 @@ export interface WhamDailyUsageResponse {
     turns: number
   }
   credits_per_usd: number
+  // 上游可回溯的天数（首次同步的深回补窗口），更早的历史只存在于本地快照。
   retention_days: number
   last_synced_at?: string
+  // counts 端点刷新失败的原因（此时展示的是已存快照）。
   refresh_error?: string
+  // 仅模型拆分端点刷新失败：counts 已刷新成功，只是按模型的成本可能落后一轮。
+  breakdown_refresh_error?: string
+  // 当前重置周期（7d 或月窗）的已用官方成本与额度估算；只有拿到窗口信息的 Codex OAuth 账号才有。
+  cycle?: WhamDailyUsageCycle
 }
 
 export interface AccountUsageDayStat {
@@ -1453,6 +1768,7 @@ export interface OpsOverviewResponse {
     max_bytes: number
     high_water_bytes: number
     largest_entry_bytes: number
+    shared_payload_bytes?: number
     local_hits: number
     local_misses: number
     remote_hits: number
@@ -1696,8 +2012,6 @@ export interface SystemSettings {
   auto_activate_5h_window_enabled: boolean
   proxy_pool_enabled: boolean
   fast_scheduler_enabled: boolean
-  subscription_upgrades_enabled: boolean
-  subscription_upgrades_env_default: boolean
   scheduler_engine: 'legacy' | 'shadow' | 'indexed'
   codex_force_websocket: boolean
   codex_request_compression: boolean
@@ -1824,6 +2138,7 @@ export interface SystemSettings {
   codex_cli_version_sync_enabled: boolean
   codex_cli_version_sync_interval_hours: number
   codex_synced_cli_version?: string
+  codex_effective_cli_version?: string
   codex_user_agent_config: string
   usage_log_mode: 'full' | 'errors' | 'off' | string
   usage_log_batch_size: number
@@ -2725,10 +3040,30 @@ export interface ModelsResponse {
   // Grok 渠道账号声明模型的并集;渠道选 grok 时模型下拉用这份
   grok_models?: string[]
   traecn_models?: string[]
+  // Claude 渠道账号声明模型的并集;渠道选 claude 时模型下拉用这份
+  claude_models?: string[]
   items?: ModelInfo[]
   last_synced_at?: string
   source_url: string
   warning?: string
+}
+
+export interface ChannelModelRefreshResult {
+  channel: 'codex' | 'claude' | 'grok' | 'antigravity' | string
+  groups?: number
+  refreshed: number
+  failed: number
+  added: string[]
+  error?: string
+}
+
+export interface RefreshAllModelsResponse {
+  type: 'complete'
+  message: string
+  channels: ChannelModelRefreshResult[]
+  added: string[]
+  model_count: number
+  duration_ms: number
 }
 
 export interface ModelSyncResponse {
@@ -2736,6 +3071,7 @@ export interface ModelSyncResponse {
   updated: number
   unchanged: number
   skipped: string[]
+  removed?: string[]
   models: string[]
   items: ModelInfo[]
   last_synced_at: string
@@ -2751,6 +3087,13 @@ export interface CPAExportEntry {
   access_token: string
   last_refresh: string
   refresh_token: string
+  /**
+   * 代理三件套只在导出时勾选「包含代理配置」才出现。proxy_enabled 用可选布尔
+   * 区分「文件没带这个字段」（老文件，按启用处理）与「源端显式禁用」。
+   */
+  proxy_url?: string
+  proxy_label?: string
+  proxy_enabled?: boolean
 }
 
 export interface UsageStats {
@@ -2903,6 +3246,10 @@ export interface APIKeyAccountStatsResponse {
 }
 
 export interface UsageLog {
+  request_id?: string
+  upstream_request_id?: string
+  upstream_proxy_id?: number
+  upstream_proxy_name?: string
   id: number
   account_id: number
   // 上游渠道(codex/grok),写入时固化;历史行回填,可能为空
@@ -2934,6 +3281,8 @@ export interface UsageLog {
   has_compaction_history: boolean
   via_websocket?: boolean
   cached_tokens: number
+  cache_write_5m_tokens: number
+  cache_write_1h_tokens: number
   service_tier: string
   requested_service_tier: string
   actual_service_tier: string
@@ -2955,10 +3304,14 @@ export interface UsageLog {
   input_cost: number
   output_cost: number
   cache_read_cost: number
+  cache_write_5m_cost: number
+  cache_write_1h_cost: number
   total_cost: number
   input_price_per_mtoken: number
   output_price_per_mtoken: number
   cache_read_price_per_mtoken: number
+  cache_write_5m_price_per_mtoken: number
+  cache_write_1h_price_per_mtoken: number
   rate_multiplier: number
   long_context?: boolean
   long_context_threshold?: number
@@ -3014,6 +3367,8 @@ export interface ModelPricingOverride {
   source?: string
   input?: number
   cached_input?: number
+  cache_write_5m?: number
+  cache_write_1h?: number
   output?: number
   input_priority?: number
   cached_input_priority?: number
@@ -3032,6 +3387,7 @@ export interface OfficialPricingSyncConfig {
 	interval_minutes: number
 	include_openai: boolean
 	include_grok: boolean
+	include_claude: boolean
 	last_attempt_at?: string
 	last_success_at?: string
 	last_error?: string
@@ -3130,6 +3486,30 @@ export interface APIKeyScopeSummaryItem {
   skip_requests?: number
 }
 
+export interface APIKeyModelRequestLimit {
+  /** Stable backend-generated identity; omit when adding a rule. */
+  id?: string
+  model: string
+  window: 'week'
+  max_requests: number
+  timezone: string
+  /** ISO weekday: Monday = 1, Sunday = 7. */
+  reset_weekday: number
+  reset_time: string
+}
+
+export interface APIKeyModelRequestUsage {
+  rule_id: string
+  model: string
+  window: 'week'
+  limit: number
+  used: number
+  remaining: number
+  window_start: ISODateString
+  reset_at: ISODateString
+  timezone: string
+}
+
 export interface APIKeyLimits {
   model_allow?: string[]
   model_deny?: string[]
@@ -3155,6 +3535,8 @@ export interface APIKeyLimits {
   allow_live?: boolean
   /** 分组 / 账号维度的用量预算（issue #439）。 */
   scope_limits?: APIKeyScopeLimit[]
+  /** Fixed weekly request budgets shared by models matching each rule. */
+  model_request_limits?: APIKeyModelRequestLimit[]
 }
 
 export interface APIKeyWindowUsage {
@@ -3357,6 +3739,7 @@ export interface PublicAPIKeyUsageResponse {
   key: PublicAPIKeyUsageKey
   range: PublicAPIKeyUsageRange
   usage: PublicAPIKeyUsageReport
+  model_request_usage?: APIKeyModelRequestUsage[]
 }
 
 export interface CreateAPIKeyResponse {
@@ -3517,4 +3900,29 @@ export interface ObservedInstructionsSample {
 
 export interface ObservedInstructionsResponse {
   samples: ObservedInstructionsSample[]
+}
+
+// ClaudeGlobalConfig 是系统设置里的 ClaudeCode 全局配置(全体 Claude 账号默认遵守)。
+export interface ClaudeGlobalConfig {
+  fingerprint_mode: 'preserve' | 'force' | ''
+  client_platform: 'any' | 'claude_code_cli_only'
+  version_policy: 'passthrough' | 'fixed' | 'minimum'
+  client_version: string
+  default_timezone: string
+  session_window_limit: number
+  cli_version_sync_enabled: boolean
+  cli_version_sync_interval_hours: number
+  first_token_timeout_seconds: number
+  stream_keepalive_enabled: boolean
+  synced_cli_version?: string
+  builtin_cli_version?: string
+  effective_cli_version?: string
+  allow_service_tier: boolean
+  allow_inference_geo: boolean
+  allow_speed: boolean
+  allow_safety_identifier: boolean
+  allowed_beta_headers: string[]
+  max_output_tokens: number
+  max_tool_count: number
+  max_tool_schema_bytes: number
 }

@@ -554,7 +554,7 @@ func ResinPlatformForRequest(ctx context.Context, sessionID string, headers http
 // sessionID 可选，用于 prompt cache 会话绑定
 // useWebsocket 可选：未传时遵循全局强制 WS；传 true/false 时由调用方显式控制。
 // headers 下游请求头，用于设备指纹学习
-func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, useWebsocket ...bool) (*http.Response, error) {
+func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, useWebsocket ...bool) (upstreamResponse *http.Response, upstreamErr error) {
 	// Defense in depth: this executor sends account.AccessToken to ChatGPT.
 	// Relay/Grok/Antigravity credentials must never cross that provider boundary,
 	// even if a future routing regression selects the wrong account type.
@@ -575,6 +575,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	}
 	resetUpstreamUserAgentAudit(ctx)
 	resetWsAcquireAudit(ctx)
+	var encryptedAttempt *encryptedContentAttempt
+	requestBody, encryptedAttempt = prepareEncryptedContentAttempt(ctx, account, requestBody, sessionID, headers)
+	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
 
 	// Payload 规则改写：在 WS/HTTP 分叉前统一应用，两条上游路径共享改写结果。
 	// 生图请求跳过——其 instructions/工具由网关自行构造，改写会破坏桥接协议。
@@ -592,7 +595,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// lite 信号收敛：签名在 payload 规则改写后采集（规则可注入/删除 WS 标记，改写
 	// 前采集会让注入失效、删除被回填），模型也已被入口映射/规则定稿——已知不支持
 	// lite 的模型带信号上游必 400，发出前剥离。
-	responsesLite := gateResponsesLiteForModel(codexResponsesLiteRequested(requestBody, headers), requestBody)
+	responsesLite := gateResponsesLiteForAccount(codexResponsesLiteRequested(requestBody, headers), requestBody, account)
 	wantWebsocket := CurrentRuntimeSettings().CodexForceWebsocket
 	if len(useWebsocket) > 0 {
 		wantWebsocket = useWebsocket[0]
@@ -636,10 +639,20 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		if responsesLite {
 			requestBody = normalizeCodexResponsesLiteBody(requestBody, false)
 		}
+		requestBody = normalizeCodexStructuredOutputForTransport(requestBody, true, responsesLite)
 		// 出站前最后兜底：任何中间改写都不能把普通 input 项放到
 		// compaction_trigger 后面，否则上游直接返回 invalid_request_error。
 		requestBody = normalizeCompactionTriggerFinal(requestBody, false)
-		return WebsocketExecuteFunc(ctx, account, requestBody, sessionID, proxyOverride, apiKey, deviceCfg, headers, poolRouteKey)
+		traceProxy := proxyOverride
+		if traceProxy == "" {
+			account.Mu().RLock()
+			traceProxy = account.ProxyURL
+			account.Mu().RUnlock()
+		}
+		recordTrace := beginUpstreamTrace(ctx, account, traceProxy, true)
+		resp, err := WebsocketExecuteFunc(ctx, account, requestBody, sessionID, proxyOverride, apiKey, deviceCfg, headers, poolRouteKey)
+		recordTrace(resp)
+		return resp, err
 	}
 	if wantWebsocket && WebsocketExecuteFunc == nil {
 		// 请求/配置要求走 WebSocket，但 WS 执行器未注册（如嵌入式调用或初始化顺序问题）。
@@ -650,6 +663,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	if responsesLite {
 		requestBody = normalizeCodexResponsesLiteBody(requestBody, true)
 	}
+	requestBody = normalizeCodexStructuredOutputForTransport(requestBody, false, responsesLite)
 	requestBody = normalizeCompactionTriggerFinal(requestBody, false)
 
 	account.Mu().RLock()
@@ -742,7 +756,10 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		}
 		logCodexFingerprintDebug("http", account, proxyURL, req.Header)
 
-		resp, err := client.Do(req)
+		if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(requestBody, "model").String()); err != nil {
+			return nil, err
+		}
+		resp, err := doTracedUpstreamRequest(client, req, account, proxyURL)
 		if err != nil {
 			if shouldRecyclePooledClient(err) {
 				recyclePooledClient(account, proxyURL)
@@ -773,13 +790,16 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	return resp, nil
 }
 
-func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, requestBody []byte, proxyOverride string, headers http.Header) (*http.Response, error) {
+func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, requestBody []byte, proxyOverride string, headers http.Header) (upstreamResponse *http.Response, upstreamErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	resetUpstreamUserAgentAudit(ctx)
 	resetWsAcquireAudit(ctx)
-	responsesLite := gateResponsesLiteForModel(codexResponsesLiteRequested(requestBody, headers), requestBody)
+	var encryptedAttempt *encryptedContentAttempt
+	requestBody, encryptedAttempt = prepareEncryptedContentAttempt(ctx, account, requestBody, "", headers)
+	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
+	responsesLite := gateResponsesLiteForAccount(codexResponsesLiteRequested(requestBody, headers), requestBody, account)
 	requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, false, responsesLite)
 	requestBody = normalizeCompactionTriggerFinal(requestBody, false)
 
@@ -814,7 +834,10 @@ func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, r
 			return nil, ErrInternalError("创建请求失败", err)
 		}
 		applyOpenAIResponsesRequestHeaders(req, account, apiKey, headers)
-		resp, err := client.Do(req)
+		if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(body, "model").String()); err != nil {
+			return nil, err
+		}
+		resp, err := doTracedUpstreamRequest(client, req, account, proxyURL)
 		if err != nil {
 			if shouldRecyclePooledClient(err) {
 				recyclePooledClient(account, proxyURL)
@@ -914,13 +937,16 @@ func isCodexAccessRestrictedResponse(resp *http.Response) bool {
 // /responses/compact 请求。与 ExecuteOpenAIResponsesRequest 行为一致，但命中的是
 // 上游自己的 compact 端点，从而让没有官方 Codex OAuth 账号、仅接入中转的用户也能
 // 触发上下文自动压缩（参见 issue #174）。compact 始终为非流式。
-func ExecuteOpenAIResponsesCompactRequest(ctx context.Context, account *auth.Account, requestBody []byte, proxyOverride string, headers http.Header) (*http.Response, error) {
+func ExecuteOpenAIResponsesCompactRequest(ctx context.Context, account *auth.Account, requestBody []byte, proxyOverride string, headers http.Header) (upstreamResponse *http.Response, upstreamErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	resetUpstreamUserAgentAudit(ctx)
 	resetWsAcquireAudit(ctx)
-	responsesLite := gateResponsesLiteForModel(codexResponsesLiteRequested(requestBody, headers), requestBody)
+	var encryptedAttempt *encryptedContentAttempt
+	requestBody, encryptedAttempt = prepareEncryptedContentAttempt(ctx, account, requestBody, "", headers)
+	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
+	responsesLite := gateResponsesLiteForAccount(codexResponsesLiteRequested(requestBody, headers), requestBody, account)
 	requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, false, responsesLite)
 
 	baseURL, apiKey := account.OpenAIResponsesCredentials()
@@ -941,7 +967,10 @@ func ExecuteOpenAIResponsesCompactRequest(ctx context.Context, account *auth.Acc
 	}
 	applyOpenAIResponsesRequestHeaders(req, account, apiKey, headers)
 
-	resp, err := getPooledClient(account, proxyURL).Do(req)
+	if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(requestBody, "model").String()); err != nil {
+		return nil, err
+	}
+	resp, err := doTracedUpstreamRequest(getPooledClient(account, proxyURL), req, account, proxyURL)
 	if err != nil {
 		if shouldRecyclePooledClient(err) {
 			recyclePooledClient(account, proxyURL)
@@ -952,7 +981,7 @@ func ExecuteOpenAIResponsesCompactRequest(ctx context.Context, account *auth.Acc
 }
 
 // ExecuteCompactRequest 向 Codex 上游发送 /responses/compact 请求（非流式压缩接口）
-func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header) (*http.Response, error) {
+func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header) (upstreamResponse *http.Response, upstreamErr error) {
 	if account == nil || account.IsRelayStyle() {
 		return nil, ErrNoAvailableAccount()
 	}
@@ -968,7 +997,10 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	}
 	resetUpstreamUserAgentAudit(ctx)
 	resetWsAcquireAudit(ctx)
-	responsesLite := gateResponsesLiteForModel(codexResponsesLiteRequested(requestBody, headers), requestBody)
+	var encryptedAttempt *encryptedContentAttempt
+	requestBody, encryptedAttempt = prepareEncryptedContentAttempt(ctx, account, requestBody, sessionID, headers)
+	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
+	responsesLite := gateResponsesLiteForAccount(codexResponsesLiteRequested(requestBody, headers), requestBody, account)
 
 	account.Mu().RLock()
 	accessToken := account.AccessToken
@@ -1035,7 +1067,10 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	}
 	logCodexFingerprintDebug("compact", account, proxyURL, req.Header)
 
-	resp, err := client.Do(req)
+	if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(requestBody, "model").String()); err != nil {
+		return nil, err
+	}
+	resp, err := doTracedUpstreamRequest(client, req, account, proxyURL)
 	if err != nil {
 		if shouldRecyclePooledClient(err) {
 			recyclePooledClient(account, proxyURL)
@@ -1292,12 +1327,13 @@ type requestSessionIdentity struct {
 //  2. Header: Session_id
 //  3. Header: Conversation_id
 //  4. Header: Idempotency-Key
-//  5. Body:   prompt_cache_key
-//  6. Body:   内容派生种子（model+instructions+system+首条 user 消息，见
+//  5. Header: X-Session-Id / X-Session-Affinity（opencode 等第三方客户端）
+//  6. Body:   prompt_cache_key
+//  7. Body:   内容派生种子（model+instructions+system+首条 user 消息，见
 //     deriveContentSessionSeed；带 previous_response_id 的续链请求跳过）
-//  7. 基于 Bearer API Key 的确定性 UUID
+//  8. 基于 Bearer API Key 的确定性 UUID
 //
-// 第 6 级让"同一段对话的多轮请求"收敛到同一账号粘性键：单 API Key 供多终端
+// 第 7 级让"同一段对话的多轮请求"收敛到同一账号粘性键：单 API Key 供多终端
 // 用户共用时，粘性粒度从"整个 Key 挤一个账号"细化为"每段对话独立粘定"。
 // 专用 affinity header 永不参与上游 session ID / prompt_cache_key，也不会被转发；
 // 下游网关可用它传稳定的最终用户/对话标识，在共享 Bearer Key 时仍实现一人一号式绑定。
@@ -1409,8 +1445,16 @@ func ResolveExplicitSessionID(headers http.Header, body []byte) string {
 				return v
 			}
 		}
+		// opencode 等第三方 CLI 客户端用 x-session-id / x-session-affinity 标识会话
+		// （值为 ses_...，非 UUID，出站上由 claudeUpstreamSessionID 等确定性派生为
+		// UUIDv7）。优先级低于既有显式头，高于 body prompt_cache_key。
+		for _, key := range []string{"X-Session-Id", "X-Session-Affinity"} {
+			if v := strings.TrimSpace(headers.Get(key)); v != "" {
+				return v
+			}
+		}
 	}
-	// 优先从 body 的 prompt_cache_key 提取
+	// 没有显式会话头时，从 body 的 prompt_cache_key 提取。
 	if v := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); v != "" {
 		return v
 	}

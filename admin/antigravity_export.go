@@ -40,12 +40,18 @@ type antigravityExportEntry struct {
 	Models         []string `json:"models,omitempty"`
 	ModelMapping   string   `json:"model_mapping,omitempty"`
 	ProxyURL       string   `json:"proxy_url,omitempty"`
+	ProxyLabel     string   `json:"proxy_label,omitempty"`
+	ProxyEnabled   *bool    `json:"proxy_enabled,omitempty"`
 	Disabled       bool     `json:"disabled"`
 
 	exportFileName string
 }
 
-func antigravityAccountRowToExportEntry(row *database.AccountRow) (antigravityExportEntry, bool) {
+// antigravityAccountRowToExportEntry converts an account row into an export
+// entry. Unlike the CPA and Grok exports, proxies defaults to enabled for this
+// channel: it has always emitted proxy_url, and dropping it would silently
+// break the round-trip of existing backups.
+func antigravityAccountRowToExportEntry(row *database.AccountRow, proxies exportProxyResolver) (antigravityExportEntry, bool) {
 	if !isAntigravityAccountRow(row) {
 		return antigravityExportEntry{}, false
 	}
@@ -55,9 +61,10 @@ func antigravityAccountRowToExportEntry(row *database.AccountRow) (antigravityEx
 	if apiKey == "" && accessToken == "" && refreshToken == "" {
 		return antigravityExportEntry{}, false
 	}
+	proxyURL, proxyLabel, proxyEnabled := proxies.resolve(row.ProxyURL)
 	entry := antigravityExportEntry{
 		Type: "antigravity", Version: 1, Email: row.GetCredential("email"), Name: row.Name,
-		ProxyURL: row.ProxyURL, Disabled: !row.Enabled,
+		ProxyURL: proxyURL, ProxyLabel: proxyLabel, ProxyEnabled: proxyEnabled, Disabled: !row.Enabled,
 	}
 	if apiKey != "" {
 		entry.AuthKind = auth.AntigravityAuthKindAPIKey
@@ -136,10 +143,18 @@ func antigravityExportDownloadName(count int, extension string) string {
 	return fmt.Sprintf("codex2api-antigravity-%s-%d.%s", time.Now().UTC().Format("20060102-150405"), count, extension)
 }
 
-func writeSecretDownloadHeaders(c *gin.Context, filename string) {
+// writeSecretResponseHeaders marks a response as secret-bearing so it is never
+// cached or content-sniffed. Split from writeSecretDownloadHeaders because the
+// CPA export endpoints return an inline JSON array the frontend names itself —
+// they need the cache guards without the download disposition.
+func writeSecretResponseHeaders(c *gin.Context) {
 	c.Header("Cache-Control", "no-store, max-age=0")
 	c.Header("Pragma", "no-cache")
 	c.Header("X-Content-Type-Options", "nosniff")
+}
+
+func writeSecretDownloadHeaders(c *gin.Context, filename string) {
+	writeSecretResponseHeaders(c)
 	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
 }
 
@@ -178,12 +193,13 @@ func (h *Handler) ExportAntigravityAccounts(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	proxies := h.newExportProxyResolver(ctx, exportIncludeProxy(c, true))
 	entries := make([]antigravityExportEntry, 0, len(rows))
 	for _, row := range rows {
 		if idSet != nil && !idSet[row.ID] {
 			continue
 		}
-		if entry, ok := antigravityAccountRowToExportEntry(row); ok {
+		if entry, ok := antigravityAccountRowToExportEntry(row, proxies); ok {
 			entries = append(entries, entry)
 		}
 	}

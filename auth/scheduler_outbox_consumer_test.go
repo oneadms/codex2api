@@ -205,6 +205,7 @@ func TestApplyPersistentAccountSnapshotRoutingInvalidationGate(t *testing.T) {
 func TestApplyPersistentAccountSnapshotPreservesRuntimeState(t *testing.T) {
 	store := newIndexedRoutingTestStore(nil)
 	dst := newFastSchedulerTestAccount(1, HealthTierWarm, 100, 1)
+	dst.usageObservedAt = time.Now()
 	atomic.StoreInt64(&dst.ActiveRequests, 3)
 	dst.SuccessStreak = 5
 	src := newFastSchedulerTestAccount(1, HealthTierHealthy, 100, 1)
@@ -218,6 +219,9 @@ func TestApplyPersistentAccountSnapshotPreservesRuntimeState(t *testing.T) {
 	}
 	if dst.TraeCNHost != src.TraeCNHost || dst.TraeCNUserID != src.TraeCNUserID {
 		t.Fatalf("Trae CN identity projection not refreshed: host=%q user=%q", dst.TraeCNHost, dst.TraeCNUserID)
+	}
+	if dst.usageObservedAt.IsZero() {
+		t.Fatal("persistent snapshot should not erase a newer runtime observation timestamp")
 	}
 
 	rotated := newFastSchedulerTestAccount(1, HealthTierHealthy, 100, 1)

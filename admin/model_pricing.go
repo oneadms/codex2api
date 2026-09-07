@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/codex2api/auth"
@@ -18,8 +19,9 @@ import (
 // modelVersionNumberRE 提取模型名中的数字段，用于版本排序（如 gpt-5.6-luna → 5,6）。
 var modelVersionNumberRE = regexp.MustCompile(`\d+`)
 
-// preferredBillingModelOrder 定价列表置顶顺序：gpt-5.6 sol → terra → luna。
+// preferredBillingModelOrder 定价列表置顶顺序：gpt-6 astra → gpt-5.6 sol → terra → luna。
 var preferredBillingModelOrder = []string{
+	"gpt-6-astra",
 	"gpt-5.6-sol",
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
@@ -155,13 +157,92 @@ func (h *Handler) grokBillingModelIDs() []string {
 	return ids
 }
 
+// grokDefaultDisplayModelIDs 是定价页始终展示的 Grok 内置文本模型集(即使没有 Grok 账号),
+// 与 Codex 内置模型的常显行为对齐。取 OAuth 与 API Key 两套默认集的并集(后者为超集)。
+// 仅文本模型:定价页按 token 计费,媒体(生图/生视频)定价模型另计,不在此列。
+func grokDefaultDisplayModelIDs() []string {
+	ids := make([]string, 0, 8)
+	ids = append(ids, auth.GrokOAuthDefaultModelIDs()...)
+	ids = append(ids, auth.GrokAPIKeyDefaultModelIDs()...)
+	return ids
+}
+
 // modelPricingRow 是定价管理页每个规范模型的一行：当前生效价 + 来源。
 type modelPricingRow struct {
 	Model          string                        `json:"model"`
-	Source         string                        `json:"source"` // custom / synced / default
+	Channel        string                        `json:"channel"` // codex / grok / antigravity / claude —— 供前端按 provider 分组
+	Source         string                        `json:"source"`  // custom / synced / default
 	Pricing        database.ModelPricingOverride `json:"pricing"`
 	CanonicalModel string                        `json:"canonical_model,omitempty"`
 	IsAlias        bool                          `json:"is_alias,omitempty"`
+}
+
+// claudeChannelModels 返回定价页要展示的 Claude 模型:各 Claude 账号可见模型的并集。
+// 没有 Claude 账号时返回空,纯 Codex/其它部署的定价页不受影响。
+func (h *Handler) claudeChannelModels() []string {
+	if h == nil || h.store == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	models := make([]string, 0)
+	for _, account := range h.store.Accounts() {
+		if account == nil || !account.IsClaudeOAuth() {
+			continue
+		}
+		for _, model := range proxy.DefaultClaudeModelIDsForAccount(account) {
+			key := strings.ToLower(strings.TrimSpace(model))
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			models = append(models, model)
+		}
+	}
+	sort.Strings(models)
+	return models
+}
+
+// claudeAvailableChannelModels returns models from enabled, non-banned Claude
+// accounts for request-facing catalogs. Pricing/history still use
+// claudeChannelModels so a disabled account cannot make an unusable model
+// selectable while its historical cost data remains visible to administrators.
+func (h *Handler) claudeAvailableChannelModels() []string {
+	if h == nil || h.store == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	models := make([]string, 0)
+	for _, account := range h.store.Accounts() {
+		if account == nil || !account.IsClaudeOAuth() ||
+			atomic.LoadInt32(&account.Disabled) != 0 ||
+			atomic.LoadInt32(&account.DispatchPaused) != 0 {
+			continue
+		}
+		account.Mu().RLock()
+		status := account.Status
+		tier := account.HealthTier
+		account.Mu().RUnlock()
+		if status == auth.StatusError || tier == auth.HealthTierBanned {
+			continue
+		}
+		for _, model := range proxy.DefaultClaudeModelIDsForAccount(account) {
+			model = strings.TrimSpace(model)
+			key := strings.ToLower(model)
+			if key == "" || account.IsModelRateLimited(model) {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			models = append(models, model)
+		}
+	}
+	sort.Strings(models)
+	return models
 }
 
 func modelPricingManagementKeys(ids []string) []string {
@@ -208,28 +289,36 @@ func (h *Handler) ListModelPricing(c *gin.Context) {
 		}
 		return out
 	}
-	grokKeys := dedup(h.grokBillingModelIDs())
+	// Grok 内置默认模型始终并入,使定价页像 Codex 内置模型一样常显 grok 家族,
+	// 即使当前没有任何 Grok 账号(官方同步的 grok 采集逻辑不受影响)。
+	grokKeys := dedup(append(h.grokBillingModelIDs(), grokDefaultDisplayModelIDs()...))
 	antigravityKeys := dedup(h.antigravityChannelModels())
+	claudeKeys := dedup(h.claudeChannelModels())
 
-	// 新版本在前（gpt-5.6 > gpt-5.5 > gpt-5.4 …），避免字典序把旧模型顶到列表顶部。
-	// Grok 单独排序并整体排在 Codex 之后，避免两家版本号交叉穿插。
+	// 每个渠道内按新版本在前排序；渠道之间整体拼接,避免版本号交叉穿插。
 	sortModelKeysNewestFirst(keys)
 	sortModelKeysNewestFirst(grokKeys)
 	sortModelKeysNewestFirst(antigravityKeys)
-	keys = append(keys, grokKeys...)
-	keys = append(keys, antigravityKeys...)
+	sortModelKeysNewestFirst(claudeKeys)
 
-	rows := make([]modelPricingRow, 0, len(keys))
-	for _, key := range keys {
-		canonicalModel := database.PricingAliasTarget(key)
-		rows = append(rows, modelPricingRow{
-			Model:          key,
-			Source:         database.ModelPricingSourceFor(key),
-			Pricing:        database.ModelPricingOverrideFromPricing(database.GetModelPricing(key), database.ModelPricingSourceFor(key)),
-			CanonicalModel: canonicalModel,
-			IsAlias:        canonicalModel != "",
-		})
+	rows := make([]modelPricingRow, 0, len(keys)+len(grokKeys)+len(antigravityKeys)+len(claudeKeys))
+	appendRows := func(modelKeys []string, channel string) {
+		for _, key := range modelKeys {
+			canonicalModel := database.PricingAliasTarget(key)
+			rows = append(rows, modelPricingRow{
+				Model:          key,
+				Channel:        channel,
+				Source:         database.ModelPricingSourceFor(key),
+				Pricing:        database.ModelPricingOverrideFromPricing(database.GetModelPricing(key), database.ModelPricingSourceFor(key)),
+				CanonicalModel: canonicalModel,
+				IsAlias:        canonicalModel != "",
+			})
+		}
 	}
+	appendRows(keys, database.UpstreamChannelCodex)
+	appendRows(grokKeys, database.UpstreamChannelGrok)
+	appendRows(antigravityKeys, database.UpstreamChannelAntigravity)
+	appendRows(claudeKeys, database.UpstreamChannelClaude)
 
 	syncURL := ""
 	if s, err := h.db.GetSystemSettings(ctx); err == nil && s != nil {
@@ -243,6 +332,7 @@ func (h *Handler) ListModelPricing(c *gin.Context) {
 		"models_dev_url":       proxy.ModelsDevPricingSyncURL,
 		"official_openai_url":  proxy.OfficialOpenAIPricingURL,
 		"official_xai_url":     strings.TrimSuffix(proxy.OfficialXAIPricingURL, ".md"),
+		"official_claude_url":  proxy.OfficialAnthropicPricingURL,
 		"official_sync_config": officialPricingConfigResponse(officialCfg),
 	})
 }
@@ -270,6 +360,10 @@ func (h *Handler) UpdateModelPricing(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
+	if req.Pricing != nil {
+		normalized := database.NormalizeModelPricingOverride(key, *req.Pricing)
+		req.Pricing = &normalized
+	}
 	if !req.Reset && (req.Pricing == nil || req.Pricing.IsEmpty()) {
 		writeError(c, http.StatusBadRequest, "pricing 不能为空（或用 reset 清除）")
 		return

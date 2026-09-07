@@ -16,6 +16,7 @@
 - [管理 API](#管理-api)
   - [统计接口](#统计接口)
   - [账号管理](#账号管理) — 添加 RT / AT 账号、批量导入、导出、迁移
+  - [Claude OAuth 与原生 Messages](#claude-oauth-与原生-messages) — 导入、采样、模型与指纹配置
   - [用量统计](#用量统计)
   - [API Key 管理](#api-key-管理)
   - [系统设置](#系统设置)
@@ -34,7 +35,18 @@
 
 Codex2API 提供兼容 OpenAI 风格的 API 接口，同时包含完整的管理后台 API。
 
-Anthropic `/v1/messages` 仅将官方 `speed:"fast"` 映射为上游 Codex `service_tier:"priority"`；Anthropic 请求侧 `service_tier`（Priority Tier）不在此映射范围内。用量日志的 `service_tier` / `fast` 过滤反映该解析结果。
+Anthropic `/v1/messages` 在没有可用 Claude OAuth 账号时，才将官方 `speed:"fast"` 映射为上游 Codex `service_tier:"priority"`；Claude OAuth 账号优先走原生 Anthropic Messages 透传，不经过该转换。Anthropic 请求侧 `service_tier`（Priority Tier）不在此映射范围内。用量日志的 `service_tier` / `fast` 过滤反映该解析结果。
+
+Claude 原生请求的显式会话来源依次为 `X-Claude-Code-Session-Id`、JSON 字符串形式的
+`metadata.user_id.session_id`、已有通用会话头/`prompt_cache_key`。最终会话仍按 API Key
+隔离，并在同一次请求的换号重试中保持不变；缺少显式会话时遵守现有请求隔离配置。
+出站会话头与 Claude 结构化身份中的 `session_id` 使用同一值，`device_id` 和
+`account_uuid` 则跟随实际选中账号；其他 metadata 字段及普通业务字符串 `user_id` 保留。
+system 前导块整理为计费标识、CLI 声明、其余原始块，保留原块属性及其余内容顺序。
+
+用量日志 API 的 Claude `input_tokens` 使用包含缓存读写的总输入口径，供统一统计和计费。
+管理后台明细中的 `↓` 则显示未缓存输入（总输入减去缓存读取及 5 分钟／1 小时缓存写入），
+悬浮说明展示完整拆分；缓存列分别用读取和创建图标显示对应数量。汇总卡仍显示含缓存的总输入。
 
 **Service Tier 语义说明**：请求侧 `fast` / `priority` 会统一以 `priority` 转发上游，其余取值（`auto`/`default`/`flex`/`scale` 等）不转发。用量日志区分三个字段：`requested_service_tier`（客户端请求意图）、`actual_service_tier`（上游回传 Tier，原样取自 `response.completed.response.service_tier`）、`billing_service_tier`（计费采用值，由 Tier 计费策略 `BillingTierPolicy` 决定）。默认 `actual` 以请求 Tier 为上限：上游只可用更便宜档位降低计费，不能把未请求 Fast 的调用抬升为 Fast，也不能用未知档位改变计费；`requested` 始终按请求意图计费。注意：在 ChatGPT OAuth / Codex backend 路径上，Fast 由上游服务端路由处理，`service_tier` 不是端到端可校验字段——上游回传 `default` 并不代表 Fast 未生效（openai/codex#14204 官方说明；#494 的交错 A/B 实测在回传 `default` 时仍有约 1.5× 生成吞吐提升）。因此"上游回传 Tier"仅反映上游申报值，不能单独用于判断加速是否生效。
 
@@ -170,6 +182,10 @@ data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1712345678
 data: [DONE]
 ```
 
+**自定义工具：** Chat 请求支持 `tools[].type="custom"` 与嵌套 `custom` 声明，历史和响应使用 `tool_calls[].custom.name/input`。`custom.input` 始终是原始文本，即使其内容恰好是 JSON；普通函数仍使用 `function.arguments`。流式 custom 输入放在 `delta.tool_calls[].custom.input`，调用 ID 与工具结果的 `tool_call_id` 保持配对。非流式响应也会从 `output_item.done` 补回最终响应中缺失的调用。
+
+Messages 的 `tool_use.input` 必须使用对象，因此自由文本工具输入通过 `{"input":"原始文本"}` 包装。调用 ID 携带可逆的类型标记；客户端回传该 ID 和输入对象后，网关恢复原始 custom 调用及对应结果。需要这种桥接的工具应声明仅包含字符串 `input` 属性的 `input_schema`；后续请求依据已标记的调用历史恢复工具类型和命名空间。普通函数输入不会依据字段名被猜测为 custom。`input.done`/`output_item.done` 可补齐遗漏的末尾增量；与已发送输入矛盾或超过输入上限的 custom 调用按上游协议错误结束。
+
 ### 2. Responses
 
 **端点:** `POST /v1/responses`
@@ -206,7 +222,10 @@ data: [DONE]
 | include              | array        | 否   | 包含的额外字段                                                                                     |
 | previous_response_id | string       | 否   | 上一响应 ID，用于上下文连续                                                                        |
 
-`previous_response_id` 的上下文先查当前进程的有界 L1。已认证请求按 API Key ID 隔离；未配置任何 API Key、显式启用 `CODEX_ALLOW_ANONYMOUS=true` 后放行的请求共用 `anon` 命名空间。Redis 模式在 L1 未命中时可从共享后端重建；后端值未超过重建上限但超过 L1 准入预算时仍可服务本次请求，只是不提升到 L1。Memory 模式没有共享 response context 后备，依赖上下文被判定为超限、已淘汰或缺失时可能返回 HTTP `409 response_context_unavailable`。共享后端暂时不可用且请求依赖该上下文时可能返回 HTTP `503 service_unavailable`。如果账号池存在可用的 relay-style 后备，网关可保留原始 `previous_response_id` 继续转发，而不是立即返回上述错误。客户端原生 Responses WebSocket 入口不执行这次本地查找，会保留 `previous_response_id` 交给上游。
+`previous_response_id` 的上下文先查当前进程的有界 L1。已认证请求按 API Key ID 隔离；未配置任何 API Key、显式启用 `CODEX_ALLOW_ANONYMOUS=true` 后放行的请求共用 `anon` 命名空间。Redis 模式在 L1 未命中时可从共享后端重建；后端值未超过重建上限但超过 L1 准入预算时仍可服务本次请求，只是不提升到 L1。Memory 模式没有共享 response context 后备，依赖上下文被判定为超限、已淘汰或缺失时可能返回 HTTP `409 response_context_unavailable`。共享后端暂时不可用且请求依赖该上下文时可能返回 HTTP `503 service_unavailable`。如果账号池存在可用的 relay-style 后备，网关可保留原始 `previous_response_id` 继续转发，而不是立即返回上述错误。客户端原生 Responses WebSocket 入口在上游连接正常时保留 `previous_response_id` 并只发送当轮增量，轮次开始时保留仍有效的 L1 祖先引用，快照合并与序列化在响应成功提交后才执行并写入本地缓存，共享后端（Redis）写入在后台完成，不占首字路径。缓存会收集 `response.output_item.done`，因此最终 `response.output` 为空时也能保留消息、`phase`、工具调用/结果及 Lite `additional_tools` 声明。`response.completed` 和 `response.incomplete` 成功提交后均可写入，仍受写入策略、TTL 和容量限制约束；按需写入模式下，`store` 未显式为 `false` 的 WebSocket 会话从根轮起即有写入资格；显式 `store:false` 的会话（如 Codex CLI 全量上下文）不写缓存，其历史无法事后恢复。续链失效、换号或转为 HTTP 时，只有能够恢复所需上下文才继续发送；缺失、超限或不可移植的加密状态返回 `response_context_unavailable` 错误帧，共享后端故障返回 `service_unavailable`，随后关闭连接（409 使用 1008，后端暂时不可用使用 1011）。客户端应重发完整上下文并开始新的响应链。
+祖先在轮次开始前已过期或被淘汰时，网关不会把增量伪装成完整快照；该链后续健康轮也不能自行补全历史。缓存 TTL 为 10 分钟，Memory 模式重启会丢失缓存。设置环境变量 `CODEX_WS_CONTINUATION_FAIL_OPEN=true` 可退回旧行为：上下文不可恢复时剥离 `previous_response_id` 后按原样转发，上游将看不到历史；这次有损降级产生的响应不写回放缓存，关闭逃生阀后也不会信任残缺快照。
+
+对于原生 WebSocket 的结构化输出，`gpt-6-astra` 和 `gpt-5.6-luna` 在显式启用 Responses Lite 时保留 JSON Schema 的 `minLength` / `maxLength`。Lite 信号可来自 `client_metadata.ws_request_header_x_openai_internal_codex_responses_lite=true`、`X-OpenAI-Internal-Codex-Responses-Lite: true` 请求头，或由 Payload Rules 注入该元数据标记。该放行仅用于结构化输出；已有工具参数清洗继续使用保守规则。长度约束在入口准备阶段暂时保留，最终出站前才根据最终模型、规则改写后的 Lite 信号、账号 Lite 能力和实际传输统一处理。其他模型、最终未启用 Lite、HTTP 和 Compact 请求沿用原有清洗策略，HTTP 降级请求不会携带不适用的约束。
 
 原生 WebSocket 入口为 `GET /v1/responses`。通过校验与 API Key 限制后，较新的同 API Key、同渠道/分组路由作用域、同会话请求会抢占仍在运行的旧请求，并先取消旧上游以释放账号与并发位。`stream_id` 是抢占键的一部分，因此多路复用的不同流互不影响；不同 API Key 或不同路由作用域也不会互相取消。只有 `prompt_cache_key`、显式会话头、`previous_response_id`、turn state、专用 affinity key 或可稳定派生的内容会话存在时才启用，纯 API Key 兜底身份不会把无关请求合并。Redis 模式支持跨实例抢占，Memory 模式仅在当前进程内生效。
 
@@ -755,6 +774,193 @@ Grok 账号编辑页支持账号级模型映射，可让只请求 GPT 模型名�
 }
 ```
 
+### Claude 凭据与原生 Messages
+
+Claude Code OAuth 账号使用原生 Anthropic Messages 上游，不会进入 Codex WHAM
+或 Responses 探针。以下端点均受现有 `X-Admin-Key` 管理鉴权保护；请求示例中的
+Token、授权码和账号 ID 仅为占位符，服务端不会在响应或日志中回显 access/refresh
+token。
+
+Claude 账号有三种凭据形态，记录在 `credentials.claude_auth_kind`，列表/详情响应以
+`claude_auth_kind` 回传，账号列表 `auth_kind` 筛选与 `summary.oauth / summary.setup_token / summary.api_key`
+按此区分：
+
+- `oauth`：完整 Claude Code OAuth，`access_token + refresh_token`，AT 临期自动续期，
+  可读 profile / 官方 usage 端点；历史账号未写该键时一律视为 `oauth`。
+- `setup_token`：官方 `claude setup-token` 同款长效令牌（`sk-ant-oat01-…`），仅
+  `user:inference` scope，有效期 1 年，没有 refresh token，到期只能重新授权；用量改由
+  原生 Messages 探针采样，套餐信息缺省。适合批量号池。
+- `api_key`：Anthropic 或 Messages 兼容服务的 API Key，必填 `api_key` 与 `base_url`；
+  无 OAuth 刷新和订阅用量采样。`base_url` 支持路径前缀和末尾 `/v1`，移除尾部斜杠，
+  已含 `/v1` 时不重复追加。拒绝 URL 中的用户名/密码、query 和 fragment；允许 HTTP 和私网服务。
+  列表/详情返回 `claude_base_url`，按 `auth_kind=api_key` 筛选。
+
+API Key 请求体原样转发，不应用 Claude Code 指纹、客户端平台/版本策略或 OAuth 的
+`ClaudeSecurityConfig` 请求上限与字段净化；网关通用鉴权、限流和提示词过滤仍生效。
+
+#### POST /api/admin/accounts/claude/oauth/auth-url
+
+创建一次性 PKCE 登录会话，返回授权地址与 `state`。请求体可选 `{"mode":"oauth"|"setup_token"}`，
+默认 `oauth`；`setup_token` 只申请 `user:inference` 并在交换时请求 1 年有效期。回调地址
+为托管页 `https://platform.claude.com/oauth/code/callback`，授权后页面直接展示 `code#state`
+供复制（响应同时回传 `mode` 与 `redirect_uri`）。`state` 默认 15 分钟有效且只能兑换一次。
+
+#### POST /api/admin/accounts/claude/oauth/exchange-code
+
+使用 `state` 与回调 `code`（接受 `code#state`、纯 code 或整条回调 URL）换取 Claude
+凭据并入库，形态沿用生成链接时的 `mode`。可选 `proxy_url`、`use_proxy_pool`、
+`timezone` 和 `name`；入库后会异步执行一次受控原生 Messages 用量采样。
+
+#### POST /api/admin/accounts/claude/oauth/exchange-session-key
+
+用从已登录 claude.ai 浏览器复制的 `session_key`（sessionKey cookie，接受
+`sessionKey=...` 整段）一键换号：服务端代替浏览器完成组织选择、PKCE 授权与 token
+交换后直接入库，`mode` 同上决定换出 OAuth 凭据或 Setup Token。sessionKey 不落库、
+不回显，换号成功后即可作废。前两步打 claude.ai 网页端，走账号代理并使用浏览器指纹
+客户端；401/403 表示 sessionKey 失效，3xx 视为被 Cloudflare 拦截。
+OAuth 刷新省略 `scope`，沿用最初授予的权限，避免把网页授权的较窄范围扩成完整 CLI 范围。
+
+#### POST /api/admin/accounts/claude/import
+
+直接导入 `cmd/claude_login -out` 生成的 JSON，或下面导出端点生成的 version 1
+Claude 凭据。同时接受单对象、对象数组和 `{"accounts":[...]}`。单对象保持历史
+`{message,id,email}` 响应，批量导入返回 `total`、`imported`、`failed` 与逐账号
+`items/warnings`。`auth_kind` 允许 `oauth`（默认，`refresh_token` 必填，`access_token` 可缺省——
+缺省时服务端先用 RT 走 refresh 授权换出 AT 并补齐邮箱/账号 UUID/套餐，RT 无效返回
+502）、`setup_token`（只需 `access_token`，`expires_at` 缺省为 1 年）或 `api_key`；未声明
+`auth_kind` 且没有 `refresh_token` 的文档仅当 `access_token` 形如 `sk-ant-oat01-`
+才按 `setup_token` 接受。模型列表仅允许 `claude-*`；API Key 自动发现会过滤兼容网关返回的其他模型。
+
+API Key 导入示例：
+
+```json
+{"auth_kind":"api_key","api_key":"example-key","base_url":"https://gateway.example/v1","name":"Messages gateway"}
+```
+
+API Key 账号还可选配置两项客户端请求特征（默认都不启用，出站保持"按原始内容转发"）：
+
+- `custom_headers`：账号级自定义出站请求头（对象），附加到该账号的每个上游请求
+  （含 `/v1/models` 模型发现），最后套用、优先级最高，可显式指定 `User-Agent`。
+  `Authorization`、`x-api-key`、`Content-Type`、`Content-Length`、`Host`、`Accept`、
+  `Accept-Encoding`、`Transfer-Encoding`、`Connection` 为网关保留头，出现即返回 400。
+  `PATCH /api/admin/accounts/:id/scheduler` 的 `custom_headers` 对 API Key 账号执行同样校验，
+  传 `null` 清空。
+- `claude_fingerprint_mode`：Claude Code 客户端身份仿真。空（默认）= 透传，只保留下游
+  `User-Agent`（缺失时为 `Codex2API`）；`force` = 始终携带 Claude Code CLI 的基础身份头
+  （`User-Agent: claude-cli/<版本> (external, cli)`、`X-App`、`X-Stainless-*`、
+  `X-Stainless-Retry-Count/Timeout`、`anthropic-dangerous-direct-browser-access`）；
+  `preserve` = 下游是真实 Claude Code CLI 时保留其身份头、缺失才补齐，非 CLI 客户端按 `force` 处理。
+  只改请求头，不复制 OAuth 会话状态、系统提示词或 `metadata` 身份，也不改变 `x-api-key` 鉴权；
+  `custom_headers` 中的同名头优先于仿真值。该字段对 API Key 账号不继承 OAuth 的全局默认。
+
+```json
+{"auth_kind":"api_key","api_key":"example-key","base_url":"https://gateway.example/v1","claude_fingerprint_mode":"force","custom_headers":{"X-Gateway-Tenant":"team-a"}}
+```
+
+裸 RT 导入在刷新前检查已存凭据，命中直接返回 409；有运行时账号池时，与后台刷新使用同一刷新租约。
+
+#### POST /api/admin/accounts/claude/import-tokens
+
+（旧名 `/import-setup-tokens` 仍可用。）批量粘贴令牌：`text`（任意分隔的自由文本）
+与 `tokens` 数组都会按前缀抽取、保序去重，单次最多 200 枚。`sk-ant-oat01-` 按
+`setup_token` 长效令牌入库；`sk-ant-ort01-` 是 OAuth refresh token，入库前先刷新换出
+AT，按 `oauth` 形态保存，备注默认取邮箱。可选 `name`（Setup Token 的备注前缀，默认
+`claude`，按现有 `<prefix>-N` 最大序号继续编号；单枚且给了 `name` 时直接用作备注）、
+`proxy_url` / `use_proxy_pool`（代理池模式下每枚令牌各取一条）、`timezone`、
+`group_refs`。返回与批量导入相同的 `total/imported/failed/items`；同一令牌（Setup
+Token 按 AT、Refresh Token 刷新前按原 RT，刷新后再按账号 UUID/RT）已存在返回 409（多枚时逐项失败）。
+
+导入文件可恢复账号名称、代理、时区、标签、启用状态、账号级指纹模式和受限身份头。
+分组使用 `group_refs: [{"name":"...","channel":"claude"}]` 按名称映射；不会复用
+另一实例的数字分组 ID，不存在的组会作为 warning 返回且不会自动创建。锁定、冷却和
+历史用量属于目标实例运行状态，不随凭据迁移。
+
+#### GET /api/admin/accounts/claude/export
+
+导出管理员专用的完整 Claude 凭据。`ids=1,2` 可精确选择账号，省略时导出全部；
+`filter=all|healthy` 控制是否只包含当前健康账号；`format=auto|json|zip` 控制输出格式
+（默认 auto：单条 JSON、多条 ZIP；`format=json` 可得到可直接再次导入的对象数组）。响应设置 `Content-Disposition`、实际数量
+`X-Export-Count`、`Cache-Control: no-store, max-age=0`、`Pragma: no-cache` 和
+`X-Content-Type-Options: nosniff`。
+
+version 1 文档包含 `type=claude`、`auth_kind`（`oauth`、`setup_token` 或 `api_key`，后两者 `refresh_token` 为空）、access/refresh token、账号 ID、
+过期时间、套餐、模型、代理、时区、`claude_fingerprint_mode`、标签、启用状态及
+`group_refs`。`fingerprint_headers` 允许 `User-Agent`、`X-App` 和
+`X-Stainless-*` 身份头，以及可选的 `claude_device_id` 账号身份元数据；后者兼容键名大小写，
+在导入、导出及时区指纹重建时保留，仅用于请求体中的设备身份，不作为 HTTP 头发送。
+`fingerprint_headers` 不包含 `Authorization`、Cookie、API Key 或其它自定义头。
+`api_key` 形态会在凭据字段中导出 `api_key` 和 `base_url`，用于完整恢复账号。下载内容为明文高敏凭据，下载后应立即加密保存或在迁移完成后删除。
+
+#### POST /api/admin/accounts/:id/claude/models
+
+刷新单个 Claude 账号的上游模型目录并保存到账号凭据。该操作只接受 Claude OAuth
+账号，返回 `models` 与 `count`。
+
+#### POST /api/admin/accounts/claude/models/refresh
+
+批量刷新启用的 Claude 账号模型目录，返回 `refreshed`、`failed` 和去重后的
+`model_count`。单账号失败不会回滚其他成功结果。
+
+#### POST /api/admin/accounts/:id/models/sync-upstream
+
+只读拉取指定 Claude 账号的上游模型目录，不覆盖账号白名单。确认后可用下面的
+PATCH 端点保存。
+
+#### PATCH /api/admin/accounts/:id/models
+
+设置账号级 Claude 模型白名单。非空数组只能包含 `claude-*` 模型；传空数组清除
+覆盖，恢复按账号目录/默认目录准入。服务端会拒绝跨 provider 的模型名。
+
+```json
+{
+  "models": ["claude-haiku-4-5", "claude-sonnet-4-5"]
+}
+```
+
+#### POST /api/admin/accounts/:id/usage/refresh
+
+执行一次有界的原生 Messages 用量探针，返回 5 小时/7 天窗口、重置时间和
+`claude_usage_probe_at` / `claude_usage_probe_error`。缺少上游用量头时仍记录采样
+时间；失败不会把未知用量伪造成 `0%`。
+
+Claude 账号详情还会返回脱敏的 `claude_user_agent` 指纹摘要；不会返回 OAuth token，
+也不会把任意自定义请求头暴露给管理页面。
+
+#### POST /api/admin/accounts/:id/models/probe
+
+只读并发探测账号可见的 `claude-*` 文本模型，返回 `available` 与逐模型
+`outcome`（`available`、`unsupported`、`throttled`、`error`）。模型探测不会写入
+账号冷却、错误或调度状态；追加 `?stream=true` 可接收 SSE 进度。
+
+#### GET /api/admin/accounts/:id/test
+
+执行一次手动原生 Messages 测连并以 SSE 返回 `test_start`、`content`、`diagnostics`、
+`error`、`test_complete`。与只读模型探测不同，手动测连会同步真实账号的用量/限流与错误
+状态；上游明确 rejected/耗尽时不会被“成功”结果清除。
+
+Claude 测连的 `diagnostics` 对象包含本次上游 HTTP 状态、响应头耗时、首段文本/思考
+内容耗时、总耗时（均为毫秒）、请求/响应模型、实际使用的指纹模式，以及可观测到的
+Request ID、Organization ID、Message ID、结束原因和错误类型。`usage` 保留原生
+`input_tokens`（未缓存输入）、`output_tokens`、缓存读取/写入及 5m/1h 缓存写入明细；
+流式累计用量按最新值更新，不重复相加。未观测到的字段省略，不以零代替。
+
+`response_headers` 是经过白名单筛选的诊断响应头（限流、请求标识等，不含 Cookie 或
+认证头），`response_body` 是已读取的 JSON/SSE 脱敏预览，最多 64 KiB；截断时
+`body_truncated=true`。成功和失败均可携带诊断信息。最终 `diagnostics` 事件可能位于
+`test_complete`/`error` 之后，客户端应读到 SSE 关闭再刷新账号快照。
+
+Claude 模型探测和连接测试的输出预算默认 4096；配置了正数 `max_output_tokens` 时取两者
+较小值，`0` 表示不设应用层上限。完整响应只有 thinking 时也可通过；流式响应仍要求终止
+事件，空响应或错误不能算成功。测试预算不等于实际消耗，实际输出可能包含 thinking token。
+
+#### GET/PUT /api/admin/settings/claude-config
+
+读取或更新 Claude 全局默认配置：`fingerprint_mode`（`preserve`/`force`）、
+`default_timezone` 与 `session_window_limit`。账号级调度设置可覆盖这些默认值；
+更新会热应用到运行时且不会改变 OAuth token。`force` 会把最终 User-Agent 与
+X-Stainless 身份头收敛为账号绑定指纹；显式修改账号时区会轮换该账号的身份指纹，
+最终上游 User-Agent 会写入 UsageLog 审计字段。
+
 ### Antigravity credential and state administration
 
 Every endpoint in this section is registered under the existing `/api/admin` authentication middleware and requires the configured admin secret.
@@ -764,6 +970,8 @@ Every endpoint in this section is registered under the existing `/api/admin` aut
 Downloads active Antigravity credentials. Optional `ids=1,2` selects accounts; omitting it exports all active Antigravity accounts. A single match returns `application/json; charset=utf-8`; multiple matches return `application/zip`, one sanitized-name JSON member per account. Responses set `Content-Disposition: attachment`, `X-Export-Count` to the actual number of exported credentials, `Cache-Control: no-store, max-age=0`, `Pragma: no-cache`, and `X-Content-Type-Options: nosniff`. No match (including a wrong-channel-only selection) returns `404`.
 
 The response is intentionally secret-bearing and is accepted by the Antigravity batch importer for backup restoration. OAuth JSON includes usable access/refresh/ID tokens and OAuth client metadata. API-key JSON explicitly includes `auth_kind: "api_key"`, `api_key`, declared models, model mapping, and the exported enabled state. Never log, cache, or expose this download to non-admin callers.
+
+Unlike the other export endpoints, `include_proxy` defaults to **enabled** here: this channel has always emitted the account's bound `proxy_url`, and dropping it would silently break the round-trip of existing backups. Pass `include_proxy=0` to exclude it. When enabled, entries also carry `proxy_label` and `proxy_enabled`; proxy URLs frequently embed credentials, so treat the download accordingly. The importer registers those proxies into the proxy table only when its own `import_proxy` flag is set — see [proxy_pool.md](proxy_pool.md#随账号导出导入迁移代理绑定).
 
 #### GET /api/admin/accounts/:id/antigravity/state
 
@@ -960,14 +1168,68 @@ curl -X POST http://localhost:8080/api/admin/accounts/at \
 
 测试账号连接。
 
-**响应:**
+**响应:** `text/event-stream`。以下为成功测连的事件示例：
 
-```json
-{
-  "success": true,
-  "latency_ms": 523,
-  "message": "连接正常"
-}
+```text
+data: {"type":"test_start","model":"claude-haiku-4-5"}
+
+data: {"type":"content","text":"pong"}
+
+data: {"type":"test_complete","success":true}
+
+data: {"type":"diagnostics","diagnostics":{"model":"claude-haiku-4-5","http_status":200,"duration_ms":523}}
+```
+
+`diagnostics` 事件按渠道携带各自形态的诊断对象，失败由 `error` 事件返回。Claude 账号携带
+`diagnostics` 字段（具体字段见上文 Claude 原生 Messages 测连说明）；Codex / OpenAI Responses
+账号携带 `codex_diagnostics` 字段，两者不会同时出现。两种渠道都遵守同一顺序约定：拿到上游
+响应头后先推一帧只含状态码/响应头信息的诊断，流结束后再推带 `duration_ms` 的最终帧，最终帧
+可能位于 `test_complete`/`error` 之后，客户端应读到 SSE 关闭再刷新账号快照。请求在拿到响应
+头之前就失败（DNS/代理/超时）时不单发 `diagnostics` 事件，诊断对象直接挂在 `error` 事件上，
+只含 `model` 与 `duration_ms`。
+
+WebSocket 诊断不使用连接池的旧握手头：`headers_ms` 留空，`first_frame_ms` 表示本次请求首个上游帧的等待时间。
+`request_id`、`cf_ray` 和响应头来自本次 metadata 帧；同名头以最新帧覆盖。未收到相应字段时留空。
+
+Codex 测连的 `codex_diagnostics` 对象包含：
+
+- `http_status`、`headers_ms`（HTTP 拿到响应头耗时）、`first_frame_ms`（WS 首帧耗时）、`first_content_ms`（首段文本耗时）、
+  `duration_ms`（总耗时），单位毫秒；未观测到的字段省略，不以零代替。
+- `model`（请求模型）、`response_model`（上游 `response.model`）、`transport`
+  （`http` / `websocket`，强制 WS 模式下用量窗口来自 `codex.rate_limits` 帧而非响应头）。
+- `request_id`（优先账号自定义的 `upstream_request_id_header`，否则依次取 `x-request-id`、
+  `request-id`、`x-openai-request-id`、`x-oai-request-id`、`x-goog-request-id`）、`response_id`
+  （`response.id`）、`cf_ray`、`plan_type`（`x-codex-plan-type`）。
+- `safety_buffering_enabled` / `safety_buffering_faster_model`：上游 `x-codex-safety-buffering-*`
+  头（HTTP 响应头或 WS 的 `codex.response.metadata` 帧）。enabled 只表示该模型开着"安全缓冲"
+  能力（上游可能为额外审查扣住输出），faster_model 是官方 CLI "Retry with a faster model"
+  的切换目标，不是本次的回答模型；`safety_buffered=true` 才表示本轮事件里出现过
+  `safety_buffering: true`。
+- `response_status`（最后观测到的 `response.status`，正常终态为 `completed` / `failed` /
+  `incomplete`；流在终态前中断时会停在 `in_progress` 等中间态）、`incomplete_reason`、
+  `error_type`、`error_code`（来自流内 `error` 事件、`response.error`、
+  `response.status_details.error` 或非 200 的 JSON 正文）。
+- `primary_window` / `secondary_window`：`x-codex-primary-*` / `x-codex-secondary-*` 三件套的
+  原样投影 `{used_percent, window_minutes, reset_after_seconds}`，按 `window_minutes` 判断是
+  5h（≥ 60）还是 7d（≥ 1440）窗口。
+- `usage`：终态 `input_tokens`、`output_tokens`、`total_tokens`、`cached_input_tokens`
+  （`input_tokens_details.cached_tokens`）、`reasoning_output_tokens`
+  （`output_tokens_details.reasoning_tokens`），按最新终态值覆盖。
+- `response_headers`：白名单筛选的诊断响应头（`x-codex-*`、`x-ratelimit-*`、`openai-*`、
+  请求标识、`retry-after`、`cf-ray` 等，不含 Cookie 或认证头）；`response_body`：已读取的
+  JSON/SSE 脱敏预览（Access Token / API Key / 代理凭据已替换），最多 64 KiB，截断时
+  `body_truncated=true`。
+
+```text
+data: {"type":"test_start","model":"gpt-5.4"}
+
+data: {"type":"diagnostics","codex_diagnostics":{"model":"gpt-5.4","http_status":200,"headers_ms":412,"transport":"http","request_id":"req_x","plan_type":"plus","primary_window":{"used_percent":12.5,"window_minutes":300,"reset_after_seconds":1800}}}
+
+data: {"type":"content","text":"pong"}
+
+data: {"type":"test_complete","success":true}
+
+data: {"type":"diagnostics","codex_diagnostics":{"model":"gpt-5.4","http_status":200,"headers_ms":412,"first_content_ms":980,"duration_ms":1210,"response_id":"resp_x","response_status":"completed","usage":{"input_tokens":20,"output_tokens":3,"total_tokens":23}}}
 ```
 
 #### GET /api/admin/accounts/:id/usage
@@ -998,11 +1260,50 @@ curl -X POST http://localhost:8080/api/admin/accounts/at \
 
 **Form 字段:**
 
-| 字段      | 类型   | 必填 | 说明                                      |
-| --------- | ------ | ---- | ----------------------------------------- |
-| file      | file   | 是   | 上传文件（最大 20MB，JSON 格式支持多文件） |
-| format    | string | 否   | 文件格式：`txt`（默认）、`json`、`at_txt` |
-| proxy_url | string | 否   | 代理 URL                                  |
+| 字段         | 类型   | 必填 | 说明                                       |
+| ------------ | ------ | ---- | ------------------------------------------ |
+| file         | file   | 是   | 上传文件（最大 20MB，JSON 格式支持多文件） |
+| format       | string | 否   | 文件格式：`txt`（默认）、`json`、`at_txt`  |
+| proxy_url    | string | 否   | 代理 URL                                   |
+| import_proxy | bool   | 否   | 采用文件内携带的代理，并注册进代理池       |
+
+**import_proxy 说明:**
+
+传 `true` 时，JSON 文件里每个账号携带的 `proxy_url` 生效（优先于表单的 `proxy_url`），
+这些代理会先写进代理表、同步进内存代理池，然后才写账号——顺序不能颠倒，账号先绑上
+一个尚未入池的托管代理会被判定为无可用出口而不可调度。TXT 格式一行一个 Token，
+物理上带不了代理，该开关对其无效。
+
+行为细节：
+
+- 单次最多注册 500 条代理，超限则一条都不注册、全部账号退回表单代理；
+- 格式非法的代理条目被跳过，对应账号退回表单代理，不会绑上未入池的 URL；
+- 已存在的同 URL 代理按 `ON CONFLICT DO NOTHING` 跳过，**不会**被复活或改标签，
+  若它在本机是禁用/测试失败状态，绑定它的账号不会被调度，响应里会给出告警；
+- 源端标记为禁用的代理一律以启用态导入，并在响应里告警；
+- 新注册的代理打上 `imported-<YYYYMMDD-HHmm>` 标签，便于事后按批筛选清理；
+- 命中已有账号时，文件带来的代理**不覆盖**该账号已有的绑定（只填补空绑定）；
+  表单填写的 `proxy_url` 维持既有的覆盖语义。
+
+SSE 的 `complete` 事件会带上 `proxies_imported` / `proxies_skipped` / `warning`。
+
+**其它渠道:**
+
+Grok 与 Antigravity 的批量导入支持同名开关，但走 JSON 请求体而非 form 字段，
+响应里的告警字段叫 `proxy_warning`（与 `proxies_imported` / `proxies_skipped` 一起，
+仅在开关打开时出现）：
+
+| 端点                                   | 字段                    | 生效范围                                                       |
+| -------------------------------------- | ----------------------- | -------------------------------------------------------------- |
+| `POST /api/admin/accounts/grok/import` | `import_proxy` (bool)   | 只对 JSON 凭据文件生效；`sso.txt` / `refreshtoken.txt` 一行一个 Token，物理上带不了代理 |
+| `POST /api/admin/accounts/antigravity/import` | `import_proxy` (bool) | 只控制「是否入代理表」，见下                                     |
+
+Antigravity 的导入**一直**会采用文件里的 `proxy_url`，只是从不入表：账号绑的是一个
+代理池不认识的 URL，管理页看不见、也进不了轮转。该开关只补上入表这一步，关闭时维持
+既有行为，不改变代理的取用优先级。
+
+上述规则（写入顺序、500 条上限、非法条目回退、不复活既有代理、不覆盖已有绑定）三个
+渠道完全一致，详见 [proxy_pool.md](proxy_pool.md#随账号导出导入迁移代理绑定)。
 
 **format 格式说明:**
 
@@ -1132,6 +1433,7 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
 - `filter`: healthy (只导出健康账号)
 - `ids`: 1,2,3 (指定 ID 列表)
 - `remote`: true (远程迁移模式)
+- `include_proxy`: 1 (连同账号绑定的代理一起导出，默认关闭)
 
 **响应:**
 
@@ -1149,6 +1451,25 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
   }
 ]
 ```
+
+**include_proxy 说明:**
+
+开启后每个条目追加 `proxy_url` / `proxy_label` / `proxy_enabled` 三项，配合导入端的
+`import_proxy` 即可把「号池 + 代理绑定关系」整体迁走。三项都只在账号确实绑了代理时
+出现，未绑定的账号不会多出空字段。
+
+> ⚠️ 代理 URL 常常内嵌用户名密码，导出文件本就含明文 `refresh_token`，开启后敏感度
+> 更高，请按机密文件处理。
+
+`/accounts/grok/export`、`/accounts/antigravity/export`、`/accounts/recycle-bin/export`
+同样支持该参数。其中 Antigravity 的导出**一直**会写出 `proxy_url`（历史行为，默认即为
+开启），去掉它反而会让既有的迁移流程静默丢配置；要排除代理需显式传 `include_proxy=0`。
+
+`remote=true` 的远程迁移模式默认同样不带代理：目标机未必连得上源机的代理网段，静默
+继承会让整批账号绑上不可达出口。
+
+只绑到分组、由分组下发的代理不属于账号自身的绑定，不会被账号导出携带——目标端需要
+先建好同名分组。
 
 #### POST /api/admin/accounts/migrate
 
@@ -1207,6 +1528,10 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
 
 获取使用日志。
 
+HTTP `/v1/*` 响应的 `X-Codex2API-Request-ID` 对应下方可检索的 `request_id`，浏览器可通过 CORS 读取。
+既有 `X-Request-ID` 是请求上下文/访问日志 ID，可能回显客户端传入值，与该网关追踪 ID 独立；排查用量请使用 `X-Codex2API-Request-ID`。
+自动压缩用量的 `parent_request_id` 优先引用父请求的网关追踪 ID；`/v1/live` 结算沿用建连请求的追踪信息。
+
 **查询参数:**
 
 - `start`: RFC3339 开始时间
@@ -1217,6 +1542,9 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
 - `model`: 按模型过滤
 - `endpoint`: 按端点过滤
 - `api_key_id`: 按 API 密钥 ID 过滤
+- `request_id`: 网关追踪 ID，精确匹配
+- `upstream_request_id`: 上游请求 ID，精确匹配
+- `q`: 模糊搜索，包含网关及上游请求 ID
 - `fast`: true/false (是否 fast 服务)
 - `stream`: true/false (是否流式)
 
@@ -1228,6 +1556,10 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
     {
       "id": 1,
       "account_id": 1,
+      "request_id": "019-example-gateway-id",
+      "upstream_request_id": "req_example",
+      "upstream_proxy_id": 1,
+      "upstream_proxy_name": "local-egress",
       "account_email": "user@example.com",
       "api_key_id": 3,
       "api_key_name": "Team A",
@@ -2152,6 +2484,10 @@ curl -X DELETE http://localhost:8080/api/admin/images/jobs/1 \
 | 503    | 服务不可用（账号池耗尽或依赖的共享上下文后端暂时故障） |
 | 598    | 上游流中断               |
 
+499 表示客户端取消或连接提前断开，原始请求日志及已记录的 Token 用量保留。
+账号列表的“请求（7D）”失败数、重试失败数和错误码分布均排除 499，避免将客户端取消
+归为账号故障；原有健康率、用量和计费汇总规则保持不变。
+
 ### 错误响应格式
 
 ```json
@@ -2213,6 +2549,64 @@ curl -X DELETE http://localhost:8080/api/admin/images/jobs/1 \
 
 - `global_rpm = 0`: 无限流
 - `global_rpm > 0`: 启用 RPM 限流
+
+### API Key 模型周请求次数预算
+
+API Key 的 `limits.model_request_limits` 可按最终映射模型限制固定日历周的请求次数。支持精确模型名及 `*` 通配，一条规则的匹配模型共用预算，多条命中规则同时生效。配置字段、计数口径及更新规则详见 [配置说明](CONFIGURATION.md#api-key-模型周请求次数预算)。
+
+管理端创建 `POST /api/admin/keys` 与更新 `PATCH /api/admin/keys/:id` 均接收该字段。新增规则省略 `id`，服务端生成；读取 `GET /api/admin/keys` 返回的 `limits` 获取已保存的 ID。更新已有规则时保留 ID，只能修改次数上限或调整顺序；模型与重置安排需通过删除旧规则、新增规则更改。非法配置或未知规则 ID 返回 `400`。
+
+管理员可使用管理鉴权查询当前周用量：
+
+```http
+GET /api/admin/keys/123/model-request-usage
+X-Admin-Key: YOUR_ADMIN_SECRET
+```
+
+```json
+{
+  "model_request_usage": [
+    {
+      "rule_id": "mr_example",
+      "model": "gpt-6*",
+      "window": "week",
+      "limit": 50,
+      "used": 12,
+      "remaining": 38,
+      "window_start": "2026-08-30T16:00:00Z",
+      "reset_at": "2026-09-06T16:00:00Z",
+      "timezone": "Asia/Shanghai"
+    }
+  ]
+}
+```
+
+公开自助接口 `GET /api/key-usage/summary` 与别名 `GET /api/key-usage/me` 在原有 `key`、`range`、`usage` 之外增加相同结构的顶层 `model_request_usage`。传入 `Authorization: Bearer YOUR_API_KEY`，只返回此 Key 的预算，不能通过查询参数读取其他 Key；公开用量页关闭时继续返回 `404`。没有配置时该字段为 `[]`。此字段始终反映当前固定周，与报表的 `range` 参数独立。
+
+预算耗尽时 HTTP 返回 `429`，错误码为 `rate_limit_reached`，`Retry-After` 表示距离该规则重置的秒数。`error.details` 包含耗尽规则的用量快照：
+
+```json
+{
+  "error": {
+    "type": "rate_limit_error",
+    "code": "rate_limit_reached",
+    "message": "API key weekly model request limit reached for \"gpt-6*\" (50/50)",
+    "details": {
+      "rule_id": "mr_example",
+      "model": "gpt-6*",
+      "window": "week",
+      "limit": 50,
+      "used": 50,
+      "remaining": 0,
+      "window_start": "2026-08-30T16:00:00Z",
+      "reset_at": "2026-09-06T16:00:00Z",
+      "timezone": "Asia/Shanghai"
+    }
+  }
+}
+```
+
+Responses WebSocket 升级后用对应错误帧返回拒绝信息，每个 `response.create` 分别计数；HTTP 流式请求在上游发送前检查。若较早的上游尝试已启动 HTTP 事件流，而后续重试映射到另一模型并耗尽其预算，已有流中会发送包含同样 `error.details` 的错误事件。该本地预算错误不会触发上游换号重试。计数依赖暂时不可用时返回 `503`，不静默放行。额度耗尽后可等待规则重置，或调用不匹配该规则且满足其他限制的模型。
 
 ### 账号级别限流
 

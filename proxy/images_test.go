@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/config"
@@ -647,6 +648,7 @@ func TestCollectImagesResponseClassifiesNoOutputOutcomes(t *testing.T) {
 		statusCode int
 		retry      bool
 		code       string
+		message    string
 	}{
 		{
 			name:       "explicit safety refusal text",
@@ -662,6 +664,25 @@ func TestCollectImagesResponseClassifiesNoOutputOutcomes(t *testing.T) {
 			statusCode: http.StatusBadGateway,
 			retry:      true,
 			code:       "image_generation_unavailable",
+			// issue #589：模型说了什么必须带回给调用方，不能只回一句固定文案。
+			message: "Upstream did not execute image generation; model replied: Try describing the scene in more detail.",
+		},
+		{
+			name:       "chinese natural-language policy refusal",
+			upstream:   `data: {"type":"response.output_text.delta","delta":"抱歉，我无法生成真实公众人物的照片。"}` + "\n\n" + `data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"抱歉，我无法生成真实公众人物的照片。"}]}]}}` + "\n\n",
+			kind:       imageNoOutputSafety,
+			statusCode: http.StatusBadRequest,
+			code:       "content_policy_violation",
+			message:    "抱歉，我无法生成真实公众人物的照片。",
+		},
+		{
+			name:       "capability-loss wording without a policy subject stays retryable",
+			upstream:   `data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"I can't generate images right now."}]}]}}` + "\n\n",
+			kind:       imageNoOutputUnavailable,
+			statusCode: http.StatusBadGateway,
+			retry:      true,
+			code:       "image_generation_unavailable",
+			message:    "model replied: I can't generate images right now.",
 		},
 		{
 			name:       "empty completed response",
@@ -699,11 +720,58 @@ func TestCollectImagesResponseClassifiesNoOutputOutcomes(t *testing.T) {
 			if statusCode != tt.statusCode || payload["error"].(gin.H)["code"] != tt.code {
 				t.Fatalf("response = (%d, %#v), want status=%d code=%s", statusCode, payload, tt.statusCode, tt.code)
 			}
+			if tt.message != "" {
+				if got, _ := payload["error"].(gin.H)["message"].(string); !strings.Contains(got, tt.message) {
+					t.Fatalf("message = %q, want it to contain %q", got, tt.message)
+				}
+			}
 			generalRetries := 0
 			if got := shouldRetryImageStreamError(err, &generalRetries, 0, 0, maxImageAttempts); got != tt.retry {
 				t.Fatalf("retry = %t, want %t", got, tt.retry)
 			}
 		})
+	}
+}
+
+func TestIsImageContentPolicyRefusalHeuristics(t *testing.T) {
+	cases := []struct {
+		text string
+		want bool
+	}{
+		{"This request was blocked by our content policy.", true},
+		{"抱歉，我无法生成真实公众人物的照片。", true},
+		{"我不能创建包含未成年人的图片。", true},
+		{"I can't create images of real people, but I can draw a stylized character instead.", true},
+		{"Sorry, I cannot generate explicit or sexual content.", true},
+		{"这个请求不符合使用规范，无法生成。", true},
+		// 只有拒绝措辞、没有政策主题：更像账号缺图片工具，必须保持可换号重试。
+		{"I can't generate images right now.", false},
+		{"抱歉，我目前无法生成图片。", false},
+		{"Try describing the scene in more detail.", false},
+		{"Here is a description of the scene you asked for.", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := isImageContentPolicyRefusal(tc.text); got != tc.want {
+			t.Errorf("isImageContentPolicyRefusal(%q) = %t, want %t", tc.text, got, tc.want)
+		}
+	}
+}
+
+func TestImageModelReplyPreviewIsSingleLineAndRuneBounded(t *testing.T) {
+	if got := imageModelReplyPreview("  first line\n\n  second\tline  "); got != "first line second line" {
+		t.Fatalf("preview = %q, want whitespace collapsed", got)
+	}
+	long := strings.Repeat("图", imageModelReplyPreviewMaxRunes+50)
+	got := imageModelReplyPreview(long)
+	if !utf8.ValidString(got) {
+		t.Fatalf("preview must not cut a rune in half: %q", got)
+	}
+	if !strings.HasSuffix(got, "…") || utf8.RuneCountInString(got) != imageModelReplyPreviewMaxRunes+1 {
+		t.Fatalf("preview = %d runes (ellipsis=%t), want %d runes plus an ellipsis", utf8.RuneCountInString(got), strings.HasSuffix(got, "…"), imageModelReplyPreviewMaxRunes)
+	}
+	if got := imageModelReplyPreview(""); got != "" {
+		t.Fatalf("empty preview = %q", got)
 	}
 }
 
@@ -810,7 +878,7 @@ func TestForwardImagesSelectiveRetryBuffersWholeExplicitErrorAttempt(t *testing.
 	}
 }
 
-func TestForwardImagesTextFallbackCoolsAccountAndFailsOver(t *testing.T) {
+func TestForwardImagesTextFallbackFailsOverWithoutCoolingAccount(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previousRuntime := CurrentRuntimeSettings()
 	previousResin := resinCfg.Load()
@@ -818,8 +886,8 @@ func TestForwardImagesTextFallbackCoolsAccountAndFailsOver(t *testing.T) {
 		ApplyRuntimeSettings(previousRuntime)
 		resinCfg.Store(previousResin)
 	})
-	// The structured image-unavailable path owns one bounded failover even when
-	// generic transport retries are disabled.
+	// The no-output fallback owns one bounded failover even when generic
+	// transport retries are disabled; it must not persist account/model state.
 	nextRuntime := previousRuntime
 	nextRuntime.ContinuousRetryPolicy = database.ContinuousRetryPolicy{}
 	ApplyRuntimeSettings(nextRuntime)
@@ -870,8 +938,67 @@ func TestForwardImagesTextFallbackCoolsAccountAndFailsOver(t *testing.T) {
 		t.Fatalf("failover result: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	cooled := first.ModelCooldownRemaining("gpt-image-2") > 0 || second.ModelCooldownRemaining("gpt-image-2") > 0
-	if !cooled {
-		t.Fatal("plain-text image fallback should cool the account/model pair")
+	if cooled {
+		t.Fatal("plain-text image fallback must not cool either account/model pair")
+	}
+}
+
+func TestImageCapabilityCooldownRequiresExplicitUpstreamEvidence(t *testing.T) {
+	plainTextErr := classifyImageNoOutput("Try describing the scene in more detail.")
+	if imageErrorNeedsModelCooldown(plainTextErr) {
+		t.Fatal("plain-text fallback must not request a persistent model cooldown")
+	}
+	safetyErr := classifyImageNoOutput("Blocked by the content policy.")
+	if imageErrorNeedsModelCooldown(safetyErr) {
+		t.Fatal("content-policy refusal must not request a model cooldown")
+	}
+
+	structuredErr := newImageResponseFailedError([]byte(`{"type":"response.failed","response":{"error":{"code":"image_generation_unavailable","message":"image generation is unavailable"}}}`))
+	if !imageErrorNeedsModelCooldown(structuredErr) {
+		t.Fatal("structured image_generation_unavailable must request a model cooldown")
+	}
+
+	toolMissing := []byte(`{"error":{"message":"Tool choice 'image_generation' not found in 'tools' parameter.","param":"tool_choice","type":"invalid_request_error"}}`)
+	if !isExplicitImageGenerationCapabilityLoss(toolMissing) {
+		t.Fatal("explicit image_generation tool-missing error must be classified as capability loss")
+	}
+	if isExplicitImageGenerationCapabilityLoss([]byte(`{"error":{"message":"Invalid type for input[0].arguments"}}`)) {
+		t.Fatal("generic invalid_request_error must not be classified as image capability loss")
+	}
+}
+
+func TestForwardImagesExplicitToolMissingCoolsModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousResin := resinCfg.Load()
+	t.Cleanup(func() { resinCfg.Store(previousResin) })
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprint(w, `{"error":{"message":"Tool choice 'image_generation' not found in 'tools' parameter.","param":"tool_choice","type":"invalid_request_error"}}`)
+	}))
+	t.Cleanup(upstream.Close)
+	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "image-capability-loss-test"})
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 0,
+	})
+	t.Cleanup(store.Stop)
+	account := &auth.Account{DBID: 1, AccessToken: "image-token", PlanType: "plus", AccountID: "image-account"}
+	store.AddAccount(account)
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+	responsesBody := []byte(`{"model":"gpt-5.4","input":"draw","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`)
+	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", false)
+
+	if account.ModelCooldownRemaining("gpt-image-2") <= 0 {
+		t.Fatal("explicit image_generation tool-missing error should cool the account/model pair")
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
 	}
 }
 

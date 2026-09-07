@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -3332,7 +3333,7 @@ func TestStreamTranslator_CustomToolCallInputDelta(t *testing.T) {
 	if got := gjson.GetBytes(chunk, "choices.0.delta.tool_calls.0.id").String(); got != "call_custom" {
 		t.Fatalf("tool call id = %q, want call_custom; chunk=%s", got, chunk)
 	}
-	if got := gjson.GetBytes(chunk, "choices.0.delta.tool_calls.0.function.name").String(); got != "run_custom" {
+	if got := gjson.GetBytes(chunk, "choices.0.delta.tool_calls.0.custom.name").String(); got != "run_custom" {
 		t.Fatalf("tool call name = %q, want run_custom; chunk=%s", got, chunk)
 	}
 
@@ -3348,7 +3349,7 @@ func TestStreamTranslator_CustomToolCallInputDelta(t *testing.T) {
 	if chunk == nil {
 		t.Fatal("should emit chunk for custom_tool_call_input delta")
 	}
-	if got := gjson.GetBytes(chunk, "choices.0.delta.tool_calls.0.function.arguments").String(); got != `{"cmd":` {
+	if got := gjson.GetBytes(chunk, "choices.0.delta.tool_calls.0.custom.input").String(); got != `{"cmd":` {
 		t.Fatalf("custom tool input delta = %q, want arguments delta; chunk=%s", got, chunk)
 	}
 
@@ -3364,7 +3365,7 @@ func TestStreamTranslator_CustomToolCallInputDelta(t *testing.T) {
 	if chunk == nil {
 		t.Fatal("should emit chunk for custom_tool_call_input call_id delta")
 	}
-	if got := gjson.GetBytes(chunk, "choices.0.delta.tool_calls.0.function.arguments").String(); got != `"pwd"}` {
+	if got := gjson.GetBytes(chunk, "choices.0.delta.tool_calls.0.custom.input").String(); got != `"pwd"}` {
 		t.Fatalf("custom tool input call_id delta = %q, want arguments delta; chunk=%s", got, chunk)
 	}
 
@@ -3635,6 +3636,16 @@ func TestExtractToolCallsFromOutputValidatedRejectsMalformedOrdinaryCall(t *test
 
 	if calls, err := ExtractToolCallsFromOutputValidated(event); err == nil || calls != nil {
 		t.Fatalf("calls=%v err=%v, want malformed ordinary call error", calls, err)
+	}
+}
+
+func TestMalformedToolArgumentsFailurePayloadCarriesCreatedAt(t *testing.T) {
+	payload := malformedToolArgumentsFailurePayload(errors.New("bad arguments"))
+	if got := gjson.GetBytes(payload, "type").String(); got != "response.failed" {
+		t.Fatalf("type = %q, want response.failed; payload=%s", got, payload)
+	}
+	if got := gjson.GetBytes(payload, "response.created_at").Int(); got <= 0 {
+		t.Fatalf("response.created_at = %d, want a positive Unix timestamp", got)
 	}
 }
 
@@ -4188,5 +4199,30 @@ func TestPrepareResponsesBodyStripsTopLevelWebSocketEnvelopeType(t *testing.T) {
 		if ct := gjson.GetBytes(got, "input.0.content.0.type").String(); ct != "input_text" {
 			t.Fatalf("%s: nested content type = %q, want input_text; body=%s", name, ct, got)
 		}
+	}
+}
+
+func TestModelSupportsMaxReasoningEffort(t *testing.T) {
+	cases := map[string]bool{
+		"gpt-5.6-sol":              true,
+		"gpt-5.6":                  true,
+		"gpt-6-astra":              true, // official model page lists Max for Astra; major-only ids follow major > 5
+		"gpt-6":                    true,
+		"gpt-7.0":                  true,
+		"gpt-5.5":                  false,
+		"gpt-5.4-mini":             false,
+		"gpt-daybreak-blue-latest": true, // alias of gpt-5.6-sol (issue #624)
+		"gpt-daybreak-red-latest":  true, // alias of gpt-5.6-cyber
+		"daybreak":                 false,
+		"gpt-5.4-daybreak":         false, // versioned ids follow their own version rule
+		"grok-4.6":                 false,
+	}
+	for model, want := range cases {
+		if got := modelSupportsMaxReasoningEffort(model); got != want {
+			t.Errorf("modelSupportsMaxReasoningEffort(%q) = %v, want %v", model, got, want)
+		}
+	}
+	if got := normalizeConfiguredReasoningEffort("max", "gpt-daybreak-blue-latest"); got != "max" {
+		t.Fatalf("daybreak max effort clamped to %q", got)
 	}
 }

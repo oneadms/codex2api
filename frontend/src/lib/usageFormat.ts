@@ -53,6 +53,9 @@ export function needsUsageReload(account: {
   status?: string
   usage_percent_5h?: number | null
   usage_percent_7d?: number | null
+  claude_api?: boolean
+  claude_usage_probe_at?: string | null
+  claude_usage_probe_error?: string | null
 }): boolean {
   if (account.status !== 'active' && account.status !== 'ready') return false
 
@@ -60,6 +63,10 @@ export function needsUsageReload(account: {
     account.usage_percent_5h !== null && account.usage_percent_5h !== undefined
   const has7d =
     account.usage_percent_7d !== null && account.usage_percent_7d !== undefined
+  // Claude's native Messages probe can legitimately return no quota headers.
+  // A successful probe is still a completed sample and must not trigger an
+  // endless page refresh loop.
+  if (hasSuccessfulClaudeProbe(account)) return false
   return !has5h && !has7d
 }
 
@@ -67,8 +74,19 @@ type AccountStatusSource = {
   status?: string | null
   openai_responses_api?: boolean
   grok_api?: boolean
+  claude_api?: boolean
+  claude_usage_probe_at?: string | null
+  claude_usage_probe_error?: string | null
   usage_percent_5h?: number | null
   usage_percent_7d?: number | null
+}
+
+function hasSuccessfulClaudeProbe(account: AccountStatusSource): boolean {
+  return Boolean(
+    account.claude_api &&
+      account.claude_usage_probe_at?.trim() &&
+      !account.claude_usage_probe_error?.trim(),
+  )
 }
 
 export function isUnsampledQuotaAccount(account: AccountStatusSource): boolean {
@@ -88,6 +106,7 @@ export function isUnsampledQuotaAccount(account: AccountStatusSource): boolean {
   const has5h =
     typeof account.usage_percent_5h === 'number' &&
     Number.isFinite(account.usage_percent_5h)
+  if (hasSuccessfulClaudeProbe(account)) return false
   return !has7d && !has5h
 }
 
@@ -125,8 +144,11 @@ export function supportsOfficialUsage(account: {
   access_token_type?: string | null
   openai_responses_api?: boolean
   grok_api?: boolean
+  claude_api?: boolean
+  antigravity_api?: boolean
 }): boolean {
-  if (account.openai_responses_api || account.grok_api) return false
+  // wham 只属于 ChatGPT 渠道：中转 / Grok / Claude / Antigravity（Google）账号没有官方统计。
+  if (account.openai_responses_api || account.grok_api || account.claude_api || account.antigravity_api) return false
   return (account.access_token_type || '').trim().toLowerCase() !== 'codex_at'
 }
 
@@ -149,6 +171,7 @@ export function needsOfficialCostReload(account: {
   access_token_type?: string | null
   openai_responses_api?: boolean
   grok_api?: boolean
+  claude_api?: boolean
   official_usd?: number | null
   official_usd_7d?: number | null
   official_usage_synced?: boolean

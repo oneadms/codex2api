@@ -1,3 +1,4 @@
+import { ANTIGRAVITY_DEFAULT_MODELS } from "../lib/antigravityModels";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
@@ -25,8 +26,11 @@ import {
   Trash2,
   Upload,
   X,
+  Zap,
 } from "lucide-react";
 import { api } from "../api";
+import type { ProxyRow } from "../api";
+import { ProxyField } from "../components/ProxyField";
 import type {
   AccountGroup,
   AccountListSummary,
@@ -49,9 +53,17 @@ import AccountGroupFilterSelect, {
   type AccountGroupFilterValue,
 } from "../components/AccountGroupFilterSelect";
 import AccountGroupMultiSelect from "../components/AccountGroupMultiSelect";
+import AccountProxyBadge from "../components/AccountProxyBadge";
+import AccountProxyQuickEditor from "../components/AccountProxyQuickEditor";
+import {
+  buildProxyBindingContext,
+  type ProxyBindingContext,
+} from "../lib/accountProxyBinding";
 import ChannelLogo from "../components/ChannelLogo";
+import ColumnSettingsMenu from "../components/ColumnSettingsMenu";
 import { CompactStat } from "../components/CompactStat";
 import Modal from "../components/Modal";
+import TestConnectionModal from "../components/TestConnectionModal";
 import PageHeader from "../components/PageHeader";
 import Pagination from "../components/Pagination";
 import StateShell from "../components/StateShell";
@@ -73,6 +85,8 @@ import {
   DEFAULT_PAGE_SIZE_OPTIONS,
   usePersistedPageSize,
 } from "../hooks/usePersistedPageSize";
+import { useAccountTableColumns } from "../hooks/useAccountTableColumns";
+import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useToast } from "../hooks/useToast";
 import { cn } from "@/lib/utils";
 import { getErrorMessage } from "../utils/error";
@@ -83,11 +97,9 @@ type ImportMode = "single" | "files";
 type BusyAction = "refresh" | "quota" | "toggle" | "delete";
 type OAuthModalStatus = "idle" | "starting" | "waiting" | "processing" | "completed" | "failed" | "cancelled";
 
-const ANTIGRAVITY_DEFAULT_MODELS = [
-  "gemini-3-pro-preview",
-  "gemini-2.5-pro",
-  "gemini-2.5-flash",
-];
+const ANTIGRAVITY_TABLE_COLUMNS = [
+  "project", "permission", "quota", "proxy", "status", "updatedAt",
+] as const;
 
 function parseModelList(value: string): string[] {
   return Array.from(
@@ -144,6 +156,9 @@ interface ImportDraft {
   modelMapping: string;
   proxyUrl: string;
   groupIds: number[];
+  // importFileProxies 只控制"文件内代理是否注册进代理表"。该渠道的导入一直会采用
+  // 文件里的 proxy_url，关掉它只是让那些代理停在账号绑定上、不进代理池。
+  importFileProxies: boolean;
 }
 
 interface EditDraft {
@@ -172,6 +187,7 @@ const EMPTY_IMPORT_DRAFT: ImportDraft = {
   modelMapping: "",
   proxyUrl: "",
   groupIds: [],
+  importFileProxies: false,
 };
 
 const EMPTY_OAUTH_DRAFT: OAuthDraft = {
@@ -362,6 +378,63 @@ function AccountAvatar({ account, size = 36 }: { account: AccountRow; size?: num
   );
 }
 
+const warningURLPattern = /https?:\/\/[^\s;]+/;
+
+function firstWarningURL(text?: string): string | null {
+  if (!text) return null;
+  const match = text.match(warningURLPattern);
+  return match ? match[0] : null;
+}
+
+// 权限列里的操作入口:同步 warning 会带出 Google 的一次性操作链接
+// (TOS 申诉表单 / 账号验证),直接渲染成可点击入口,免得去详情页
+// 复制长 URL。
+function SyncWarningAction({ warning }: { warning?: string }) {
+  const { t } = useTranslation();
+  const url = firstWarningURL(warning);
+  if (!url) return null;
+  const label = /appeal/i.test(warning ?? "")
+    ? t("antigravity.submitAppeal")
+    : t("antigravity.verifyAccount");
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="mt-1 inline-flex max-w-[180px] items-center gap-1 text-[11px] font-medium text-primary hover:underline"
+    >
+      <ExternalLink className="size-3 shrink-0" aria-hidden />
+      <span className="truncate">{label}</span>
+    </a>
+  );
+}
+
+// 详情页 warning 横幅:URL 转成可点击链接,展示文本截短避免长链接刷屏。
+function LinkifiedWarning({ text }: { text: string }) {
+  const parts = text.split(/(https?:\/\/[^\s;]+)/g);
+  return (
+    <span className="break-words">
+      {parts.map((part, index) => {
+        if (!/^https?:\/\//.test(part)) {
+          return part;
+        }
+        const display = part.length > 64 ? part.slice(0, 61) + "…" : part;
+        return (
+          <a
+            key={index}
+            href={part}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-medium underline underline-offset-2"
+          >
+            {display}
+          </a>
+        );
+      })}
+    </span>
+  );
+}
+
 function PermissionBadge({ permissions }: { permissions?: AntigravityPermissionsSnapshot }) {
   const { t } = useTranslation();
   const allowed = permissionAllowed(permissions);
@@ -386,6 +459,25 @@ function PermissionBadge({ permissions }: { permissions?: AntigravityPermissions
       <ShieldX className="size-3" />
       {t("antigravity.permissionBlocked")}
     </Badge>
+  );
+}
+
+// AntigravityAuthKindChip 凭据形态小徽章(与 Grok 页同款配色:OAuth 紫 / API Key 天蓝)。
+function AntigravityAuthKindChip({ account }: { account: AccountRow }) {
+  const { t } = useTranslation();
+  const isAPIKey = account.antigravity_auth_kind === "api_key";
+  return (
+    <span
+      className={cn(
+        "inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset",
+        isAPIKey
+          ? "bg-sky-500/10 text-sky-700 ring-sky-600/20 dark:bg-sky-500/20 dark:text-sky-300 dark:ring-sky-400/20"
+          : "bg-violet-500/10 text-violet-700 ring-violet-600/20 dark:bg-violet-500/20 dark:text-violet-300 dark:ring-violet-400/20",
+      )}
+    >
+      {isAPIKey ? <KeyRound className="size-2.5" /> : <FileJson className="size-2.5" />}
+      {isAPIKey ? t("antigravity.authKindApiKey") : t("antigravity.authKindOAuth")}
+    </span>
   );
 }
 
@@ -419,6 +511,7 @@ function GroupChips({ account, groups }: { account: AccountRow; groups: AccountG
 function AccountMetadataFields({
   proxyUrl,
   onProxyUrlChange,
+  proxies = [],
   groupIds,
   onGroupIdsChange,
   groups,
@@ -426,6 +519,7 @@ function AccountMetadataFields({
 }: {
   proxyUrl: string;
   onProxyUrlChange: (value: string) => void;
+  proxies?: ProxyRow[];
   groupIds: number[];
   onGroupIdsChange: (value: number[]) => void;
   groups: AccountGroup[];
@@ -434,16 +528,15 @@ function AccountMetadataFields({
   const { t } = useTranslation();
   return (
     <div className="grid gap-3 sm:grid-cols-2">
-      <label className="block space-y-1.5">
-        <span className="text-xs font-semibold text-muted-foreground">
-          {t("antigravity.proxyUrl")}
-        </span>
-        <Input
-          value={proxyUrl}
-          onChange={(event) => onProxyUrlChange(event.target.value)}
-          placeholder={t("antigravity.proxyUrlPlaceholder")}
-        />
-      </label>
+      {/* 代理字段与其他三个渠道同构:手填 + 测试 + 从代理池选择(含关联提示)。 */}
+      <ProxyField
+        className="space-y-1.5"
+        value={proxyUrl}
+        onChange={onProxyUrlChange}
+        proxies={proxies}
+        label={t("antigravity.proxyUrl")}
+        placeholder={t("antigravity.proxyUrlPlaceholder")}
+      />
       <div className="space-y-1.5">
         <span className="text-xs font-semibold text-muted-foreground">
           {t("accounts.groupsLabel")}
@@ -541,7 +634,7 @@ function QuotaDetail({ account }: { account: AccountRow }) {
       {account.antigravity_sync_warning ? (
         <div className="flex items-start gap-2 rounded-md border border-amber-300/70 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
           <TriangleAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-          <span className="break-words">{account.antigravity_sync_warning}</span>
+          <LinkifiedWarning text={account.antigravity_sync_warning} />
         </div>
       ) : null}
       <section className="grid gap-3 sm:grid-cols-2">
@@ -841,6 +934,11 @@ function AntigravityManagementState({
 
 function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
   const { t } = useTranslation();
+  const isTableViewport = useMediaQuery("(min-width: 768px)");
+  const { columns: visibleColumns, toggleColumn, resetColumns } = useAccountTableColumns(
+    "codex2api:antigravity-accounts:visible-columns",
+    ANTIGRAVITY_TABLE_COLUMNS,
+  );
   const { showToast } = useToast();
   const { confirm, confirmDialog } = useConfirmDialog();
   const requestAbortRef = useRef<AbortController | null>(null);
@@ -869,6 +967,50 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
     EMPTY_ACCOUNT_GROUP_FILTER,
   );
   const [busy, setBusy] = useState<{ id: number; action: BusyAction } | null>(null);
+  const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null);
+
+  // 代理池 + 代理池开关 + 全局代理:代理徽章的判定输入。本页此前只有纯文本代理
+  // 输入框,没接过代理池,这里补上(拉取失败静默留空,不影响手填)。
+  const [proxyPool, setProxyPool] = useState<ProxyRow[]>([]);
+  const [proxyPoolEnabled, setProxyPoolEnabled] = useState(false);
+  const [globalProxyURL, setGlobalProxyURL] = useState("");
+  const [quickProxyAccount, setQuickProxyAccount] = useState<AccountRow | null>(
+    null,
+  );
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .listProxies()
+      .then((res) => {
+        if (!cancelled) setProxyPool(res.proxies ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setProxyPool([]);
+      });
+    void api
+      .getSettings()
+      .then((settings) => {
+        if (cancelled) return;
+        setProxyPoolEnabled(Boolean(settings.proxy_pool_enabled));
+        setGlobalProxyURL((settings.proxy_url ?? "").trim());
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  // 分组用全量而非 antigravityGroups:后端解析组代理不看渠道,按渠道过滤会把
+  // 跨渠道的存量成员误报成"无组代理"。
+  const proxyBindingCtx = useMemo<ProxyBindingContext>(
+    () =>
+      buildProxyBindingContext({
+        proxies: proxyPool,
+        groups: allGroups,
+        poolEnabled: proxyPoolEnabled,
+        globalProxy: globalProxyURL,
+      }),
+    [proxyPool, allGroups, proxyPoolEnabled, globalProxyURL],
+  );
 
   const [showImport, setShowImport] = useState(false);
   const [importMode, setImportMode] = useState<ImportMode>("single");
@@ -1378,22 +1520,36 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
           files: credentialFiles.map((file) => file.content),
           proxy_url: importDraft.proxyUrl.trim() || undefined,
           group_ids: importDraft.groupIds,
+          import_proxy: importDraft.importFileProxies || undefined,
         });
         setImportResult(result);
         const needsReview = result.failed > 0 || (result.degraded ?? 0) > 0;
+        const proxyWarning = result.proxy_warning?.trim();
+        // Toast 只有一个槽位,连续调用会互相顶掉——代理结果和告警必须拼进同一条。
+        const summary = needsReview
+          ? t("antigravity.importReview", {
+              imported: result.imported,
+              synced: result.synced ?? 0,
+              degraded: result.degraded ?? 0,
+              failed: result.failed,
+            })
+          : t("antigravity.importDone", {
+              imported: result.imported,
+              total: result.total,
+            });
+        const parts = [summary];
+        if (result.proxies_imported !== undefined) {
+          parts.push(
+            t("accounts.importProxySummary", {
+              imported: result.proxies_imported,
+              skipped: result.proxies_skipped ?? 0,
+            }),
+          );
+          if (proxyWarning) parts.push(proxyWarning);
+        }
         showToast(
-          needsReview
-            ? t("antigravity.importReview", {
-                imported: result.imported,
-                synced: result.synced ?? 0,
-                degraded: result.degraded ?? 0,
-                failed: result.failed,
-              })
-            : t("antigravity.importDone", {
-                imported: result.imported,
-                total: result.total,
-              }),
-          needsReview ? "warning" : "success",
+          parts.join(" "),
+          needsReview || proxyWarning ? "warning" : "success",
         );
         if (result.failed === 0 && (result.degraded ?? 0) === 0) {
           setShowImport(false);
@@ -1642,6 +1798,16 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
         <Button
           variant="ghost"
           size="icon-sm"
+          disabled={accountBusy}
+          onClick={() => setTestingAccount(account)}
+          title={t("accounts.testConnection")}
+          aria-label={t("accounts.testConnection")}
+        >
+          <Zap />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
           disabled={accountBusy || exporting}
           onClick={() => void handleExport([account.id])}
           title={t("antigravity.exportOne")}
@@ -1762,6 +1928,7 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
         title={t("antigravity.pageTitle")}
         description={t("antigravity.pageSubtitle")}
         hideTitle
+        actionsBelow
         titleAdornment={headerSlot}
         onRefresh={() => void reload()}
         actions={
@@ -1847,6 +2014,24 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
             {t("antigravity.clearFilters")}
           </Button>
         ) : null}
+        {isTableViewport ? (
+          <ColumnSettingsMenu
+            columns={visibleColumns}
+            columnOrder={ANTIGRAVITY_TABLE_COLUMNS}
+            onToggle={toggleColumn}
+            onReset={resetColumns}
+            title={t("accounts.columnSettings")}
+            resetTitle={t("accounts.columnReset")}
+            labels={{
+              project: t("antigravity.columnProject"),
+              permission: t("antigravity.columnPermission"),
+              quota: t("antigravity.columnQuota"),
+              proxy: t("accounts.proxyColumn"),
+              status: t("antigravity.columnStatus"),
+              updatedAt: t("antigravity.columnUpdated"),
+            }}
+          />
+        ) : null}
       </div>
 
       <StateShell
@@ -1855,6 +2040,7 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
         error={accounts.length === 0 ? error : null}
         onRetry={() => void reload()}
         isEmpty={!loading && !error && accounts.length === 0}
+        emptyIcon={<ChannelLogo channel="antigravity" size={30} />}
         loadingTitle={t("antigravity.loadingTitle")}
         loadingDescription={t("antigravity.loadingDescription")}
         errorTitle={t("antigravity.errorTitle")}
@@ -1881,104 +2067,144 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
           )
         }
       >
-        <div className="hidden overflow-hidden rounded-lg border border-border bg-card md:block">
-          <Table>
+        {/* 与 Codex/Claude/Grok 页同款表格外壳:圆角卡片 + 粘性表头 + 13px 半粗表头 */}
+        <div className="data-table-shell hidden md:block">
+          <Table className="[&_td]:px-2.5 [&_th]:px-2.5 [&_td]:py-3">
             <TableHeader>
               <TableRow>
-                <TableHead>{t("antigravity.columnAccount")}</TableHead>
-                <TableHead>{t("antigravity.columnProject")}</TableHead>
-                <TableHead>{t("antigravity.columnPermission")}</TableHead>
-                <TableHead>{t("antigravity.columnQuota")}</TableHead>
-                <TableHead>{t("antigravity.columnStatus")}</TableHead>
-                <TableHead>{t("antigravity.columnUpdated")}</TableHead>
-                <TableHead className="w-[184px] text-right">
+                <TableHead className="text-[13px] font-semibold">{t("antigravity.columnAccount")}</TableHead>
+                {visibleColumns.project ? (
+                  <TableHead className="text-[13px] font-semibold">{t("antigravity.columnProject")}</TableHead>
+                ) : null}
+                {visibleColumns.permission ? (
+                  <TableHead className="text-[13px] font-semibold">{t("antigravity.columnPermission")}</TableHead>
+                ) : null}
+                {visibleColumns.quota ? (
+                  <TableHead className="text-[13px] font-semibold">{t("antigravity.columnQuota")}</TableHead>
+                ) : null}
+                {visibleColumns.proxy ? (
+                  <TableHead className="text-[13px] font-semibold">{t("accounts.proxyColumn")}</TableHead>
+                ) : null}
+                {visibleColumns.status ? (
+                  <TableHead className="text-[13px] font-semibold">{t("antigravity.columnStatus")}</TableHead>
+                ) : null}
+                {visibleColumns.updatedAt ? (
+                  <TableHead className="text-[13px] font-semibold">{t("antigravity.columnUpdated")}</TableHead>
+                ) : null}
+                <TableHead className="w-[184px] text-right text-[13px] font-semibold">
                   {t("antigravity.columnActions")}
                 </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {accounts.map((account) => (
-                <TableRow key={account.id} className={account.enabled === false ? "opacity-65" : undefined}>
+                <TableRow
+                  key={account.id}
+                  className={cn("cursor-pointer", account.enabled === false && "opacity-65")}
+                  onClick={(event) => {
+                    // 整行可点开详情;命中按钮/链接/输入框/菜单时交给它们自己处理(与 Grok/Claude 页一致)
+                    const target = event.target as HTMLElement | null;
+                    if (target?.closest('button, a, input, label, [role="menuitem"], [role="menu"], [data-slot="button"]')) return;
+                    openDetailAccount(account.id);
+                  }}
+                >
                   <TableCell className="min-w-[220px]">
-                    <button
-                      type="button"
-                      onClick={() => openDetailAccount(account.id)}
-                      className="flex min-w-0 items-center gap-3 text-left"
-                    >
-                      <AccountAvatar account={account} />
+                    <div className="flex min-w-0 items-center gap-2.5">
+                      <AccountAvatar account={account} size={32} />
                       <span className="min-w-0">
                         <span className="flex flex-wrap items-center gap-1.5">
-                          <span className="block max-w-[220px] truncate text-sm font-semibold text-foreground">
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              openDetailAccount(account.id);
+                            }}
+                            className="block max-w-[220px] truncate text-left text-[13px] font-semibold text-foreground transition-colors hover:text-primary"
+                            title={t("accounts.openDetail")}
+                          >
                             {account.name || account.email || `#${account.id}`}
-                          </span>
-                          <Badge variant="outline" className="text-[10px]">
-                            {account.antigravity_auth_kind === "api_key"
-                              ? t("antigravity.authKindApiKey")
-                              : t("antigravity.authKindOAuth")}
-                          </Badge>
+                          </button>
+                          <AntigravityAuthKindChip account={account} />
                           {identityVerified(account) ? (
                             <CheckCircle2 className="size-3.5 shrink-0 text-emerald-500" />
                           ) : null}
                         </span>
                         {account.name && account.email ? (
-                          <span className="mt-0.5 block max-w-[220px] truncate text-xs text-muted-foreground">
+                          <span className="mt-0.5 block max-w-[220px] truncate text-[11px] text-muted-foreground">
                             {account.email}
                           </span>
                         ) : null}
                         <GroupChips account={account} groups={allGroups} />
                       </span>
-                    </button>
-                  </TableCell>
-                  <TableCell className="max-w-[220px]">
-                    <div className="truncate text-sm font-medium text-foreground">
-                      {subscriptionTier(account) || t("antigravity.tierUnknown")}
-                    </div>
-                    <div
-                      className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground"
-                      title={identityProjectID(account)}
-                    >
-                      {identityProjectID(account) || t("antigravity.projectPending")}
                     </div>
                   </TableCell>
-                  <TableCell className="max-w-[190px]">
-                    <PermissionBadge permissions={account.antigravity_permissions} />
-                    {account.antigravity_permissions?.reason ? (
-                      <div
-                        className="mt-1 max-w-[180px] truncate text-[11px] text-muted-foreground"
-                        title={account.antigravity_permissions.reason}
-                      >
-                        {account.antigravity_permissions.reason}
+                  {visibleColumns.project ? (
+                    <TableCell className="max-w-[220px]">
+                      <div className="truncate text-[13px] font-medium text-foreground">
+                        {subscriptionTier(account) || t("antigravity.tierUnknown")}
                       </div>
-                    ) : null}
-                  </TableCell>
-                  <TableCell>
-                    <CompactQuota
-                      account={account}
-                      onOpen={() => openDetailAccount(account.id)}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex flex-col items-start gap-1">
-                      <StatusBadge
-                        status={account.enabled === false ? "paused" : account.status}
-                        errorMessage={account.error_message}
-                      />
-                      {account.locked ? (
-                        <Badge variant="outline" className="text-[10px]">
-                          <KeyRound className="size-3" />
-                          {t("antigravity.locked")}
-                        </Badge>
+                      <div
+                        className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground"
+                        title={identityProjectID(account)}
+                      >
+                        {identityProjectID(account) || t("antigravity.projectPending")}
+                      </div>
+                    </TableCell>
+                  ) : null}
+                  {visibleColumns.permission ? (
+                    <TableCell className="max-w-[190px]">
+                      <PermissionBadge permissions={account.antigravity_permissions} />
+                      {account.antigravity_permissions?.reason ? (
+                        <div
+                          className="mt-1 max-w-[180px] truncate text-[11px] text-muted-foreground"
+                          title={account.antigravity_permissions.reason}
+                        >
+                          {account.antigravity_permissions.reason}
+                        </div>
                       ) : null}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="text-xs text-foreground">
-                      {formatRelativeTime(account.updated_at, { variant: "compact" })}
-                    </div>
-                    <div className="mt-0.5 text-[10px] text-muted-foreground">
-                      {formatBeijingTime(account.updated_at)}
-                    </div>
-                  </TableCell>
+                      <SyncWarningAction warning={account.antigravity_sync_warning} />
+                    </TableCell>
+                  ) : null}
+                  {visibleColumns.quota ? (
+                    <TableCell>
+                      <CompactQuota
+                        account={account}
+                        onOpen={() => openDetailAccount(account.id)}
+                      />
+                    </TableCell>
+                  ) : null}
+                  {visibleColumns.proxy ? (
+                    <TableCell className="min-w-[120px] max-w-[180px]">
+                      <AccountProxyBadge
+                        account={account}
+                        ctx={proxyBindingCtx}
+                        onClick={() => setQuickProxyAccount(account)}
+                      />
+                    </TableCell>
+                  ) : null}
+                  {visibleColumns.status ? (
+                    <TableCell>
+                      <div className="flex flex-col items-start gap-1">
+                        <StatusBadge
+                          status={account.enabled === false ? "paused" : account.status}
+                          errorMessage={account.error_message}
+                        />
+                        {account.locked ? (
+                          <Badge variant="outline" className="text-[10px]">
+                            <KeyRound className="size-3" />
+                            {t("antigravity.locked")}
+                          </Badge>
+                        ) : null}
+                      </div>
+                    </TableCell>
+                  ) : null}
+                  {visibleColumns.updatedAt ? (
+                    <TableCell className="whitespace-nowrap">
+                      <div className="text-[13px] tabular-nums text-muted-foreground" title={formatBeijingTime(account.updated_at)}>
+                        {formatRelativeTime(account.updated_at, { variant: "compact" })}
+                      </div>
+                    </TableCell>
+                  ) : null}
                   <TableCell>{renderActions(account)}</TableCell>
                 </TableRow>
               ))}
@@ -2007,11 +2233,7 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
                       <span className="truncate text-sm font-semibold text-foreground">
                         {account.name || account.email || `#${account.id}`}
                       </span>
-                      <Badge variant="outline" className="text-[10px]">
-                        {account.antigravity_auth_kind === "api_key"
-                          ? t("antigravity.authKindApiKey")
-                          : t("antigravity.authKindOAuth")}
-                      </Badge>
+                      <AntigravityAuthKindChip account={account} />
                       {identityVerified(account) ? (
                         <CheckCircle2 className="size-3.5 shrink-0 text-emerald-500" />
                       ) : null}
@@ -2051,6 +2273,13 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
                 <CompactQuota
                   account={account}
                   onOpen={() => openDetailAccount(account.id)}
+                />
+              </div>
+              <div className="mt-3 flex border-t border-border pt-3">
+                <AccountProxyBadge
+                  account={account}
+                  ctx={proxyBindingCtx}
+                  onClick={() => setQuickProxyAccount(account)}
                 />
               </div>
               <div className="mt-3 flex items-center justify-between gap-2 border-t border-border pt-2">
@@ -2149,6 +2378,7 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
               </label>
               <AccountMetadataFields
                 proxyUrl={oauthDraft.proxyUrl}
+                proxies={proxyPool}
                 onProxyUrlChange={(proxyUrl) =>
                   setOAuthDraft((current) => ({ ...current, proxyUrl }))
                 }
@@ -2475,6 +2705,7 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
 
           <AccountMetadataFields
             proxyUrl={importDraft.proxyUrl}
+            proxies={proxyPool}
             onProxyUrlChange={(proxyUrl) =>
               setImportDraft((current) => ({ ...current, proxyUrl }))
             }
@@ -2485,6 +2716,28 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
             groups={antigravityGroups}
             onCreateGroup={createAntigravityGroup}
           />
+
+          {importMode === "files" ? (
+            <div className="space-y-1">
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  className="size-3.5"
+                  checked={importDraft.importFileProxies}
+                  onChange={(event) =>
+                    setImportDraft((current) => ({
+                      ...current,
+                      importFileProxies: event.target.checked,
+                    }))
+                  }
+                />
+                {t("accounts.importFileProxies")}
+              </label>
+              <p className="text-[11px] text-muted-foreground">
+                {t("antigravity.importFileProxiesHint")}
+              </p>
+            </div>
+          ) : null}
 
           {importResult && (importResult.failed > 0 || (importResult.degraded ?? 0) > 0) ? (
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
@@ -2680,6 +2933,7 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
           )}
           <AccountMetadataFields
             proxyUrl={editDraft.proxyUrl}
+            proxies={proxyPool}
             onProxyUrlChange={(proxyUrl) =>
               setEditDraft((current) => ({ ...current, proxyUrl }))
             }
@@ -2735,6 +2989,30 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
           </div>
         ) : null}
       </Modal>
+
+      {/* 代理徽章直达的快速绑定弹窗：与 Codex / Grok 账号页共用组件 */}
+      <AccountProxyQuickEditor
+        account={quickProxyAccount}
+        accountLabel={
+          quickProxyAccount
+            ? quickProxyAccount.name ||
+              quickProxyAccount.email ||
+              `#${quickProxyAccount.id}`
+            : ""
+        }
+        proxies={proxyPool}
+        ctx={proxyBindingCtx}
+        onClose={() => setQuickProxyAccount(null)}
+        onSaved={() => reload({ silent: true })}
+      />
+
+      {testingAccount ? (
+        <TestConnectionModal
+          account={testingAccount}
+          onClose={() => setTestingAccount(null)}
+          onSettled={() => void reload()}
+        />
+      ) : null}
 
       {confirmDialog}
     </div>

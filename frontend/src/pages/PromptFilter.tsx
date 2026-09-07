@@ -5395,6 +5395,7 @@ function PromptReviewLogsTable({ logs }: { logs: PromptFilterLog[] }) {
                 </TableCell>
                 <TableCell className="align-top text-xs">
                   <div>{log.api_key_name || log.api_key_masked || (log.api_key_id ? `#${log.api_key_id}` : '-')}</div>
+                  {log.newapi_policy_status === 'unbound' ? <div className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">{t('apiKeys.promptFilterIdentityUnbound')}</div> : null}
                   {log.newapi_user_id ? <div className="mt-1 truncate text-muted-foreground" title={log.newapi_user_id}>{t('promptFilter.newapiUser')} {log.newapi_user_id}</div> : null}
                   {log.request_correlation_id ? <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground" title={log.request_correlation_id}>{log.request_correlation_id}</div> : null}
                 </TableCell>
@@ -5728,6 +5729,11 @@ function PromptFilterLogRow({ log, compact }: { log: PromptFilterLog; compact?: 
               <span className="min-w-0 truncate text-[11px] font-semibold text-muted-foreground" title={policyProfileLabel}>
                 {policyProfileLabel}
               </span>
+            ) : null}
+            {log.newapi_policy_status === 'unbound' ? (
+              <Badge variant="secondary" className="w-fit max-w-full truncate text-[10px]">
+                {t('apiKeys.promptFilterScopeGlobal')}
+              </Badge>
             ) : null}
           </div>
           <div className="mt-2 space-y-1 text-[11px] leading-4 text-muted-foreground">

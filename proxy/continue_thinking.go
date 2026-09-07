@@ -79,6 +79,7 @@ const (
 
 // continueRoundStat 记录一轮上游请求的真实消耗，供逐轮 usage 记账。
 type continueRoundStat struct {
+	Trace      upstreamTraceSnapshot
 	Usage      *UsageInfo
 	StatusCode int
 	DurationMs int
@@ -102,6 +103,7 @@ type continueFoldResult struct {
 
 // continueFold 是折叠状态机的外部依赖与配置。
 type continueFold struct {
+	trace     func() upstreamTraceSnapshot
 	baseBody  []byte // 本 attempt 实际发出的上游请求体（已过 prepare 管线）
 	maxRounds int    // 最大轮数（含首轮）
 
@@ -117,6 +119,13 @@ type continueFold struct {
 	keepalive func() bool
 	// keepaliveInterval 保活间隔;<=0 用 continueKeepaliveInterval。测试用。
 	keepaliveInterval time.Duration
+}
+
+func (f *continueFold) snapshotTrace() upstreamTraceSnapshot {
+	if f.trace != nil {
+		return f.trace()
+	}
+	return upstreamTraceSnapshot{}
 }
 
 // bufferedOutputItem 缓冲一个非 reasoning output item 的完整事件序列。
@@ -534,6 +543,7 @@ func runContinueThinkingFold(firstResp *http.Response, f *continueFold) continue
 			}
 		}
 		stat := continueRoundStat{
+			Trace:      f.snapshotTrace(),
 			Usage:      outcome.usage,
 			StatusCode: statusCode,
 			DurationMs: int(time.Since(roundStart).Milliseconds()),
@@ -607,14 +617,14 @@ func runContinueThinkingFold(firstResp *http.Response, f *continueFold) continue
 
 		nextBody, err := buildContinuationBody(f.baseBody, st.replayTail)
 		if err != nil {
-			result.FailedContinuation = &continueRoundStat{ErrMessage: err.Error()}
+			result.FailedContinuation = &continueRoundStat{ErrMessage: err.Error(), Trace: upstreamTraceSnapshot{RequestID: f.snapshotTrace().RequestID}}
 			f.forward(st.syntheticIncompleteEvent("upstream_error", outcome.usage))
 			result.StopReason = continueStopRoundError
 			return result
 		}
 		nextResp, err := f.openRound(nextBody)
 		if err != nil {
-			result.FailedContinuation = &continueRoundStat{ErrMessage: err.Error()}
+			result.FailedContinuation = &continueRoundStat{ErrMessage: err.Error(), Trace: f.snapshotTrace()}
 			f.forward(st.syntheticIncompleteEvent("upstream_error", outcome.usage))
 			result.StopReason = continueStopRoundError
 			return result
@@ -623,6 +633,7 @@ func runContinueThinkingFold(firstResp *http.Response, f *continueFold) continue
 			errBody, _ := io.ReadAll(io.LimitReader(nextResp.Body, 2048))
 			nextResp.Body.Close()
 			result.FailedContinuation = &continueRoundStat{
+				Trace:      f.snapshotTrace(),
 				StatusCode: nextResp.StatusCode,
 				ErrMessage: fmt.Sprintf("continuation round rejected: %s", upstreamErrorConsoleBody(errBody)),
 			}

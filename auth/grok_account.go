@@ -136,7 +136,7 @@ func (a *Account) IsGrokAPI() bool {
 // isRelayStyleLocked：openai_responses 中转或 Grok —— 一切「非 Codex OAuth 官方上游」
 // 的账号。这类账号不参与 Codex 专属行为（wham 探针、WS 上游、manifest、alpha search）。
 func (a *Account) isRelayStyleLocked() bool {
-	return a.isOpenAIResponsesAPILocked() || a.isGrokAPILocked() || a.isAntigravityAPILocked() || a.isTraeCNAPILocked()
+	return a.isOpenAIResponsesAPILocked() || a.isGrokAPILocked() || a.isAntigravityAPILocked() || a.isTraeCNAPILocked() || a.isClaudeOAuthLocked()
 }
 
 // IsRelayStyle 判断账号是否为「非 Codex 官方」的外部上游账号。
@@ -203,6 +203,8 @@ type GrokRateLimitSnapshot struct {
 // SetGrokRateLimitSnapshot 更新配额余量快照（时间倒流的旧观测被忽略）。
 func (a *Account) SetGrokRateLimitSnapshot(snap GrokRateLimitSnapshot) {
 	a.setGrokRateLimitSnapshot(snap, true)
+	// 余量头是调度模式（剩余配额/顺序耗尽）的排序键来源，通知调度器重评桶内位置。
+	a.notifySchedulerUsageChanged()
 }
 
 // setGrokRateLimitSnapshot 的 markDirty=false 供启动恢复用:恢复的值本来就来自

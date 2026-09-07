@@ -419,7 +419,7 @@ func writeContinuousRetryLastFailure(c *gin.Context, protocol continuousRetryHTT
 			payload, _ = json.Marshal(gin.H{"error": gin.H{"message": message, "type": ErrorTypeUpstreamError, "code": code}})
 			_, _ = c.Writer.WriteString("data: " + string(payload) + "\n\n")
 		default:
-			payload, _ = json.Marshal(gin.H{"type": "response.failed", "response": gin.H{"status": "failed", "error": gin.H{"message": message, "type": "upstream_error", "code": code}}})
+			payload, _ = json.Marshal(gin.H{"type": "response.failed", "response": gin.H{"created_at": time.Now().Unix(), "status": "failed", "error": gin.H{"message": message, "type": "upstream_error", "code": code}}})
 			_, _ = c.Writer.WriteString("data: " + string(payload) + "\n\n")
 		}
 		if flusher, ok := c.Writer.(http.Flusher); ok {

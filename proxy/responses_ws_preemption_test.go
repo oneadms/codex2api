@@ -107,6 +107,65 @@ func TestResponsesWSSessionPreemptKeyIsolationAndStreamMultiplexing(t *testing.T
 	}
 }
 
+func TestResponsesWSSessionPreemptKeySeparatesSubagentThreads(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	row := &database.APIKeyRow{ID: 11, AllowedGroupIDs: []int64{7}}
+	body := []byte(`{"model":"gpt-5.4","input":"hello"}`)
+	newThreadContext := func(threadID string) *gin.Context {
+		c := newResponsesWSPreemptTestContext(11, row)
+		c.Request.Header.Set("Session-Id", "shared-session")
+		if threadID != "" {
+			c.Request.Header.Set("Thread-Id", threadID)
+		}
+		return c
+	}
+
+	parentContext := newThreadContext("parent-thread")
+	parentKey, ok := newResponsesWSSessionPreemptKey(
+		parentContext,
+		body,
+		resolveRequestSessionIdentity(parentContext.Request.Header, body),
+	)
+	if !ok {
+		t.Fatal("parent session did not arm preemption")
+	}
+	childContext := newThreadContext("child-thread")
+	childKey, ok := newResponsesWSSessionPreemptKey(
+		childContext,
+		body,
+		resolveRequestSessionIdentity(childContext.Request.Header, body),
+	)
+	if !ok {
+		t.Fatal("child session did not arm preemption")
+	}
+	if parentKey.sessionHash == childKey.sessionHash {
+		t.Fatal("different subagent threads collapsed onto one preemption key")
+	}
+
+	repeatContext := newThreadContext("child-thread")
+	repeatKey, ok := newResponsesWSSessionPreemptKey(
+		repeatContext,
+		body,
+		resolveRequestSessionIdentity(repeatContext.Request.Header, body),
+	)
+	if !ok || repeatKey.sessionHash != childKey.sessionHash {
+		t.Fatal("same child thread did not keep a stable preemption key")
+	}
+
+	missingA := newThreadContext("")
+	missingB := newThreadContext("")
+	missingKeyA, okA := newResponsesWSSessionPreemptKey(missingA, body, resolveRequestSessionIdentity(missingA.Request.Header, body))
+	missingKeyB, okB := newResponsesWSSessionPreemptKey(missingB, body, resolveRequestSessionIdentity(missingB.Request.Header, body))
+	if !okA || !okB || missingKeyA.sessionHash != missingKeyB.sessionHash {
+		t.Fatal("missing Thread-Id did not retain the legacy shared-session preemption key")
+	}
+	rootContext := newThreadContext("shared-session")
+	rootKey, rootOK := newResponsesWSSessionPreemptKey(rootContext, body, resolveRequestSessionIdentity(rootContext.Request.Header, body))
+	if !rootOK || rootKey.sessionHash != missingKeyA.sessionHash {
+		t.Fatal("root Thread-Id equal to Session-Id changed the legacy preemption key")
+	}
+}
+
 func TestWatchResponsesWSSessionPreemptOwnerDetectsRemoteReplacement(t *testing.T) {
 	tokenCache := cache.NewMemory(1)
 	ownerStore := tokenCache.(cache.RuntimeOwnerStore)

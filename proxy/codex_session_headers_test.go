@@ -58,6 +58,82 @@ func TestApplyCodexSessionHeadersPreservesForwardedClientRequestID(t *testing.T)
 	}
 }
 
+func TestApplyCodexSessionHeadersPreservesRawThreadWithoutSessionConvergence(t *testing.T) {
+	downstream := http.Header{}
+	downstream.Set("Session-Id", "client-session")
+	downstream.Set("Thread-Id", "client-child-thread")
+
+	tests := []struct {
+		name    string
+		account *auth.Account
+	}{
+		{name: "off", account: fingerprintAccount(t, auth.CodexFingerprintModeOff)},
+		{name: "device", account: fingerprintAccount(t, auth.CodexFingerprintModeDevice)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outbound := http.Header{}
+			ApplyCodexSessionHeaders(outbound, tt.account, "gateway-cache-key", downstream, false)
+			if got := outbound.Get("Session-Id"); got != "gateway-cache-key" {
+				t.Fatalf("Session-Id = %q, want gateway cache key", got)
+			}
+			if got := outbound.Get("Thread-Id"); got != "client-child-thread" {
+				t.Fatalf("Thread-Id = %q, want raw child thread", got)
+			}
+			if got := outbound.Get("X-Client-Request-Id"); got != "client-child-thread" {
+				t.Fatalf("X-Client-Request-Id = %q, want raw child thread", got)
+			}
+		})
+	}
+}
+
+func TestApplyCodexSessionHeadersUsesMetadataThreadFallback(t *testing.T) {
+	downstream := http.Header{}
+	downstream.Set("Session-Id", "client-session")
+	downstream.Set("X-Codex-Turn-Metadata", `{"session_id":"metadata-session","thread_id":"metadata-child"}`)
+
+	outbound := http.Header{}
+	ApplyCodexSessionHeaders(outbound, nil, "gateway-cache-key", downstream, false)
+	if got := outbound.Get("Thread-Id"); got != "metadata-child" {
+		t.Fatalf("Thread-Id = %q, want metadata fallback", got)
+	}
+
+	downstream.Set("Thread-Id", "header-child")
+	outbound = http.Header{}
+	ApplyCodexSessionHeaders(outbound, nil, "gateway-cache-key", downstream, false)
+	if got := outbound.Get("Thread-Id"); got != "header-child" {
+		t.Fatalf("Thread-Id = %q, want explicit header precedence", got)
+	}
+}
+
+func TestApplyCodexSessionHeadersFingerprintThreadMatrix(t *testing.T) {
+	downstream := http.Header{}
+	downstream.Set("Session-Id", "client-session")
+	downstream.Set("Thread-Id", "client-child-thread")
+
+	sessionAccount := fingerprintAccount(t, auth.CodexFingerprintModeSession)
+	_, sessionThread := ConvergedCodexSessionIdentity(sessionAccount, downstream)
+	if sessionThread == "" {
+		t.Fatal("session mode did not derive a thread identity")
+	}
+	sessionOutbound := http.Header{}
+	ApplyCodexSessionHeaders(sessionOutbound, sessionAccount, "gateway-cache-key", downstream, false)
+	if got := sessionOutbound.Get("Thread-Id"); got != sessionThread {
+		t.Fatalf("session Thread-Id = %q, want converged %q", got, sessionThread)
+	}
+
+	fullAccount := fingerprintAccount(t, auth.CodexFingerprintModeFull)
+	fullSession, fullThread := ConvergedCodexSessionIdentity(fullAccount, downstream)
+	if fullSession == "" || fullThread != fullSession {
+		t.Fatalf("full mode identity = (%q, %q), want collapsed non-empty values", fullSession, fullThread)
+	}
+	fullOutbound := http.Header{}
+	ApplyCodexSessionHeaders(fullOutbound, fullAccount, "gateway-cache-key", downstream, false)
+	if got := fullOutbound.Get("Thread-Id"); got != fullThread {
+		t.Fatalf("full Thread-Id = %q, want collapsed %q", got, fullThread)
+	}
+}
+
 func TestApplyCodexSessionHeadersSkipsEmptySessionID(t *testing.T) {
 	// 会话键为空是合法状态（stateless WS + 默认隔离时 resolveHandshakeSessionID
 	// 刻意返回空串，好让上游没有任何可绑定的连接级会话身份）。此时一个头都不该发。

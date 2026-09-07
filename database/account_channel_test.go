@@ -18,6 +18,7 @@ func TestAPIKeyLimitsResolveUpstreamChannel(t *testing.T) {
 		{name: "grok", in: "Grok", want: UpstreamChannelGrok},
 		{name: "antigravity", in: " Antigravity ", want: UpstreamChannelAntigravity},
 		{name: "traecn", in: " TRAECN ", want: UpstreamChannelTraeCN},
+		{name: "claude", in: " Claude ", want: UpstreamChannelClaude},
 		{name: "unknown", in: "other", want: UpstreamChannelAuto},
 	}
 	for _, tt := range tests {
@@ -184,6 +185,16 @@ func TestSQLiteListAccountListProjectionByChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert traecn account: %v", err)
 	}
+	claudeID, err := db.InsertAccountWithUpstream(ctx, "claude", "anthropic", "oauth", map[string]interface{}{
+		"upstream_type":            "claude",
+		"access_token":             "claude-secret",
+		"claude_usage_probe_at":    "2026-08-29T05:00:00Z",
+		"claude_usage_probe_error": "",
+		"models":                   []string{"claude-sonnet-4-5"},
+	}, "")
+	if err != nil {
+		t.Fatalf("insert Claude account: %v", err)
+	}
 
 	tests := []struct {
 		channel string
@@ -193,6 +204,7 @@ func TestSQLiteListAccountListProjectionByChannel(t *testing.T) {
 		{channel: UpstreamChannelGrok, wantID: grokID},
 		{channel: UpstreamChannelAntigravity, wantID: antigravityID},
 		{channel: UpstreamChannelTraeCN, wantID: traeID},
+		{channel: UpstreamChannelClaude, wantID: claudeID},
 	}
 	for _, tt := range tests {
 		t.Run(tt.channel, func(t *testing.T) {
@@ -208,6 +220,9 @@ func TestSQLiteListAccountListProjectionByChannel(t *testing.T) {
 			}
 			if tt.channel == UpstreamChannelTraeCN && (rows[0].GetCredential("traecn_host") != "https://trae.example" || rows[0].GetCredential("traecn_user_id") != "trae-user" || len(rows[0].GetCredentialStringSlice("traecn_upstream_models")) != 2 || len(rows[0].GetCredentialStringSlice("traecn_model_allowlist")) != 1 || rows[0].GetCredential("traecn_models_synced_at") == "") {
 				t.Fatalf("Trae CN projection omitted account fields: %#v", rows[0].Credentials)
+			}
+			if tt.channel == UpstreamChannelClaude && (rows[0].GetCredential("claude_usage_probe_at") == "" || rows[0].GetCredential("claude_usage_probe_error") != "" || len(rows[0].GetCredentialStringSlice("models")) != 1) {
+				t.Fatalf("Claude projection omitted sampling metadata: %#v", rows[0].Credentials)
 			}
 		})
 	}
@@ -276,5 +291,59 @@ func TestUpdateAccountCredentialsCASKeepsEmbeddedFamilyCanonical(t *testing.T) {
 	}
 	if row.CredentialGeneration != 2 || row.CredentialFamilyID != "ag_canonical" || row.GetCredential("credential_family_id") != "ag_canonical" || row.GetCredential("refresh_token") != "rotated-refresh" {
 		t.Fatalf("updated row = generation %d family %q credentials %#v", row.CredentialGeneration, row.CredentialFamilyID, row.Credentials)
+	}
+}
+
+func TestSQLiteListAccountListProjectionCarriesClaudeAuthKind(t *testing.T) {
+	db, err := New("sqlite", filepath.Join(t.TempDir(), "account-list-projection-claude-auth-kind.db"))
+	if err != nil {
+		t.Fatalf("New(sqlite) error: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	setupID, err := db.InsertAccountWithUpstream(ctx, "claude-setup", "anthropic", "claude", map[string]interface{}{
+		"upstream_type":    "claude",
+		"access_token":     "sk-ant-oat01-secret",
+		"claude_auth_kind": "setup_token",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oauthID, err := db.InsertAccountWithUpstream(ctx, "claude-oauth", "anthropic", "claude", map[string]interface{}{
+		"upstream_type": "claude",
+		"access_token":  "at",
+		"refresh_token": "rt",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiID, err := db.InsertAccountWithUpstream(ctx, "claude-api", "anthropic", "claude", map[string]interface{}{
+		"upstream_type": "claude", "claude_auth_kind": "api_key", "claude_base_url": "https://example.com/v1", "access_token": "api-secret",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.ListAccountListProjection(ctx, UpstreamChannelClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[int64]*AccountRow{}
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	if got := byID[apiID]; got == nil || got.GetCredential("claude_auth_kind") != "api_key" || got.GetCredential("access_token") != "" || got.GetCredential("refresh_token") != "" {
+		t.Fatal("API key projection must carry auth kind without secret credentials")
+	}
+	if got := byID[setupID].GetCredential("claude_auth_kind"); got != "setup_token" {
+		t.Fatalf("setup token projection auth kind = %q", got)
+	}
+	if got := byID[setupID].GetCredential("access_token"); got != "" {
+		t.Fatalf("projection must never carry the access token, got %q", got)
+	}
+	if got := byID[oauthID].GetCredential("claude_auth_kind"); got != "" {
+		t.Fatalf("legacy oauth row must keep an empty auth kind in the projection, got %q", got)
+	}
+	if got := byID[oauthID].GetCredential("refresh_token"); got != "configured" {
+		t.Fatalf("refresh token presence marker = %q", got)
 	}
 }

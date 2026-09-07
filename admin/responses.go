@@ -24,7 +24,7 @@ type statsResponse struct {
 	RateLimited   int   `json:"rate_limited"`
 	Error         int   `json:"error"`
 	TodayRequests int64 `json:"today_requests"`
-	// Channels 按上游渠道（codex/grok）拆分的账号与今日请求计数，
+	// Channels 按上游渠道（codex/grok/antigravity/claude）拆分的账号与今日请求计数，
 	// 供仪表盘在「全部」视图并列展示、渠道视图切换主数字。
 	Channels map[string]statsChannelCounts `json:"channels,omitempty"`
 }
@@ -187,6 +187,7 @@ type opsResponseCacheConfig struct {
 }
 
 type opsResponseCache struct {
+	SharedPayloadBytes     int64                  `json:"shared_payload_bytes"`
 	EffectiveConfig        opsResponseCacheConfig `json:"effective_config"`
 	AppliedConfig          opsResponseCacheConfig `json:"applied_config"`
 	Entries                int                    `json:"entries"`

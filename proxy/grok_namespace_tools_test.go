@@ -252,15 +252,20 @@ func TestGrokToolSearchOutputInjectsDynamicTools(t *testing.T) {
 	}
 }
 
-func TestGrokGiantCustomToolGuard(t *testing.T) {
+func newGrokGiantCustomToolGuard(t *testing.T) *grokStreamReverser {
+	t.Helper()
 	body := []byte(`{"model":"grok-4.6","tools":[{"type":"custom","name":"apply_patch"}],"input":"patch"}`)
 	result := prepareGrokUpstreamBody(body)
 	if !strings.Contains(gjson.GetBytes(result.Body, "instructions").String(), grokGiantToolInstructionMarker) {
 		t.Fatalf("apply_patch guard instructions missing: %s", result.Body)
 	}
-	aliases := result.Aliases
-	r := &grokStreamReverser{aliases: aliases, customItems: map[string]bool{}, toolSearchItems: map[string]bool{}, inputBytes: map[string]int{}}
+	r := newGrokStreamReverser(result.Aliases)
 	_ = r.rewriteLine([]byte("data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_big\",\"name\":\"apply_patch\"}}\n"))
+	return r
+}
+
+func grokGiantCustomToolFailure(t *testing.T, r *grokStreamReverser) []byte {
+	t.Helper()
 	large := strings.Repeat("x", grokToolCallHardLimitBytes+1)
 	line := []byte("data: " + string(mustJSON(t, map[string]any{"type": "response.function_call_arguments.delta", "item_id": "fc_big", "delta": large})) + "\n")
 	failure := r.rewriteLine(line)
@@ -269,6 +274,35 @@ func TestGrokGiantCustomToolGuard(t *testing.T) {
 	}
 	if got := gjson.GetBytes(bytesAfterSSEData(failure), "response.error.code").String(); got != "invalid_prompt" {
 		t.Fatalf("oversized custom error code = %q", got)
+	}
+	return failure
+}
+
+func TestGrokGiantCustomToolGuardReusesUpstreamCreatedAt(t *testing.T) {
+	const upstreamCreatedAt int64 = 1712345678
+	r := newGrokGiantCustomToolGuard(t)
+	createdLine := []byte(`data: {"type":"response.created","response":{"id":"resp_fixed","created_at":` + strconv.FormatInt(upstreamCreatedAt, 10) + `}}` + "\n")
+	if got := r.rewriteLine(createdLine); string(got) != string(createdLine) {
+		t.Fatalf("response.created frame changed while capturing created_at:\n got: %q\nwant: %q", got, createdLine)
+	}
+
+	failure := grokGiantCustomToolFailure(t, r)
+	if got := gjson.GetBytes(bytesAfterSSEData(failure), "response.created_at").Int(); got != upstreamCreatedAt {
+		t.Fatalf("oversized custom failure created_at = %d, want upstream value %d", got, upstreamCreatedAt)
+	}
+}
+
+func TestGrokGiantCustomToolGuardUsesFixedFallbackCreatedAt(t *testing.T) {
+	const fallbackCreatedAt int64 = 1712345000
+	r := newGrokGiantCustomToolGuard(t)
+	// Fix the constructor fallback to a sentinel so this test cannot accidentally
+	// pass when failureLine samples the wall clock in the same second.
+	r.createdAt = fallbackCreatedAt
+	_ = r.rewriteLine([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_without_timestamp\"}}\n"))
+
+	failure := grokGiantCustomToolFailure(t, r)
+	if got := gjson.GetBytes(bytesAfterSSEData(failure), "response.created_at").Int(); got != fallbackCreatedAt {
+		t.Fatalf("oversized custom failure created_at = %d, want fixed fallback %d", got, fallbackCreatedAt)
 	}
 }
 

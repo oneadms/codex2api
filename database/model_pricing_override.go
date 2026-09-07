@@ -23,7 +23,12 @@ type ModelPricingOverride struct {
 	// 标准档（短上下文）
 	Input       float64 `json:"input,omitempty"`
 	CachedInput float64 `json:"cached_input,omitempty"`
-	Output      float64 `json:"output,omitempty"`
+	// Anthropic prompt-cache creation prices are informational today; actual
+	// billing still uses CachedInput (cache read) because usage logs expose
+	// cache reads separately from cache creation only in provider payloads.
+	CacheWrite5m float64 `json:"cache_write_5m,omitempty"`
+	CacheWrite1h float64 `json:"cache_write_1h,omitempty"`
+	Output       float64 `json:"output,omitempty"`
 
 	// priority(fast) 档
 	InputPriority       float64 `json:"input_priority,omitempty"`
@@ -46,9 +51,26 @@ type ModelPricingOverride struct {
 	LongContextThresholdTokens int `json:"long_context_threshold_tokens,omitempty"`
 }
 
+// NormalizeModelPricingOverride 应用 Codex Astra 的长上下文计费例外。
+// 旧覆盖、手工编辑和官方 API 定价同步都不能重新启用 Astra 的长档；
+// 标准价、priority 价及其他模型的覆盖保持原样。
+func NormalizeModelPricingOverride(model string, o ModelPricingOverride) ModelPricingOverride {
+	if CanonicalBillingModelKey(model) != "gpt-6-astra" {
+		return o
+	}
+	o.InputLong = 0
+	o.CachedInputLong = 0
+	o.OutputLong = 0
+	o.InputLongPriority = 0
+	o.CachedInputLongPriority = 0
+	o.OutputLongPriority = 0
+	o.LongContextThresholdTokens = 0
+	return o
+}
+
 // IsEmpty 判断覆盖是否不含任何价格（全 0）。
 func (o ModelPricingOverride) IsEmpty() bool {
-	return o.Input == 0 && o.CachedInput == 0 && o.Output == 0 &&
+	return o.Input == 0 && o.CachedInput == 0 && o.CacheWrite5m == 0 && o.CacheWrite1h == 0 && o.Output == 0 &&
 		o.InputPriority == 0 && o.CachedInputPriority == 0 && o.OutputPriority == 0 &&
 		o.InputLong == 0 && o.CachedInputLong == 0 && o.OutputLong == 0 &&
 		o.InputLongPriority == 0 && o.CachedInputLongPriority == 0 && o.OutputLongPriority == 0 &&
@@ -62,6 +84,12 @@ func (o ModelPricingOverride) applyNonZero(p *ModelPricing) {
 	}
 	if o.CachedInput > 0 {
 		p.CacheReadPricePerMToken = o.CachedInput
+	}
+	if o.CacheWrite5m > 0 {
+		p.CacheWrite5mPricePerMToken = o.CacheWrite5m
+	}
+	if o.CacheWrite1h > 0 {
+		p.CacheWrite1hPricePerMToken = o.CacheWrite1h
 	}
 	if o.Output > 0 {
 		p.OutputPricePerMToken = o.Output
@@ -108,6 +136,8 @@ func ModelPricingOverrideFromPricing(p *ModelPricing, source string) ModelPricin
 		Source:                     source,
 		Input:                      p.InputPricePerMToken,
 		CachedInput:                p.CacheReadPricePerMToken,
+		CacheWrite5m:               p.CacheWrite5mPricePerMToken,
+		CacheWrite1h:               p.CacheWrite1hPricePerMToken,
 		Output:                     p.OutputPricePerMToken,
 		InputPriority:              p.InputPricePerMTokenPriority,
 		CachedInputPriority:        p.CacheReadPricePerMTokenPriority,
@@ -161,6 +191,14 @@ func (db *DB) MutateModelPricingSettings(ctx context.Context, syncURL *string, m
 			return nil, err
 		}
 	}
+	for model, override := range overrides {
+		normalized := NormalizeModelPricingOverride(model, override)
+		if normalized.IsEmpty() {
+			delete(overrides, model)
+		} else {
+			overrides[model] = normalized
+		}
+	}
 	blob, err := MarshalModelPricingOverridesJSON(overrides)
 	if err != nil {
 		return nil, err
@@ -181,6 +219,7 @@ func SetModelPricingOverrides(m map[string]ModelPricingOverride) {
 	norm := make(map[string]ModelPricingOverride, len(m))
 	for k, v := range m {
 		key := strings.ToLower(strings.TrimSpace(k))
+		v = NormalizeModelPricingOverride(key, v)
 		if key == "" || v.IsEmpty() {
 			continue
 		}
@@ -264,6 +303,7 @@ func ParseModelPricingOverridesJSON(s string) (map[string]ModelPricingOverride, 
 	out := make(map[string]ModelPricingOverride, len(raw))
 	for k, v := range raw {
 		key := strings.ToLower(strings.TrimSpace(k))
+		v = NormalizeModelPricingOverride(key, v)
 		if key == "" || v.IsEmpty() {
 			continue
 		}

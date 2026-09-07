@@ -45,10 +45,16 @@ func normalizePlanType(plan string) string {
 // premium5hRateLimitedLocked additionally require an actually observed 5h
 // window at 100%, so a plan without a real 5h window can never get stuck.
 func isPremium5hPlan(plan string) bool {
-	switch normalizePlanType(plan) {
+	normalized := normalizePlanType(plan)
+	switch normalized {
 	case "plus", "pro", "team", "k12", "edu", "education", "go":
 		return true
+	case "claude", "max", "max-5x", "max-20x":
+		return true
 	default:
+		if strings.HasPrefix(normalized, "claude-") {
+			return true
+		}
 		return IsPlusOrHigherPlan(plan)
 	}
 }
