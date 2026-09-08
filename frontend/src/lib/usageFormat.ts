@@ -146,9 +146,10 @@ export function supportsOfficialUsage(account: {
   grok_api?: boolean
   claude_api?: boolean
   antigravity_api?: boolean
+  traecn_api?: boolean
 }): boolean {
-  // wham 只属于 ChatGPT 渠道：中转 / Grok / Claude / Antigravity（Google）账号没有官方统计。
-  if (account.openai_responses_api || account.grok_api || account.claude_api || account.antigravity_api) return false
+  // wham 只属于 ChatGPT 渠道：中转 / Grok / Claude / Antigravity（Google）/ TRAE CN 账号没有官方统计。
+  if (account.openai_responses_api || account.grok_api || account.claude_api || account.antigravity_api || account.traecn_api) return false
   return (account.access_token_type || '').trim().toLowerCase() !== 'codex_at'
 }
 

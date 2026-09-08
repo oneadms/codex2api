@@ -4,17 +4,19 @@ import { readFileSync } from 'node:fs'
 import { normalizeVisibleChannels, toggleVisibleChannel } from './visibleChannels.ts'
 
 test('normalizeVisibleChannels mirrors the backend rules', () => {
-  assert.deepEqual(normalizeVisibleChannels(null), ['codex', 'claude', 'antigravity', 'grok'])
-  assert.deepEqual(normalizeVisibleChannels(undefined), ['codex', 'claude', 'antigravity', 'grok'])
+  assert.deepEqual(normalizeVisibleChannels(null), ['codex', 'claude', 'antigravity', 'grok', 'traecn'])
+  assert.deepEqual(normalizeVisibleChannels(undefined), ['codex', 'claude', 'antigravity', 'grok', 'traecn'])
   assert.deepEqual(normalizeVisibleChannels([]), ['codex'])
   assert.deepEqual(normalizeVisibleChannels(['grok']), ['codex', 'grok'])
+  assert.deepEqual(normalizeVisibleChannels(['traecn']), ['codex', 'traecn'])
   assert.deepEqual(normalizeVisibleChannels([' Grok ', '', 'claude', 'grok', 'openai', 42]), ['codex', 'claude', 'grok'])
-  assert.deepEqual(normalizeVisibleChannels('codex'), ['codex', 'claude', 'antigravity', 'grok'])
+  assert.deepEqual(normalizeVisibleChannels('codex'), ['codex', 'claude', 'antigravity', 'grok', 'traecn'])
 })
 
 test('toggleVisibleChannel never drops the fallback channel', () => {
   assert.deepEqual(toggleVisibleChannel(['codex', 'claude'], 'claude'), ['codex'])
   assert.deepEqual(toggleVisibleChannel(['codex'], 'grok'), ['codex', 'grok'])
+  assert.deepEqual(toggleVisibleChannel(['codex'], 'traecn'), ['codex', 'traecn'])
   assert.deepEqual(toggleVisibleChannel(['codex', 'grok'], 'codex'), ['codex', 'grok'])
 })
 

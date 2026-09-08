@@ -119,6 +119,7 @@ test("official cost reload only retries Codex accounts missing the snapshot", ()
   assert.equal(supportsOfficialUsage({ openai_responses_api: true }), false);
   assert.equal(supportsOfficialUsage({ grok_api: true }), false);
   assert.equal(supportsOfficialUsage({ claude_api: true }), false);
+  assert.equal(supportsOfficialUsage({ traecn_api: true }), false);
   assert.equal(isOfficialCostHiddenAccount({ status: "error" }), true);
   assert.equal(isOfficialCostHiddenAccount({ status: "active" }), false);
   assert.equal(

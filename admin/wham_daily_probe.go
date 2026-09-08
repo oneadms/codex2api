@@ -256,14 +256,14 @@ func whamDailyUsageBackfillEligible(account *auth.Account) bool {
 }
 
 // whamDailyUsageChannelSupported 判断账号所属渠道是否有 ChatGPT WHAM 端点。
-// WHAM 只属于 ChatGPT 控制面：中转、Grok、Claude OAuth 与 Antigravity（Google）的
+// WHAM 只属于 ChatGPT 控制面：中转、Grok、Claude OAuth、Antigravity（Google）与 TRAE CN 的
 // 凭据属于别家，即便带着 access token 也绝不能发去 wham（Antigravity 漏判曾表现为
 // 每轮探针都记一条 401）。探针候选与手动刷新都要过这道门。
 func whamDailyUsageChannelSupported(account *auth.Account) bool {
 	if account == nil {
 		return false
 	}
-	return !(account.IsOpenAIResponsesAPI() || account.IsGrokAPI() || account.IsClaudeOAuth() || account.IsAntigravityAPI())
+	return !(account.IsOpenAIResponsesAPI() || account.IsGrokAPI() || account.IsClaudeOAuth() || account.IsAntigravityAPI() || account.IsTraeCNAPI())
 }
 
 // isCodexATAccount 识别 at-... 形态的纯 AT 凭据。这类凭据能调用

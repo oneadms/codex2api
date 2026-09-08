@@ -2600,12 +2600,12 @@ export default function Usage() {
                           ) : null}
                           {visibleColumns.model && (
                             <Badge variant="outline" className={usageTableBadgeClass}>
-                              {(log.channel === 'codex' || log.channel === 'grok' || log.channel === 'antigravity' || log.channel === 'claude') && (
+                              {(log.channel === 'codex' || log.channel === 'grok' || log.channel === 'antigravity' || log.channel === 'traecn' || log.channel === 'claude') && (
                                 <ChannelLogo
                                   channel={log.channel}
                                   size={13}
                                   className="mr-1"
-                                  title={log.channel === 'grok' ? 'Grok' : log.channel === 'antigravity' ? 'Antigravity' : log.channel === 'claude' ? 'Claude' : 'Codex'}
+                                  title={log.channel === 'grok' ? 'Grok' : log.channel === 'antigravity' ? 'Antigravity' : log.channel === 'traecn' ? 'TRAECN' : log.channel === 'claude' ? 'Claude' : 'Codex'}
                                 />
                               )}
                               {log.model || '-'}
