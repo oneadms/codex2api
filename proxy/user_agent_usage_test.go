@@ -42,13 +42,16 @@ func TestUsageLogCapturesClientAndActualUpstreamUserAgent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	previousSettings := CurrentRuntimeSettings()
-	normalizedUA, err := NormalizeCodexUserAgentConfigJSON(`{"raw_user_agent":"codex-audit-upstream/1.0"}`)
+	const wantUA = "codex-tui/0.147.0 (Mac OS 15.4.0; arm64) tmux/3.5a (codex-tui; 0.147.0)"
+	normalizedUA, err := NormalizeCodexUserAgentConfigJSON(`{"raw_user_agent":"` + wantUA + `"}`)
 	if err != nil {
 		t.Fatalf("NormalizeCodexUserAgentConfigJSON() error = %v", err)
 	}
 	nextSettings := previousSettings
 	nextSettings.ClientCompatMode = ClientCompatModeForce
 	nextSettings.CodexUserAgentConfig = normalizedUA
+	// 手动指定的完整 UA 低于同步版本时，实际出站值与使用日志仍须保持一致。
+	nextSettings.CodexSyncedCLIVersion = "0.153.4"
 	ApplyRuntimeSettings(nextSettings)
 	t.Cleanup(func() { ApplyRuntimeSettings(previousSettings) })
 
@@ -91,7 +94,7 @@ func TestUsageLogCapturesClientAndActualUpstreamUserAgent(t *testing.T) {
 
 	select {
 	case got := <-upstreamUserAgent:
-		if got != "codex-audit-upstream/1.0" {
+		if got != wantUA {
 			t.Fatalf("upstream received User-Agent = %q, want configured override", got)
 		}
 	case <-time.After(time.Second):
@@ -109,7 +112,7 @@ func TestUsageLogCapturesClientAndActualUpstreamUserAgent(t *testing.T) {
 			if log.ClientUserAgent != "curl/8.7.1" {
 				t.Fatalf("ClientUserAgent = %q, want curl/8.7.1", log.ClientUserAgent)
 			}
-			if log.UpstreamUserAgent != "codex-audit-upstream/1.0" {
+			if log.UpstreamUserAgent != wantUA {
 				t.Fatalf("UpstreamUserAgent = %q, want actual upstream value", log.UpstreamUserAgent)
 			}
 			if !log.UserAgentOverridden {

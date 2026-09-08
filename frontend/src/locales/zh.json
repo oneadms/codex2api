@@ -4181,7 +4181,7 @@
     "codexCliVersionSyncInterval": "自动同步间隔",
     "codexCliVersionSyncIntervalDesc": "两次自动同步之间的等待时长（小时，范围 1-720）。",
     "codexUserAgentRaw": "原始 User-Agent 覆盖",
-    "codexUserAgentRawDesc": "可选的完整 header 值。留空时使用下面的元素拼接。出站时版本段会自动重建为当前生效的 Codex CLI 版本。",
+    "codexUserAgentRawDesc": "可选的完整 User-Agent。填写后按原值发送，版本号不受自动同步或最低 CLI 版本影响；留空时使用下面的元素拼接。",
     "codexUAClientName": "客户端名称",
     "codexUAClientNameDesc": "斜杠前的客户端名，同时用于末尾标记。",
     "codexUAClientVersion": "客户端版本",

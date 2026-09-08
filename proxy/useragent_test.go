@@ -120,8 +120,8 @@ func TestCodexUserAgentConfigRawOverrideWithoutVersionDoesNotSynthesizeVersion(t
 	}
 }
 
-// raw UA 只贡献指纹形状:可解析的版本段出站前重建为当前生效版本(前缀与尾部标识组两处)。
-func TestCodexUserAgentConfigRawOverrideRebuildsVersionSegments(t *testing.T) {
+// 完整 UA 的前缀与尾部版本均保持原样，不受内置默认版本影响。
+func TestCodexUserAgentConfigRawOverridePreservesVersionSegments(t *testing.T) {
 	prev := CurrentRuntimeSettings()
 	t.Cleanup(func() { ApplyRuntimeSettings(prev) })
 	s := prev
@@ -136,24 +136,25 @@ func TestCodexUserAgentConfigRawOverrideRebuildsVersionSegments(t *testing.T) {
 	if !ok {
 		t.Fatal("codexUserAgentFromConfig() ok = false")
 	}
-	if version != latestCodexCLIVersion {
-		t.Fatalf("version = %q, want builtin %q", version, latestCodexCLIVersion)
+	if version != "0.100.0" {
+		t.Fatalf("version = %q, want explicit 0.100.0", version)
 	}
-	want := "codex-tui/" + latestCodexCLIVersion + " (Linux Unknown; x86_64) xterm-256color (codex-tui; " + latestCodexCLIVersion + ")"
+	want := "codex-tui/0.100.0 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.100.0)"
 	if userAgent != want {
-		t.Fatalf("User-Agent = %q, want both version segments rebuilt: %q", userAgent, want)
+		t.Fatalf("User-Agent = %q, want exact override: %q", userAgent, want)
 	}
 }
 
-// 远端同步到更高版本后,raw UA 的版本段跟随同步值。
-func TestCodexUserAgentConfigRawOverrideFollowsSyncedVersion(t *testing.T) {
+// 同步到更高版本后，手动指定的完整 UA 与配套 Version 头仍保留指定版本。
+func TestCodexUserAgentConfigRawOverrideIgnoresSyncedVersion(t *testing.T) {
 	prev := CurrentRuntimeSettings()
 	t.Cleanup(func() { ApplyRuntimeSettings(prev) })
 	s := prev
-	s.CodexSyncedCLIVersion = "0.200.0"
+	s.CodexSyncedCLIVersion = "0.153.4"
 	ApplyRuntimeSettings(s)
 
-	normalized, err := NormalizeCodexUserAgentConfigJSON(`{"raw_user_agent":"codex-tui/0.144.1 (Mac OS 15.5.0; arm64) xterm-256color (codex-tui; 0.144.1)"}`)
+	const wantUA = "codex-tui/0.147.0 (Mac OS 15.4.0; arm64) tmux/3.5a (codex-tui; 0.147.0)"
+	normalized, err := NormalizeCodexUserAgentConfigJSON(`{"raw_user_agent":"` + wantUA + `"}`)
 	if err != nil {
 		t.Fatalf("NormalizeCodexUserAgentConfigJSON() error = %v", err)
 	}
@@ -161,11 +162,11 @@ func TestCodexUserAgentConfigRawOverrideFollowsSyncedVersion(t *testing.T) {
 	if !ok {
 		t.Fatal("codexUserAgentFromConfig() ok = false")
 	}
-	if version != "0.200.0" {
-		t.Fatalf("version = %q, want synced 0.200.0", version)
+	if version != "0.147.0" {
+		t.Fatalf("version = %q, want explicit 0.147.0", version)
 	}
-	if !strings.Contains(userAgent, "codex-tui/0.200.0 ") || !strings.Contains(userAgent, "(codex-tui; 0.200.0)") {
-		t.Fatalf("User-Agent = %q, want synced version in both markers", userAgent)
+	if userAgent != wantUA {
+		t.Fatalf("User-Agent = %q, want exact override: %q", userAgent, wantUA)
 	}
 }
 
@@ -193,8 +194,8 @@ func TestCodexUserAgentConfigRawOverrideKeepsAheadPin(t *testing.T) {
 	}
 }
 
-// raw UA 分支同样叠加最低版本门槛(floor 高于生效版本时以 floor 为准)。
-func TestCodexUserAgentConfigRawOverrideAppliesVersionFloor(t *testing.T) {
+// 最低版本门槛用于生成 UA，不得改写管理员提供的完整覆盖值。
+func TestCodexUserAgentConfigRawOverrideIgnoresVersionFloor(t *testing.T) {
 	prev := CurrentRuntimeSettings()
 	t.Cleanup(func() { ApplyRuntimeSettings(prev) })
 	s := prev
@@ -205,12 +206,16 @@ func TestCodexUserAgentConfigRawOverrideAppliesVersionFloor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NormalizeCodexUserAgentConfigJSON() error = %v", err)
 	}
-	_, version, ok := codexUserAgentFromConfig(normalized, "0.160.0")
+	userAgent, version, ok := codexUserAgentFromConfig(normalized, "0.160.0")
 	if !ok {
 		t.Fatal("codexUserAgentFromConfig() ok = false")
 	}
-	if version != "0.160.0" {
-		t.Fatalf("version = %q, want floor 0.160.0", version)
+	if version != "0.100.0" {
+		t.Fatalf("version = %q, want explicit 0.100.0", version)
+	}
+	wantUA := "codex-tui/0.100.0 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.100.0)"
+	if userAgent != wantUA {
+		t.Fatalf("User-Agent = %q, want exact override: %q", userAgent, wantUA)
 	}
 }
 
