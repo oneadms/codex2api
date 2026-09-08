@@ -142,7 +142,7 @@ func ApplyCodexModelDiscoveryHeaders(headers http.Header, seed string) {
 	if seed == "" {
 		seed = "default"
 	}
-	headers.Set(codexInstallationIDHeader, deriveStableCodexUUID("codex2api:model-discovery-installation:v1:"+seed))
+	headers.Set(codexInstallationIDHeader, deriveStableCodexUUID("codex2api:model-discovery-installation:v2:"+seed))
 }
 
 func DefaultCodexUserAgentConfigJSON() string {

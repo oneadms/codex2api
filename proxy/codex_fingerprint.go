@@ -1,11 +1,15 @@
 package proxy
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,6 +28,12 @@ import (
 //   - X-Codex-Turn-Metadata 请求头里的 JSON（本项目按白名单原样透传，见
 //     codexAllowedForwardHeaders，客户端真实标识由此泄漏）
 //   - 请求体 client_metadata（Codex 官方路径同样原样透传）
+//
+// 除上述标识外，turn metadata 里两个「环境身份」字段同样做收敛而非透传：
+//   - agent_name：真实取值是带用户名的本地路径（抓包实证为 "/root"），一号多人时
+//     每个下游用户的原值都会直达上游（见 convergeCodexAgentName）
+//   - workspaces：路径键 / associated_remote_urls / latest_git_commit_hash
+//     （见 scrubCodexWorkspaces）
 //
 // 明确不改写的部分：
 //   - 出站 Session_id 头：由 resolveUpstreamSessionID 独立决定（默认隔离模式下每请求
@@ -55,14 +65,62 @@ type codexFingerprintIDs struct {
 	windowID       string
 }
 
+const (
+	// codexFingerprintSecretEnv 是每部署派生密钥的环境变量名。
+	codexFingerprintSecretEnv = "CODEX_FINGERPRINT_SECRET"
+	// agentNameSaltEnv 是本文件先引入的历史别名，保留以免既有部署的配置失效。
+	agentNameSaltEnv = "CODEX_AGENT_NAME_SALT"
+	// codexFingerprintSecretFallback 是未配置密钥时的兜底。它出现在公开源码里，因此
+	// **没有**抗枚举能力：映射可被任何拿到源码的人复现。生产环境必须显式配置。
+	codexFingerprintSecretFallback = "codex2api/fingerprint/v1"
+)
+
+var codexFingerprintSecretLogOnce sync.Once
+
+// codexFingerprintSecret 返回每部署的派生密钥。优先取专用环境变量，其次复用
+// ADMIN_SECRET（本就是每部署独有的秘密），最后回落到源码常量并告警一次。
+//
+// 不缓存：热改环境变量（测试、容器重载）应立即生效。
+//
+// 取值做 TrimSpace 后再判空：`.env` 里写成 `CODEX_FINGERPRINT_SECRET=` 或只有空格
+// 时会被当成「未配置」而静默回落，这比格式错更难查——首次调用时按来源+长度打一行
+// 日志，让「密钥到底有没有生效」可被直接确认（只记来源与长度，绝不记密钥本身）。
+func codexFingerprintSecret() []byte {
+	for _, name := range []string{codexFingerprintSecretEnv, agentNameSaltEnv, "ADMIN_SECRET"} {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			codexFingerprintSecretLogOnce.Do(func() {
+				log.Printf("[CodexFingerprint] 派生密钥来源=%s 长度=%d 字节", name, len(value))
+			})
+			return []byte(value)
+		}
+	}
+	codexFingerprintSecretLogOnce.Do(func() {
+		log.Printf("[CodexFingerprint] 未配置 %s：回落到源码常量，派生标识可被公开复现（建议设置每部署密钥）", codexFingerprintSecretEnv)
+	})
+	return []byte(codexFingerprintSecretFallback)
+}
+
+// codexKeyedSum 用每部署密钥派生摘要。
+//
+// 为什么不能裸 sha256(seed)：种子里只有自增的 accountID，输入空间小到可以穷举——
+// 拿到公开源码就能枚举 f(1)、f(2)… 建出全部合法输出，再对观测值做成员判定，命中的
+// 请求即被确认「由本代理生成」（每请求都出站的 installation_id 尤其致命）。加每部署
+// 密钥后，输出集合在不掌握密钥的前提下无法计算，而同一部署内仍然确定、跨重启不变。
+// 用 HMAC 而非 sha256(secret||seed) 是为了避开长度扩展。
+func codexKeyedSum(seed string) []byte {
+	mac := hmac.New(sha256.New, codexFingerprintSecret())
+	_, _ = mac.Write([]byte(seed))
+	return mac.Sum(nil)
+}
+
 // deriveStableCodexUUID 从种子确定性派生一个 UUIDv4 格式的字符串：同一种子恒定返回
-// 同一值，跨进程重启也不变，因此无需落库。
+// 同一值，跨进程重启也不变，因此无需落库。摘要由每部署密钥派生，见 codexKeyedSum。
 //
 // 仅用于 installation_id：抓包实证真实客户端的 installation 标识是 v4，session/thread/
 // window 则是 v7（见 deriveStableCodexUUIDv7）。这里没有复用 uuid.NewSHA1（本仓库其它
 // 确定性 ID 的做法），因为那会产出 v5 UUID，版本位与真实 v4 不同，本身可被识别。
 func deriveStableCodexUUID(seed string) string {
-	sum := sha256.Sum256([]byte(seed))
+	sum := codexKeyedSum(seed)
 	var u uuid.UUID
 	copy(u[:], sum[:16])
 	u[6] = (u[6] & 0x0f) | 0x40 // version 4
@@ -80,7 +138,7 @@ func deriveStableCodexUUID(seed string) string {
 // 伪随机的"时间戳位"落到与真实会话完全无关的位置、跳到序列顶部或底部（见 #536 评论）。
 // installation_id 真实是 v4，仍走 deriveStableCodexUUID。
 func deriveStableCodexUUIDv7(seed string, unixMilli int64) string {
-	sum := sha256.Sum256([]byte(seed))
+	sum := codexKeyedSum(seed)
 	var u uuid.UUID
 	copy(u[:], sum[:16])
 	ms := uint64(unixMilli)
@@ -115,7 +173,7 @@ func codexIdentityUnixMilli(account *auth.Account, seed string) int64 {
 	if base <= 0 {
 		base = codexIdentityFallbackEpochMilli
 	}
-	sum := sha256.Sum256([]byte("codex2api:codex-identity-ts:v1:" + seed))
+	sum := codexKeyedSum("codex2api:codex-identity-ts:v2:" + seed)
 	offset := int64(binary.BigEndian.Uint64(sum[:8]) % uint64(codexIdentitySpreadMilli))
 	return base + offset
 }
@@ -153,7 +211,7 @@ func NewUpstreamSessionUUID() string {
 // seededIdentityUnixMilli 是 codexIdentityUnixMilli 的无账号版本：拿不到账号加入
 // 时间时以固定基准代替，其余散布逻辑一致。
 func seededIdentityUnixMilli(seed string) int64 {
-	sum := sha256.Sum256([]byte("codex2api:session-identity-ts:v1:" + seed))
+	sum := codexKeyedSum("codex2api:session-identity-ts:v2:" + seed)
 	offset := int64(binary.BigEndian.Uint64(sum[:8]) % uint64(codexIdentitySpreadMilli))
 	return codexIdentityFallbackEpochMilli + offset
 }
@@ -188,7 +246,7 @@ func resolveCodexFingerprintIDs(account *auth.Account, downstreamHeaders http.He
 		return ids
 	}
 
-	sessionSeed := fmt.Sprintf("codex2api:codex-session-id:v1:%d", accountID)
+	sessionSeed := fmt.Sprintf("codex2api:codex-session-id:v2:%d", accountID)
 	ids.sessionID = deriveStableCodexUUIDv7(sessionSeed, codexIdentityUnixMilli(account, sessionSeed))
 	ids.threadID = ids.sessionID
 	if mode == auth.CodexFingerprintModeSession {
@@ -199,11 +257,11 @@ func resolveCodexFingerprintIDs(account *auth.Account, downstreamHeaders http.He
 			// 子代理 / 多窗口：真实 thread 与 session 不同。仍按会话派生会把
 			// 多条线程收成一条，X-Client-Request-Id（实测恒等于 thread-id）
 			// 跟着塌缩后，上游按线程查找 previous_response_id 就会 400（#541）。
-			threadSeed = fmt.Sprintf("codex2api:codex-thread-id:v2:%d:%s", accountID, clientThreadID)
+			threadSeed = fmt.Sprintf("codex2api:codex-thread-id:v3:%d:%s", accountID, clientThreadID)
 		case clientSessionID != "":
-			threadSeed = fmt.Sprintf("codex2api:codex-thread-id:v1:%d:%s", accountID, clientSessionID)
+			threadSeed = fmt.Sprintf("codex2api:codex-thread-id:v2:%d:%s", accountID, clientSessionID)
 		case clientThreadID != "":
-			threadSeed = fmt.Sprintf("codex2api:codex-thread-id:v1:%d:%s", accountID, clientThreadID)
+			threadSeed = fmt.Sprintf("codex2api:codex-thread-id:v2:%d:%s", accountID, clientThreadID)
 		}
 		if threadSeed != "" {
 			ids.threadID = deriveStableCodexUUIDv7(threadSeed, codexIdentityUnixMilli(account, threadSeed))
@@ -225,7 +283,7 @@ func resolveConvergedInstallationID(account *auth.Account, accountID int64) stri
 			}
 		}
 	}
-	return deriveStableCodexUUID(fmt.Sprintf("codex2api:codex-install-id:v1:%d", accountID))
+	return deriveStableCodexUUID(fmt.Sprintf("codex2api:codex-install-id:v2:%d", accountID))
 }
 
 // extractClientCodexSessionID 取下游客户端的原始会话标识。
@@ -431,6 +489,10 @@ func rewriteCodexTurnMetadataJSON(raw string, ids *codexFingerprintIDs) (string,
 			changed = true
 		}
 	}
+	if converged, ok := convergeCodexAgentNameField(raw, ids.accountID); ok {
+		raw = converged
+		changed = true
+	}
 	if scrubbed, ok := scrubCodexWorkspaces(raw, ids.accountID); ok {
 		raw = scrubbed
 		changed = true
@@ -497,6 +559,85 @@ func convergeCodexLineageMetadata(raw string, accountID int64) (string, bool) {
 func convergeCodexLineageValue(accountID int64, key, original string) string {
 	seed := fmt.Sprintf("codex2api:codex-lineage:v1:%s:%d:%s", key, accountID, original)
 	return deriveStableCodexUUIDv7(seed, seededIdentityUnixMilli(seed))
+}
+
+// codexAgentNamePath 是 turn metadata 里的 agent 名称字段。抓包实证真实取值形如
+// "/root"——是带用户名的本地路径，不是纯标识符，因此和 workspaces 一样按身份处理。
+const codexAgentNamePath = "agent_name"
+
+// agentNamePlaceholderNames 是收敛 agent_name 时使用的用户名池。
+//
+// 两条约束：
+//  1. 产出必须落在**真实用户名分布**里。词池取常见真人名与常见通用名（alex、sam、
+//     dev、admin 这类），而不是 "forge"/"craft" 之类几乎没人当用户名的词——后者本身
+//     就是异常取值。
+//  2. 不得带部署内恒定的合成标记。像 "agent-<hex>" 这种形状能被一条正则直接识别。
+//     名字池小并不等于可识别：只要池子是真实分布的高频子集，观测到 "sam" 就无法
+//     反推「这是代理造的」。
+var agentNamePlaceholderNames = []string{
+	"alex", "sam", "chris", "jordan", "taylor", "morgan", "casey", "riley", "jamie", "robin",
+	"dana", "kim", "lee", "max", "nick", "ryan", "sean", "tom", "will", "owen",
+	"dev", "admin", "user", "work", "home", "main", "local", "mac", "studio", "design",
+	"media", "photo", "video", "music", "games", "coding", "projects", "ops", "lab", "test",
+}
+
+// convergeCodexAgentNameField 仅在字段存在且为非空字符串时收敛 agent_name，
+// 未携带该字段的请求不会被补上（形状不变），非字符串取值原样保留。
+func convergeCodexAgentNameField(raw string, accountID int64) (string, bool) {
+	existing := gjson.Get(raw, codexAgentNamePath)
+	if existing.Type != gjson.String || existing.String() == "" {
+		return raw, false
+	}
+	converged := convergeCodexAgentName(accountID, existing.String())
+	if converged == existing.String() {
+		return raw, false
+	}
+	updated, err := sjson.Set(raw, codexAgentNamePath, converged)
+	if err != nil {
+		return raw, false
+	}
+	return updated, true
+}
+
+// convergeCodexAgentName 把 agent_name 收敛成账号级恒定值。
+//
+// 与 workspaces 的「按原值派生、保留互异性」不同，这里刻意**不**把原值作为种子：
+// agent_name 标识的是「哪台机器上的哪个用户」，一号多人时每个下游用户会带出各自的
+// 路径。若按原值派生，N 个用户仍是 N 个不同取值，泄漏照旧；收敛成单值才能让上游
+// 看到的 agent 数收敛到单人形态。
+//
+// 形状按原值分档，产出与真实家目录同形：/Users/<name>、/home/<name>、/<name>、
+// <name>；/root 原样保留——它是最常见的真实取值，改写它反而制造出差异。取值只依赖
+// 账号与部署密钥，二次处理必然得到同一结果，幂等性天然成立，无需像 workspace 路径
+// 那样额外判别占位符。不同账号可能撞名，这与两个真人同名无异，不携带身份。
+//
+// 种子串只作为 HMAC 的输入，绝不进入出站载荷；出站看到的仅是下面的派生值。
+func convergeCodexAgentName(accountID int64, original string) string {
+	original = strings.TrimSpace(original)
+	if original == "" || accountID <= 0 {
+		return original
+	}
+	sum := codexKeyedSum(fmt.Sprintf("agent-name:v3:%d", accountID))
+
+	name := agentNamePlaceholderNames[int(binary.BigEndian.Uint16(sum[:2]))%len(agentNamePlaceholderNames)]
+	// 真实用户名里只有约三分之一带数字后缀，且以 1–2 位为主；恒定带 3 位数字的
+	// 「单词+数字」组合本身就是低频形态。
+	if sum[2]%3 == 0 {
+		name += fmt.Sprintf("%d", 1+int(binary.BigEndian.Uint16(sum[3:5]))%99)
+	}
+
+	switch {
+	case original == "/root" || strings.HasPrefix(original, "/root/"):
+		return "/root"
+	case strings.HasPrefix(original, "/Users/"):
+		return "/Users/" + name
+	case strings.HasPrefix(original, "/home/"):
+		return "/home/" + name
+	case strings.HasPrefix(original, "/"):
+		return "/" + name
+	default:
+		return name
+	}
 }
 
 // scrubCodexWorkspaces 抹掉 turn metadata 里的工作区身份。
@@ -573,14 +714,14 @@ func scrubCodexWorkspaces(raw string, accountID int64) (string, bool) {
 // 不同路径互不相同，且不携带用户名或项目名。返回值不含 sjson 的路径元字符
 // （. * ?），可直接作为 sjson 路径使用。
 func placeholderWorkspacePath(accountID int64, original string) string {
-	sum := sha256.Sum256(fmt.Appendf(nil, "codex2api:workspace-path:v2:%d:%s", accountID, original))
+	sum := codexKeyedSum(fmt.Sprintf("codex2api:workspace-path:v3:%d:%s", accountID, original))
 	return workspacePlaceholderPrefix + fmt.Sprintf("%x", sum[:workspacePlaceholderDigestBytes])
 }
 
 // placeholderCommitHash 派生一个与真实 commit hash 等长（40 位十六进制）的占位值，
 // 保持字段形状不变。种子取占位路径而非原哈希，见调用点说明。
 func placeholderCommitHash(accountID int64, placeholderPath string) string {
-	sum := sha256.Sum256(fmt.Appendf(nil, "codex2api:workspace-commit:v1:%d:%s", accountID, placeholderPath))
+	sum := codexKeyedSum(fmt.Sprintf("codex2api:workspace-commit:v2:%d:%s", accountID, placeholderPath))
 	return fmt.Sprintf("%x", sum[:20])
 }
 

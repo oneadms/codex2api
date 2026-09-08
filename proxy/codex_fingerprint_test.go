@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -770,6 +771,164 @@ func TestScrubCodexWorkspacesRemovesWorkspaceIdentity(t *testing.T) {
 	}
 }
 
+// TestConvergeCodexAgentNameCollapsesDownstreamUsers 验证 agent_name 收敛。真实取值
+// 是带用户名的本地路径（抓包实证 "/root"）：一号多人时，若按原值派生占位符，N 个
+// 下游用户仍是 N 个互异取值，泄漏照旧；必须折叠成账号级单值。
+func TestConvergeCodexAgentNameCollapsesDownstreamUsers(t *testing.T) {
+	alice, changed := convergeCodexAgentNameField(`{"agent_name":"/Users/alice","session_id":"s"}`, 42)
+	if !changed {
+		t.Fatal("agent_name was not converged")
+	}
+	bob, changed := convergeCodexAgentNameField(`{"agent_name":"/Users/bob/work","session_id":"s"}`, 42)
+	if !changed {
+		t.Fatal("second downstream user's agent_name was not converged")
+	}
+
+	aliceName := gjson.Get(alice, codexAgentNamePath).String()
+	bobName := gjson.Get(bob, codexAgentNamePath).String()
+	if aliceName == "" || aliceName != bobName {
+		t.Fatalf("agent_name = %q vs %q, want both collapsed to one account-level value", aliceName, bobName)
+	}
+	for _, leaked := range []string{"alice", "bob"} {
+		if strings.Contains(alice+bob, leaked) {
+			t.Fatalf("original user name %q survived: %q / %q", leaked, alice, bob)
+		}
+	}
+	// 形状保持：原值以 "/" 开头，产出也以 "/" 开头且落在同名家目录下；非路径取值
+	// 不带前导斜杠。
+	if !strings.HasPrefix(aliceName, "/Users/") {
+		t.Fatalf("agent_name = %q, want a /Users/<name> shaped value", aliceName)
+	}
+	if name := convergeCodexAgentName(42, "reviewer"); strings.HasPrefix(name, "/") {
+		t.Fatalf("convergeCodexAgentName(%q) = %q, want no leading slash", "reviewer", name)
+	}
+	if name := convergeCodexAgentName(42, "/home/bob"); !strings.HasPrefix(name, "/home/") {
+		t.Fatalf("convergeCodexAgentName(%q) = %q, want the /home/<name> shape", "/home/bob", name)
+	}
+	// /root 是最常见的真实取值，原样保留——改写它反而制造出差异。
+	if got := convergeCodexAgentName(42, "/root"); got != "/root" {
+		t.Fatalf("convergeCodexAgentName(/root) = %q, want it preserved", got)
+	}
+
+	// 产出不得带部署内恒定的合成标记：任何固定形状（如 "agent-<hex>"、产品名）都
+	// 能被一条正则识别出「这是代理造的」，等于给整条链路盖戳。
+	for _, value := range []string{aliceName, bobName, convergeCodexAgentName(42, "/root")} {
+		if strings.Contains(value, "codex2api") || strings.Contains(value, "agent-") {
+			t.Fatalf("agent_name = %q, want a value indistinguishable from a real client value", value)
+		}
+	}
+
+	// 同一账号恒定：不同下游用户、不同调用次数都必须收敛到同一取值。
+	if again := convergeCodexAgentName(42, "/Users/alice"); again != aliceName {
+		t.Fatalf("convergeCodexAgentName is not deterministic: %q vs %q", again, aliceName)
+	}
+
+	// 幂等：重试链路可能把改写过的载荷再送进来一次。
+	if again, changedAgain := convergeCodexAgentNameField(alice, 42); changedAgain || again != alice {
+		t.Fatalf("second pass changed the payload again: %q -> %q", alice, again)
+	}
+
+	// 缺失 / 非字符串取值都不改写，形状不变。
+	if got, changed := convergeCodexAgentNameField(`{"session_id":"s"}`, 42); changed || got != `{"session_id":"s"}` {
+		t.Fatalf("metadata without agent_name was modified: %q (changed=%t)", got, changed)
+	}
+	if got, changed := convergeCodexAgentNameField(`{"agent_name":123}`, 42); changed || got != `{"agent_name":123}` {
+		t.Fatalf("non-string agent_name was modified: %q (changed=%t)", got, changed)
+	}
+	// 相邻字段原样保留。
+	if value := gjson.Get(alice, "session_id").String(); value != "s" {
+		t.Fatalf("session_id = %q, want it preserved", value)
+	}
+}
+
+// TestCodexDerivedIdentifiersAreDeploymentKeyed 验证所有派生标识都受每部署密钥保护。
+//
+// 种子里只有自增的 accountID：若用裸 sha256，任何拿到公开源码的人都能枚举 f(1)、
+// f(2)… 建出全部合法输出的集合，再对观测值做成员判定——命中的请求即被确认「由本
+// 代理生成」，每请求都出站的 installation_id 尤其致命。换成 HMAC 后，集合在不知道
+// 密钥的前提下算不出来，而同一部署内仍然确定（跨重启不变）。
+func TestCodexDerivedIdentifiersAreDeploymentKeyed(t *testing.T) {
+	account := fingerprintAccount(t, auth.CodexFingerprintModeSession)
+	downstream := codexClientHeaders(
+		`{"installation_id":"client-install","session_id":"client-session","thread_id":"client-session","window_id":"client-session:0","agent_name":"/Users/alice"}`,
+		"client-session",
+	)
+
+	snapshot := func() []string {
+		t.Helper()
+		ids := resolveCodexFingerprintIDs(account, downstream)
+		if ids == nil {
+			t.Fatal("resolveCodexFingerprintIDs returned nil")
+		}
+		body := ApplyCodexFingerprintToBody(
+			[]byte(`{"client_metadata":{"x-codex-installation-id":"client-install","session_id":"client-session","thread_id":"client-session","x-codex-window-id":"client-session:0"}}`),
+			account, downstream,
+		)
+		return []string{
+			ids.installationID,
+			ids.sessionID,
+			ids.threadID,
+			ids.windowID,
+			gjson.GetBytes(body, "client_metadata.x-codex-installation-id").String(),
+			gjson.GetBytes(body, "client_metadata.session_id").String(),
+			convergeCodexAgentName(account.ID(), "/Users/alice"),
+			placeholderWorkspacePath(account.ID(), "/Users/alice/proj"),
+			placeholderCommitHash(account.ID(), "/workspace/placeholder"),
+		}
+	}
+
+	t.Setenv(codexFingerprintSecretEnv, "deployment-a")
+	first := snapshot()
+	if second := snapshot(); !slices.Equal(first, second) {
+		t.Fatalf("same deployment key produced different identifiers:\n%v\n%v", first, second)
+	}
+
+	t.Setenv(codexFingerprintSecretEnv, "deployment-b")
+	second := snapshot()
+	for i := range first {
+		if first[i] == second[i] {
+			t.Fatalf("identifier[%d] = %q unchanged across deployment keys", i, first[i])
+		}
+	}
+}
+
+// TestConvergeCodexAgentNameUsesDeploymentKey 验证 agent_name 的映射同样受密钥保护：
+// 同一部署内确定，跨部署不可复现。
+func TestConvergeCodexAgentNameUsesDeploymentKey(t *testing.T) {
+	t.Setenv(codexFingerprintSecretEnv, "deployment-a")
+	first := convergeCodexAgentName(42, "/Users/alice")
+	if again := convergeCodexAgentName(42, "/Users/alice"); again != first {
+		t.Fatalf("same deployment produced %q then %q, want it deterministic", first, again)
+	}
+
+	t.Setenv(codexFingerprintSecretEnv, "deployment-b")
+	if second := convergeCodexAgentName(42, "/Users/alice"); second == first {
+		t.Fatalf("different deployment keys produced the same value %q", second)
+	}
+}
+
+// TestApplyCodexFingerprintHeadersConvergesAgentName 走请求头改写点，并覆盖 device 档：
+// agent_name 与 installation_id 同属设备/用户身份，device 档也必须收敛。
+func TestApplyCodexFingerprintHeadersConvergesAgentName(t *testing.T) {
+	const raw = `{"installation_id":"client-install","session_id":"client-session","thread_id":"client-thread","agent_name":"/Users/alice/code","sandbox":"none"}`
+	outbound := http.Header{}
+	outbound.Set("X-Codex-Turn-Metadata", raw)
+
+	ApplyCodexFingerprintHeaders(outbound, fingerprintAccount(t, auth.CodexFingerprintModeDevice), codexClientHeaders(raw, "client-session"))
+
+	got := outbound.Get("X-Codex-Turn-Metadata")
+	if strings.Contains(got, "alice") {
+		t.Fatalf("agent_name user name survived in %q", got)
+	}
+	if name := gjson.Get(got, codexAgentNamePath).String(); name == "" || name == "/Users/alice/code" {
+		t.Fatalf("agent_name = %q, want a converged placeholder", name)
+	}
+	// 非身份字段照旧保留。
+	if value := gjson.Get(got, "sandbox").String(); value != "none" {
+		t.Fatalf("sandbox = %q, want it preserved", value)
+	}
+}
+
 // TestCodexFingerprintLeavesNoOriginalIdentifierOutbound 是 issue #536 要求的一致性
 // 回归：用真实抓包的请求形态跑完整条改写链，断言出站头里不再残留任何一个原始标识。
 // 将来协议新增身份字段导致遗漏时，这条会先失败。
@@ -783,7 +942,7 @@ func TestCodexFingerprintLeavesNoOriginalIdentifierOutbound(t *testing.T) {
 	)
 	rawMetadata := `{"installation_id":"` + clientInstallUUID + `","session_id":"` + clientSessionUUID +
 		`","thread_id":"` + clientSessionUUID + `","turn_id":"01a00e76-15fb-7940-91a0-e201c45f502a","window_id":"` +
-		clientSessionUUID + `:0","request_kind":"turn","sandbox":"none","workspaces":{"` + workspacePath +
+		clientSessionUUID + `:0","request_kind":"turn","sandbox":"none","agent_name":"/Users/mallory/private","workspaces":{"` + workspacePath +
 		`":{"associated_remote_urls":{"origin":"` + remoteURL + `"},"latest_git_commit_hash":"` + commitHash + `"}},"turn_started_at_unix_ms":1786949015072}`
 
 	// 复刻真实 CLI 的下游头集合。
@@ -816,7 +975,7 @@ func TestCodexFingerprintLeavesNoOriginalIdentifierOutbound(t *testing.T) {
 	outboundDump.Write(body)
 
 	// turn_id 不在此列：它是逐轮随机值，不标识设备或会话，重写只会引入不一致。
-	for _, leaked := range []string{clientSessionUUID, clientInstallUUID, workspacePath, remoteURL, "james-6-23", commitHash} {
+	for _, leaked := range []string{clientSessionUUID, clientInstallUUID, workspacePath, remoteURL, "james-6-23", commitHash, "mallory"} {
 		if strings.Contains(outboundDump.String(), leaked) {
 			t.Fatalf("original identifier %q survived into the outbound request:\n%s", leaked, outboundDump.String())
 		}
