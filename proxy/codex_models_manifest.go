@@ -52,8 +52,14 @@ func (h *Handler) CodexModelsManifestHandler(c *gin.Context) {
 		ifNoneMatch = ""
 	}
 
+	manifestCtx := c.Request.Context()
+	if IsResinEnabled() && ResinPlatformFromContext(manifestCtx) == "" {
+		// 客户端清单查询沿用 Responses 的会话平台规则；后台刷新使用默认平台。
+		identity := resolveRequestSessionIdentity(c.Request.Header, nil)
+		manifestCtx = WithResinPlatform(manifestCtx, resinPlatformForSessionIdentity(identity, requestAPIKeyID(c)))
+	}
 	manifest, err := FetchCodexModelsManifest(
-		c.Request.Context(),
+		manifestCtx,
 		account,
 		h.store.ResolveProxyForAccount(account),
 		c.Query("client_version"),
@@ -475,10 +481,11 @@ func fetchCodexModelsManifestWithURL(ctx context.Context, account *auth.Account,
 		clientVersion = effectiveLatestCodexCLIVersion()
 	}
 	requestURL := endpoint + "?client_version=" + url.QueryEscape(clientVersion)
+	finalURL, client, viaResin := resinMaintenanceTargetForPlatform(account, requestURL, ResinPlatformFromContext(ctx))
 
 	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, requestURL, nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, finalURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build codex models request: %w", err)
 	}
@@ -497,10 +504,12 @@ func fetchCodexModelsManifestWithURL(ctx context.Context, account *auth.Account,
 		req.Header.Set("chatgpt-account-id", accountID)
 	}
 
-	// 复用网关同款 transport（支持 uTLS Chrome 指纹），与 /responses、wham 一致。
-	// 池化而非每次新建：Codex 客户端会周期性拉取清单，一次性 uTLS transport
-	// 会把连接与 goroutine 持续泄漏到进程结束（issue #446）。
-	client := getCodexMaintenanceClient(account, proxyURL)
+	if viaResin {
+		req.Header.Set("X-Resin-Account", ResinAccountID(account))
+	} else {
+		// 未启用 Resin 时沿用账号代理和池化 transport，避免泄漏 uTLS 连接。
+		client = getCodexMaintenanceClient(account, proxyURL)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {

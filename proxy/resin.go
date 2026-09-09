@@ -182,10 +182,16 @@ func defaultResinPlatform(cfg *ResinConfig) string {
 // X-Resin-Account；未启用时返回原 URL 与 nil 客户端，由调用方按既有直连
 // transport 兜底。
 func resinMaintenanceTarget(account *auth.Account, targetURL string) (finalURL string, client *http.Client, viaResin bool) {
+	return resinMaintenanceTargetForPlatform(account, targetURL, "")
+}
+
+// resinMaintenanceTargetForPlatform 让带会话的清单、搜索请求复用推理请求的
+// Resin 平台；后台维护没有会话时传空值，沿用默认平台。
+func resinMaintenanceTargetForPlatform(account *auth.Account, targetURL, platformName string) (finalURL string, client *http.Client, viaResin bool) {
 	if !IsResinEnabled() || account == nil {
 		return targetURL, nil, false
 	}
-	return BuildReverseProxyURL(targetURL), getResinHTTPClient(account), true
+	return BuildReverseProxyURLForPlatform(targetURL, platformName), getResinHTTPClient(account), true
 }
 
 // ==================== 反向代理 URL 构建 ====================

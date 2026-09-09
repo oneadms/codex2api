@@ -67,8 +67,9 @@ func (h *Handler) CodexAlphaSearchHandler(c *gin.Context) {
 	}
 
 	apiKeyID := requestAPIKeyID(c)
+	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
 	// 搜索端点只存在于 ChatGPT 后端，relay/Grok 账号无从代答。
-	searchFilter := applyAffinityGroupRouting(c, resolveRequestSessionIdentity(c.Request.Header, rawBody), func(a *auth.Account) bool {
+	searchFilter := applyAffinityGroupRouting(c, sessionIdentity, func(a *auth.Account) bool {
 		return !a.IsRelayStyle()
 	})
 	account := h.store.NextExcludingWithFilter(apiKeyID, nil, searchFilter)
@@ -79,8 +80,13 @@ func (h *Handler) CodexAlphaSearchHandler(c *gin.Context) {
 	defer h.store.Release(account)
 
 	apiKey := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
+	upstreamCtx := c.Request.Context()
+	if IsResinEnabled() && ResinPlatformFromContext(upstreamCtx) == "" {
+		// 与 Responses 一样按会话和 API Key 隔离平台，避免同一会话的搜索切换出口。
+		upstreamCtx = WithResinPlatform(upstreamCtx, resinPlatformForSessionIdentity(sessionIdentity, apiKeyID))
+	}
 	resp, err := ForwardCodexAlphaSearch(
-		c.Request.Context(),
+		upstreamCtx,
 		account,
 		h.store.ResolveProxyForAccount(account),
 		rawBody,
@@ -124,6 +130,12 @@ func ForwardCodexAlphaSearch(ctx context.Context, account *auth.Account, proxyUR
 		return nil, fmt.Errorf("account has no access token")
 	}
 
+	// prompt_cache_key 参与平台选择，需在剥离上游不支持的字段前读取。
+	resinPlatform := ""
+	if IsResinEnabled() {
+		resinPlatform = resinPlatformForExecutor(ctx, "", downstreamHeaders, rawBody, apiKey)
+	}
+
 	// 剥离搜索端点不支持的字段（如客户端塞进来的 prompt_cache_key），否则上游 400（issue #433）。
 	rawBody = sanitizeCodexAlphaSearchBody(rawBody)
 
@@ -131,11 +143,12 @@ func ForwardCodexAlphaSearch(ctx context.Context, account *auth.Account, proxyUR
 	if codexAlphaSearchURLForTest != "" {
 		endpoint = codexAlphaSearchURLForTest
 	}
+	finalURL, client, viaResin := resinMaintenanceTargetForPlatform(account, endpoint, resinPlatform)
 
 	// standalone 搜索是模型驱动的检索回合，上游耗时可达数十秒。
 	reqCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, strings.NewReader(string(rawBody)))
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, finalURL, strings.NewReader(string(rawBody)))
 	if err != nil {
 		return nil, fmt.Errorf("build codex search request: %w", err)
 	}
@@ -156,9 +169,12 @@ func ForwardCodexAlphaSearch(ctx context.Context, account *auth.Account, proxyUR
 		req.Header.Set("chatgpt-account-id", accountID)
 	}
 
-	// 复用网关同款 transport（支持 uTLS Chrome 指纹），与 /responses、清单透传一致。
-	// 池化而非每次新建，避免一次性 uTLS transport 泄漏连接（issue #446）。
-	client := getCodexMaintenanceClient(account, proxyURL)
+	if viaResin {
+		req.Header.Set("X-Resin-Account", ResinAccountID(account))
+	} else {
+		// 未启用 Resin 时沿用账号代理和池化 transport，避免泄漏 uTLS 连接。
+		client = getCodexMaintenanceClient(account, proxyURL)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("codex search request: %w", err)
