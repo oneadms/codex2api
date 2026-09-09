@@ -358,6 +358,18 @@ func whamHTTPClient(req *http.Request, account *auth.Account, resinClient *http.
 	return getCodexMaintenanceClient(account, proxyURL)
 }
 
+// whamUserAgent 复用 Responses 的出站 UA 解析，后台配置热更新后立即生效。
+// 后台探针没有下游请求头；账号自定义 UA 与 Responses 一样保留最终优先级。
+func whamUserAgent(account *auth.Account) string {
+	userAgent, _ := ResolveCodexOutboundClientHeaders(account, "", nil, nil)
+	for name, value := range account.GetCustomHeaders() {
+		if strings.EqualFold(strings.TrimSpace(name), "User-Agent") {
+			return value
+		}
+	}
+	return userAgent
+}
+
 func queryWhamUsageWithURL(ctx context.Context, account *auth.Account, proxyURL, url string) (*WhamUsage, *http.Response, error) {
 	if account == nil {
 		return nil, nil, fmt.Errorf("account is nil")
@@ -374,7 +386,7 @@ func queryWhamUsageWithURL(ctx context.Context, account *auth.Account, proxyURL,
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", MinimalCodexCLIUserAgentForHeaders())
+	req.Header.Set("User-Agent", whamUserAgent(account))
 	req.Header.Set("Originator", Originator)
 	// 用 EffectiveAccountID:自定义头覆盖了工作区 ID 时,额度必须查覆盖后的空间,
 	// 否则进度条/自动暂停/智能配速统计的是与实际流量不同的空间。
@@ -488,7 +500,7 @@ func queryWhamResetCreditsWithURL(ctx context.Context, account *auth.Account, pr
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", MinimalCodexCLIUserAgentForHeaders())
+	req.Header.Set("User-Agent", whamUserAgent(account))
 	req.Header.Set("Originator", Originator)
 	// 与 wham 查询一致,重置券按自定义头覆盖后的空间查询。
 	if accountID := account.EffectiveAccountID(); accountID != "" {
@@ -575,7 +587,7 @@ func consumeResetCreditWithURL(ctx context.Context, account *auth.Account, proxy
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", MinimalCodexCLIUserAgentForHeaders())
+	req.Header.Set("User-Agent", whamUserAgent(account))
 	req.Header.Set("Originator", Originator)
 	// 与 wham 查询一致,重置额度也作用于自定义头覆盖后的空间。
 	if accountID := account.EffectiveAccountID(); accountID != "" {
