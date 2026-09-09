@@ -7387,6 +7387,10 @@ func (h *Handler) syncSingleAccountPlanOnReset(ctx context.Context, acc *auth.Ac
 	if h == nil || h.store == nil || acc == nil || acc.IsRelayStyle() || acc.GetAccessToken() == "" {
 		return nil
 	}
+	ctx, routeErr := h.prepareCodexConnectionTestContext(ctx, acc)
+	if routeErr != nil {
+		return routeErr
+	}
 	model, err := h.connectionTestModelForAccount(ctx, acc, "")
 	if err != nil {
 		return err
@@ -10537,6 +10541,24 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "读取现有设置失败："+settingsErr.Error())
 		return
 	}
+	resinUpdateRequested := req.ResinURL != nil || req.ResinPlatformName != nil
+	if resinUpdateRequested {
+		candidate := &proxy.ResinConfig{}
+		if existingSettings != nil {
+			candidate.BaseURL = existingSettings.ResinURL
+			candidate.PlatformName = existingSettings.ResinPlatformName
+		}
+		if req.ResinURL != nil {
+			candidate.BaseURL = *req.ResinURL
+		}
+		if req.ResinPlatformName != nil {
+			candidate.PlatformName = *req.ResinPlatformName
+		}
+		if err := proxy.ValidateResinConfig(candidate); err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	if existingSettings != nil {
 		currentAdminSecret = existingSettings.AdminSecret
 		siteName = database.NormalizeSiteName(existingSettings.SiteName)
@@ -11542,22 +11564,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		resinPlatformName = *req.ResinPlatformName
 		log.Printf("设置已更新: resin_platform_name")
 	}
-	if req.ResinURL != nil || req.ResinPlatformName != nil {
-		proxy.SetResinConfig(&proxy.ResinConfig{
-			BaseURL:      resinURL,
-			PlatformName: resinPlatformName,
-		})
-		// Use the normalized runtime state rather than raw field non-emptiness:
-		// a value such as ", ," contains text but has no usable platform and must
-		// leave OAuth refreshes on the direct path just like the inference path.
-		if proxy.IsResinEnabled() {
-			auth.ResinRequestDecorator = func(targetURL, accountID string) string {
-				return proxy.BuildReverseProxyURL(targetURL)
-			}
-		} else {
-			auth.ResinRequestDecorator = nil
-		}
-	}
 
 	// 图片存储后端配置
 	imgCfg := imagestore.CurrentConfig()
@@ -11739,6 +11745,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	})
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
+		if resinUpdateRequested {
+			writeError(c, http.StatusInternalServerError, "保存 Resin 配置失败，设置未生效")
+			return
+		}
 		if req.SessionSlotBufferEnabled != nil || req.SessionSlotBufferSeconds != nil {
 			writeError(c, http.StatusInternalServerError, "保存会话并发槽缓冲设置失败，设置未生效")
 			return
@@ -11774,6 +11784,17 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			return
 		}
 	} else {
+		if resinUpdateRequested {
+			// 数据库保存成功后再发布，页面和测试连接读取同一份有效配置。
+			proxy.SetResinConfig(&proxy.ResinConfig{BaseURL: resinURL, PlatformName: resinPlatformName})
+			if proxy.IsResinEnabled() {
+				auth.ResinRequestDecorator = func(targetURL, accountID string) string {
+					return proxy.BuildReverseProxyURL(targetURL)
+				}
+			} else {
+				auth.ResinRequestDecorator = nil
+			}
+		}
 		if req.SessionSlotBufferSeconds != nil {
 			h.store.SetSessionSlotBuffer(time.Duration(sessionSlotBufferSeconds) * time.Second)
 			log.Printf("设置已更新: session_slot_buffer_seconds = %d", sessionSlotBufferSeconds)

@@ -66,9 +66,7 @@ func RefreshAccessToken(ctx context.Context, refreshToken string, proxyURL strin
 	if len(resinAccountID) > 0 {
 		accountID = resinAccountID[0]
 	}
-	if ResinRequestDecorator != nil && accountID != "" {
-		targetURL = ResinRequestDecorator(TokenURL, accountID)
-	}
+	targetURL, viaResin := ResinRequestURL(ctx, targetURL, accountID)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader(data.Encode()))
 	if err != nil {
@@ -78,14 +76,14 @@ func RefreshAccessToken(ctx context.Context, refreshToken string, proxyURL strin
 	req.Header.Set("Accept", "application/json")
 
 	// Resin 反代：注入账号身份头
-	if ResinRequestDecorator != nil && accountID != "" {
+	if viaResin {
 		req.Header.Set("X-Resin-Account", accountID)
 	}
 
 	// Resin 反代模式下使用标准 HTTP client（不走代理，Resin 处理路由）
 	var client *http.Client
-	if ResinRequestDecorator != nil && accountID != "" {
-		client = &http.Client{Timeout: 30 * time.Second}
+	if viaResin {
+		client = NewResinHTTPClient(30 * time.Second)
 	} else {
 		client = buildHTTPClient(proxyURL)
 	}
@@ -202,9 +200,7 @@ func RefreshWithSessionToken(ctx context.Context, sessionToken string, proxyURL 
 	if len(resinAccountID) > 0 {
 		accountID = resinAccountID[0]
 	}
-	if ResinRequestDecorator != nil && accountID != "" {
-		targetURL = ResinRequestDecorator(SessionURL, accountID)
-	}
+	targetURL, viaResin := ResinRequestURL(ctx, targetURL, accountID)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
@@ -217,13 +213,13 @@ func RefreshWithSessionToken(ctx context.Context, sessionToken string, proxyURL 
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	req.AddCookie(&http.Cookie{Name: "__Secure-next-auth.session-token", Value: sessionToken})
-	if ResinRequestDecorator != nil && accountID != "" {
+	if viaResin {
 		req.Header.Set("X-Resin-Account", accountID)
 	}
 
 	var client *http.Client
-	if ResinRequestDecorator != nil && accountID != "" {
-		client = &http.Client{Timeout: 30 * time.Second}
+	if viaResin {
+		client = NewResinHTTPClient(30 * time.Second)
 	} else {
 		client = buildUTLSHTTPClient(proxyURL)
 	}

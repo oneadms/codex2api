@@ -803,11 +803,7 @@ func ExchangeTraeCNRefreshToken(ctx context.Context, refreshToken, host, proxyUR
 	if len(resinAccountID) > 0 {
 		accountID = strings.TrimSpace(resinAccountID[0])
 	}
-	decorator := ResinRequestDecorator
-	viaResin := decorator != nil && accountID != ""
-	if viaResin {
-		targetURL = decorator(targetURL, accountID)
-	}
+	targetURL, viaResin := ResinRequestURL(ctx, targetURL, accountID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader(string(body)))
 	if err != nil {
 		return TraeCNToken{}, err
@@ -818,6 +814,9 @@ func ExchangeTraeCNRefreshToken(ctx context.Context, refreshToken, host, proxyUR
 		req.Header.Set("X-Resin-Account", accountID)
 	}
 	client := &http.Client{Timeout: TraeCNExchangeTimeout}
+	if viaResin {
+		client = NewResinHTTPClient(TraeCNExchangeTimeout)
+	}
 	// Resin is the complete egress route, not an HTTP CONNECT proxy. Do not
 	// wrap the Resin request in the account/global proxy selected for fallback.
 	if proxyURL = strings.TrimSpace(proxyURL); !viaResin && proxyURL != "" {

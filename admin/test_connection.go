@@ -127,6 +127,12 @@ func (h *Handler) TestConnection(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "账号没有可用的 Access Token，请先刷新"})
 		return
 	}
+	testCtx, routeErr := h.prepareCodexConnectionTestContext(c.Request.Context(), account)
+	if routeErr != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": routeErr.Error()})
+		return
+	}
+	c.Request = c.Request.WithContext(testCtx)
 	// Antigravity OAuth 号的 AT 会过期；测连前若已无 AT，先用 RT 换一次，
 	// 让操作者看到的是推理结果而不是必然的 401。回收站里的临时账号不回写凭据。
 	if isAntigravityAccount && !isTransient && account.AntigravityAuthKind() == auth.AntigravityAuthKindOAuth {
@@ -198,7 +204,7 @@ func (h *Handler) TestConnection(c *gin.Context) {
 			event.Diagnostics = newClaudeTestRecorder(nil, testModel, claudeFingerprintMode, account.GetAccessToken(), start).finish()
 			event.Error = sanitizeClaudeTestText(event.Error, account.GetAccessToken())
 		} else {
-			failed := newCodexTestRecorder(nil, testModel, account, start)
+			failed := newCodexTestRecorder(nil, testModel, account, start, c.Request.Context())
 			event.CodexDiagnostics = failed.finish()
 			event.Error = sanitizeCodexTestText(event.Error, failed.secrets)
 		}
@@ -214,7 +220,7 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	// Codex/Responses 测连诊断:拿到响应头即先推一帧(状态码、用量窗口头),流结束后
 	// 再补最终帧(耗时、终态、usage、正文预览)。最终帧在终止事件之后,客户端要读到
 	// SSE 关闭再刷新账号快照。
-	recorder := newCodexTestRecorder(resp, testModel, account, start)
+	recorder := newCodexTestRecorder(resp, testModel, account, start, c.Request.Context())
 	defer func() { sendTestEvent(c, testEvent{Type: "diagnostics", CodexDiagnostics: recorder.finish()}) }()
 	sendTestEvent(c, testEvent{Type: "diagnostics", CodexDiagnostics: recorder.details})
 
@@ -1633,6 +1639,10 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 	if acc == nil {
 		return "failed", "账号不存在"
 	}
+	testCtx, routeErr := h.prepareCodexConnectionTestContext(testCtx, acc)
+	if routeErr != nil {
+		return "failed", routeErr.Error()
+	}
 
 	// TRAECN RT-only 账号由 ExecuteRelayStyleRequestWithStore 懒兑换 AT。
 	if !acc.IsRelayStyle() && !acc.IsCodexAgentIdentity() && !acc.IsTraeCNAPI() && acc.GetAccessToken() == "" {
@@ -1801,6 +1811,10 @@ func (h *Handler) runRecycleBinSingleTest(ctx context.Context, acc *auth.Account
 	defer cancel()
 	if acc == nil {
 		return "failed", "账号不存在"
+	}
+	testCtx, routeErr := h.prepareCodexConnectionTestContext(testCtx, acc)
+	if routeErr != nil {
+		return "failed", routeErr.Error()
 	}
 
 	if !acc.IsRelayStyle() && !acc.IsCodexAgentIdentity() && !acc.IsTraeCNAPI() && acc.GetAccessToken() == "" {

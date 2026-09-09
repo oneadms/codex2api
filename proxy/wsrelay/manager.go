@@ -1127,7 +1127,9 @@ func (m *Manager) createConnection(
 	// 期间，但本次请求的 URL 已经固定为 Resin 出口。
 	proxyURL := effectiveProxyURL(account, proxyOverride)
 
-	if proxy.ResinPlatformFromContext(ctx) == "" && !proxy.IsResinEnabled() && proxyURL != "" {
+	if proxy.IsResinEnabledForContext(ctx) {
+		dialer.Proxy = nil
+	} else if proxyURL != "" {
 		if err := configureWebsocketDialerProxy(dialer, proxyURL); err != nil {
 			return nil, err
 		}

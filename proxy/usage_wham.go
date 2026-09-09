@@ -379,7 +379,7 @@ func queryWhamUsageWithURL(ctx context.Context, account *auth.Account, proxyURL,
 		return nil, nil, fmt.Errorf("account has no access token")
 	}
 
-	finalURL, resinClient, viaResin := resinMaintenanceTarget(account, url)
+	finalURL, resinClient, viaResin := resinMaintenanceTargetForContext(ctx, account, url, ResinPlatformFromContext(ctx))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, finalURL, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build wham request: %w", err)

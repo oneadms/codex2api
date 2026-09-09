@@ -81,7 +81,7 @@ func (h *Handler) CodexAlphaSearchHandler(c *gin.Context) {
 
 	apiKey := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
 	upstreamCtx := c.Request.Context()
-	if IsResinEnabled() && ResinPlatformFromContext(upstreamCtx) == "" {
+	if IsResinEnabledForContext(upstreamCtx) && ResinPlatformFromContext(upstreamCtx) == "" {
 		// 与 Responses 一样按会话和 API Key 隔离平台，避免同一会话的搜索切换出口。
 		upstreamCtx = WithResinPlatform(upstreamCtx, resinPlatformForSessionIdentity(sessionIdentity, apiKeyID))
 	}
@@ -129,10 +129,11 @@ func ForwardCodexAlphaSearch(ctx context.Context, account *auth.Account, proxyUR
 	if accessToken == "" {
 		return nil, fmt.Errorf("account has no access token")
 	}
+	ctx = WithResinConfig(ctx, ResinConfigFromContext(ctx))
 
 	// prompt_cache_key 参与平台选择，需在剥离上游不支持的字段前读取。
 	resinPlatform := ""
-	if IsResinEnabled() {
+	if IsResinEnabledForContext(ctx) {
 		resinPlatform = resinPlatformForExecutor(ctx, "", downstreamHeaders, rawBody, apiKey)
 	}
 
@@ -143,7 +144,7 @@ func ForwardCodexAlphaSearch(ctx context.Context, account *auth.Account, proxyUR
 	if codexAlphaSearchURLForTest != "" {
 		endpoint = codexAlphaSearchURLForTest
 	}
-	finalURL, client, viaResin := resinMaintenanceTargetForPlatform(account, endpoint, resinPlatform)
+	finalURL, client, viaResin := resinMaintenanceTargetForContext(ctx, account, endpoint, resinPlatform)
 
 	// standalone 搜索是模型驱动的检索回合，上游耗时可达数十秒。
 	reqCtx, cancel := context.WithTimeout(ctx, 120*time.Second)

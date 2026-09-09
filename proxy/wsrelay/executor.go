@@ -115,6 +115,9 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = proxy.WithResinConfig(ctx, proxy.ResinConfigFromContext(ctx))
+	viaResin := proxy.IsResinEnabledForContext(ctx)
+	freshConnection := proxy.FreshCodexConnection(ctx)
 
 	account.Mu().RLock()
 	accessToken := account.AccessToken
@@ -138,7 +141,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	}
 
 	// Resin 反向代理：改写 WS URL 为 Resin 反代地址
-	if proxy.IsResinEnabled() {
+	if viaResin {
 		resinPlatform := proxy.ResinPlatformFromContext(ctx)
 		if resinPlatform == "" {
 			// Direct callers may not have gone through ExecuteRequest.  Reuse the
@@ -152,7 +155,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 			// account-level proxy for a URL that was already rewritten to Resin.
 			ctx = proxy.WithResinPlatform(ctx, resinPlatform)
 		}
-		wsURL = proxy.BuildWebSocketURLForPlatform(wsURL, resinPlatform)
+		wsURL = proxy.BuildWebSocketURLForContext(ctx, wsURL, resinPlatform)
 	}
 
 	// 准备请求头
@@ -163,7 +166,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	proxy.RecordUpstreamUserAgent(ctx, headers.Get("User-Agent"))
 
 	// Resin 反代：注入账号身份头
-	if proxy.IsResinEnabled() {
+	if viaResin {
 		headers.Set("X-Resin-Account", proxy.ResinAccountID(account))
 	}
 
@@ -190,7 +193,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	var pr *PendingRequest
 	var err2 error
 	acquireStart := time.Now()
-	if prevRespID := strings.TrimSpace(gjson.GetBytes(wsBody, "previous_response_id").String()); prevRespID != "" {
+	if prevRespID := strings.TrimSpace(gjson.GetBytes(wsBody, "previous_response_id").String()); prevRespID != "" && !freshConnection {
 		if pwc, ppr, slotKey := e.manager.AcquirePreferredConnectionForURL(prevRespID, account.ID(), apiKey, wsURL); pwc != nil {
 			wc, pr, poolSessionID = pwc, ppr, slotKey
 		}
@@ -200,7 +203,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		baseKey = headerSessionID
 	}
 	if wc == nil {
-		if proxy.IsStatelessWebsocketSessionID(sessionID) && baseKey != "" && !statelessOneShotEnabled() {
+		if proxy.IsStatelessWebsocketSessionID(sessionID) && baseKey != "" && !statelessOneShotEnabled() && !freshConnection {
 			wc, pr, poolSessionID, err2 = e.manager.AcquireReusableConnection(ctx, account, wsURL, baseKey, sessionID, statelessConnectionSlots(), headers, proxyOverride)
 		} else {
 			wc, pr, err2 = e.manager.AcquireConnection(ctx, account, wsURL, poolSessionID, headers, proxyOverride)
@@ -263,12 +266,13 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	e.manager.StartHeartbeat(wc)
 
 	return &WsResponse{
-		conn:        wc,
-		pendingReq:  pr,
-		sessionID:   poolSessionID,
-		manager:     e.manager,
-		apiKey:      apiKey,
-		readErrChan: make(chan error, 1),
+		conn:            wc,
+		pendingReq:      pr,
+		sessionID:       poolSessionID,
+		manager:         e.manager,
+		apiKey:          apiKey,
+		freshConnection: freshConnection,
+		readErrChan:     make(chan error, 1),
 	}, nil
 }
 
@@ -429,6 +433,8 @@ type WsResponse struct {
 	closed      bool
 	// apiKey 发起本请求的下游 API Key，用于 response_id → 连接绑定的归属校验。
 	apiKey string
+	// 手工测连的连接用完即关，下一次测连重新验证当前出口。
+	freshConnection bool
 	// connBroken 标记读流因上游 WS 异常(非正常关闭)或下游写入失败而终止；
 	// Close() 据此销毁坏连接而非归还连接池复用。受 mu 保护。
 	connBroken bool
@@ -668,6 +674,9 @@ func (r *WsResponse) Close() error {
 // previous_response_id 的上下文只存活在产出响应的那条连接里），因此有存活绑定时
 // 仍归还池。CODEX_WS_STATELESS_ONESHOT 模式显式承诺用完即毁，无条件销毁。
 func (r *WsResponse) shouldDiscardOneShotConn() bool {
+	if r.freshConnection {
+		return true
+	}
 	if r.conn == nil || r.conn.session == nil || !proxy.IsStatelessWebsocketSessionID(r.conn.session.ID) {
 		return false
 	}

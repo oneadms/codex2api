@@ -397,16 +397,16 @@ func fetchTraeCNModels(ctx context.Context, store *auth.Store, account *auth.Acc
 		return nil, fmt.Errorf("traecn credentials are incomplete")
 	}
 
-	viaResin := IsResinEnabled() && account.ID() > 0
+	viaResin := IsResinEnabledForContext(ctx) && account.ID() > 0
 	resinPlatform := ResinPlatformFromContext(ctx)
 	if viaResin && resinPlatform == "" {
-		resinPlatform = ResinPlatformForSession("")
+		resinPlatform = ResinPlatformForSessionFromContext(ctx, "")
 	}
 	client := getPooledClient(account, proxyOverride)
 	buildEndpoint := func(path string) string {
 		endpoint := strings.TrimRight(host, "/") + path
 		if viaResin {
-			return BuildReverseProxyURLForPlatform(endpoint, resinPlatform)
+			return BuildReverseProxyURLForContext(ctx, endpoint, resinPlatform)
 		}
 		return endpoint
 	}
@@ -1418,7 +1418,7 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 	// Persisted accounts have a stable DBID and therefore a stable Resin lease.
 	// Store-independent fixtures with DBID=0 stay on their explicit proxy/direct
 	// route instead of collapsing unrelated identities into one shared "0" lease.
-	viaResin := IsResinEnabled() && account.ID() > 0
+	viaResin := IsResinEnabledForContext(ctx) && account.ID() > 0
 	resinPlatform := ResinPlatformFromContext(ctx)
 	if viaResin && resinPlatform == "" {
 		sessionBody := inboundBody
@@ -1427,14 +1427,14 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 		}
 		identity := resolveRequestSessionIdentity(downstreamHeaders, sessionBody)
 		if identity.hasStableAffinity {
-			resinPlatform = ResinPlatformForSession(identity.affinityID)
+			resinPlatform = ResinPlatformForSessionFromContext(ctx, identity.affinityID)
 		} else {
-			resinPlatform = ResinPlatformForSession("")
+			resinPlatform = ResinPlatformForSessionFromContext(ctx, "")
 		}
 	}
 	var client *http.Client
 	if viaResin {
-		endpoint = BuildReverseProxyURLForPlatform(endpoint, resinPlatform)
+		endpoint = BuildReverseProxyURLForContext(ctx, endpoint, resinPlatform)
 		client = getResinHTTPClient(account)
 	} else {
 		client = getPooledClient(account, proxyURL)

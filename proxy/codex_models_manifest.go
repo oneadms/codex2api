@@ -53,7 +53,7 @@ func (h *Handler) CodexModelsManifestHandler(c *gin.Context) {
 	}
 
 	manifestCtx := c.Request.Context()
-	if IsResinEnabled() && ResinPlatformFromContext(manifestCtx) == "" {
+	if IsResinEnabledForContext(manifestCtx) && ResinPlatformFromContext(manifestCtx) == "" {
 		// 客户端清单查询沿用 Responses 的会话平台规则；后台刷新使用默认平台。
 		identity := resolveRequestSessionIdentity(c.Request.Header, nil)
 		manifestCtx = WithResinPlatform(manifestCtx, resinPlatformForSessionIdentity(identity, requestAPIKeyID(c)))
@@ -475,13 +475,14 @@ func fetchCodexModelsManifestWithURL(ctx context.Context, account *auth.Account,
 	if accessToken == "" {
 		return nil, fmt.Errorf("account has no access token")
 	}
+	ctx = WithResinConfig(ctx, ResinConfigFromContext(ctx))
 
 	clientVersion = strings.TrimSpace(clientVersion)
 	if clientVersion == "" {
 		clientVersion = effectiveLatestCodexCLIVersion()
 	}
 	requestURL := endpoint + "?client_version=" + url.QueryEscape(clientVersion)
-	finalURL, client, viaResin := resinMaintenanceTargetForPlatform(account, requestURL, ResinPlatformFromContext(ctx))
+	finalURL, client, viaResin := resinMaintenanceTargetForContext(ctx, account, requestURL, ResinPlatformFromContext(ctx))
 
 	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()

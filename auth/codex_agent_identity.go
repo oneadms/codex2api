@@ -196,27 +196,42 @@ type agentIdentityTaskRegistrationResponse struct {
 }
 
 // registerAgentIdentityTask 向 OpenAI 注册一个新 task 并返回 task_id。
-func registerAgentIdentityTask(ctx context.Context, key agentIdentityRuntimeKey, proxyURL string) (string, error) {
+func registerAgentIdentityTask(ctx context.Context, key agentIdentityRuntimeKey, proxyURL string, resinAccountID ...string) (string, error) {
 	timestamp, signature, err := signAgentTaskRegistration(key, time.Now())
 	if err != nil {
 		return "", err
 	}
-	client, err := grokHTTPClient(proxyURL) // 复用带代理配置的通用客户端构造器
-	if err != nil {
-		return "", err
-	}
-	client.Timeout = agentIdentityTaskRegistrationTimeout
 	body, err := json.Marshal(map[string]string{"timestamp": timestamp, "signature": signature})
 	if err != nil {
 		return "", errors.New("序列化 agent task 注册请求失败")
 	}
 	url := strings.TrimRight(strings.TrimSpace(agentIdentityAuthAPIBase), "/") + "/v1/agent/" + key.runtimeID + "/task/register"
+	accountID := ""
+	if len(resinAccountID) > 0 {
+		accountID = strings.TrimSpace(resinAccountID[0])
+	}
+	url, viaResin := ResinRequestURL(ctx, url, accountID)
+	var client *http.Client
+	if viaResin {
+		// 注册 task 是推理的前置鉴权，必须沿用本次请求的 Resin 出口。
+		client = NewResinHTTPClient(agentIdentityTaskRegistrationTimeout)
+	} else {
+		client, err = grokHTTPClient(proxyURL)
+		if err != nil {
+			return "", err
+		}
+		client.Timeout = agentIdentityTaskRegistrationTimeout
+		defer client.CloseIdleConnections()
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
 	if err != nil {
 		return "", errors.New("构建 agent task 注册请求失败")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	if viaResin {
+		req.Header.Set("X-Resin-Account", accountID)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", errors.New("agent task 注册请求失败")
@@ -284,7 +299,7 @@ func (s *Store) EnsureCodexAgentIdentityTask(ctx context.Context, account *Accou
 		return nil
 	}
 
-	taskID, err := registerAgentIdentityTask(ctx, key, proxyURL)
+	taskID, err := registerAgentIdentityTask(ctx, key, proxyURL, fmt.Sprintf("%d", account.DBID))
 	if err != nil {
 		return err
 	}

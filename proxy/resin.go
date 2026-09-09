@@ -134,7 +134,10 @@ func IsResinEnabled() bool {
 // empty key intentionally falls back to the first configured platform so
 // maintenance/anonymous requests do not hash a per-request random identity.
 func ResinPlatformForSession(sessionKey string) string {
-	cfg := GetResinConfig()
+	return resinPlatformForSession(GetResinConfig(), sessionKey)
+}
+
+func resinPlatformForSession(cfg *ResinConfig, sessionKey string) string {
 	if cfg == nil {
 		return ""
 	}
@@ -188,10 +191,15 @@ func resinMaintenanceTarget(account *auth.Account, targetURL string) (finalURL s
 // resinMaintenanceTargetForPlatform 让带会话的清单、搜索请求复用推理请求的
 // Resin 平台；后台维护没有会话时传空值，沿用默认平台。
 func resinMaintenanceTargetForPlatform(account *auth.Account, targetURL, platformName string) (finalURL string, client *http.Client, viaResin bool) {
-	if !IsResinEnabled() || account == nil {
+	return resinMaintenanceTargetForContext(context.Background(), account, targetURL, platformName)
+}
+
+func resinMaintenanceTargetForContext(ctx context.Context, account *auth.Account, targetURL, platformName string) (finalURL string, client *http.Client, viaResin bool) {
+	cfg := ResinConfigFromContext(ctx)
+	if cfg == nil || account == nil {
 		return targetURL, nil, false
 	}
-	return BuildReverseProxyURLForPlatform(targetURL, platformName), getResinHTTPClient(account), true
+	return buildReverseProxyURL(cfg, targetURL, platformName), getResinHTTPClient(account), true
 }
 
 // ==================== 反向代理 URL 构建 ====================
@@ -208,7 +216,10 @@ func BuildReverseProxyURL(targetURL string) string {
 // request paths.  An empty platform selects the first configured platform,
 // preserving the old single-platform helper semantics.
 func BuildReverseProxyURLForPlatform(targetURL, platformName string) string {
-	cfg := GetResinConfig()
+	return buildReverseProxyURL(GetResinConfig(), targetURL, platformName)
+}
+
+func buildReverseProxyURL(cfg *ResinConfig, targetURL, platformName string) string {
 	if cfg == nil {
 		return targetURL
 	}
@@ -245,7 +256,10 @@ func BuildWebSocketURL(targetURL string) string {
 
 // BuildWebSocketURLForPlatform is the platform-pinned WebSocket URL builder.
 func BuildWebSocketURLForPlatform(targetURL, platformName string) string {
-	cfg := GetResinConfig()
+	return buildWebSocketURL(GetResinConfig(), targetURL, platformName)
+}
+
+func buildWebSocketURL(cfg *ResinConfig, targetURL, platformName string) string {
 	if cfg == nil {
 		return targetURL
 	}
@@ -270,9 +284,10 @@ func BuildWebSocketURLForPlatform(targetURL, platformName string) string {
 		protocol = "http"
 	}
 
+	// 保留 Token 路径的转义字符，并去掉末尾斜线，避免拼出错误的双斜线路径。
 	return fmt.Sprintf("ws://%s%s/%s/%s/%s%s",
 		resinParsed.Host,
-		resinParsed.Path,
+		strings.TrimRight(resinParsed.EscapedPath(), "/"),
 		platformName,
 		protocol,
 		parsed.Host,
@@ -353,6 +368,10 @@ func getResinHTTPClient(account *auth.Account) *http.Client {
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   0, // 流式响应不设超时
+			// 上游绝对地址重定向不能绕过 Resin；交由调用方处理原始状态码。
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 	entry.touch()

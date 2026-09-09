@@ -299,11 +299,12 @@ func logCodexFingerprintDebug(kind string, account *auth.Account, proxyURL strin
 	}
 	userAgent := strings.TrimSpace(headers.Get("User-Agent"))
 	originator := strings.TrimSpace(headers.Get("Originator"))
-	log.Printf("[CodexFingerprint] kind=%s account_id=%d transport_mode=%s proxy_enabled=%t official_client=%t ua_hash=%s originator=%s session_hash=%s stainless_present=%t",
+	log.Printf("[CodexFingerprint] kind=%s account_id=%d transport_mode=%s proxy_enabled=%t resin_enabled=%t official_client=%t ua_hash=%s originator=%s session_hash=%s stainless_present=%t",
 		kind,
 		accountID,
 		codexTransportModeFromEnv(),
 		strings.TrimSpace(proxyURL) != "",
+		headers.Get("X-Resin-Account") != "",
 		IsCodexOfficialClientByHeaders(userAgent, originator),
 		shortHashForLog(userAgent),
 		originator,
@@ -522,13 +523,13 @@ func resinPlatformForExecutor(ctx context.Context, sessionID string, headers htt
 	}
 	identity := resolveRequestSessionIdentity(headers, body)
 	if identity.hasStableAffinity {
-		return ResinPlatformForSession(identity.affinityID)
+		return ResinPlatformForSessionFromContext(ctx, identity.affinityID)
 	}
 	// A caller may provide an explicit upstream session directly without the
 	// original ingress headers.  Reuse it unless it is the one-shot WS ID that
 	// is generated solely for connection-pool isolation.
 	if candidate := strings.TrimSpace(sessionID); candidate != "" && !IsStatelessWebsocketSessionID(candidate) {
-		return ResinPlatformForSession(candidate)
+		return ResinPlatformForSessionFromContext(ctx, candidate)
 	}
 	// Embedded callers sometimes pass the downstream credential as the
 	// executor argument but do not copy it into headers.  Mirror the normal
@@ -536,10 +537,10 @@ func resinPlatformForExecutor(ctx context.Context, sessionID string, headers htt
 	// default platform merely because their header map is nil.
 	if len(fallbackCredentials) > 0 {
 		if credential := strings.TrimSpace(fallbackCredentials[0]); credential != "" {
-			return ResinPlatformForCredential(credential)
+			return ResinPlatformForSessionFromContext(ctx, DeriveStableSessionUUIDv7("codex2api:prompt-cache:"+credential))
 		}
 	}
-	return ResinPlatformForSession("")
+	return ResinPlatformForSessionFromContext(ctx, "")
 }
 
 // ResinPlatformForRequest exposes the executor fallback for integrations such
@@ -564,8 +565,10 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = WithResinConfig(ctx, ResinConfigFromContext(ctx))
+	viaResin := IsResinEnabledForContext(ctx)
 	resinPlatform := ""
-	if IsResinEnabled() {
+	if viaResin {
 		resinPlatform = resinPlatformForExecutor(ctx, sessionID, headers, requestBody, apiKey)
 		if resinPlatform != "" && ResinPlatformFromContext(ctx) == "" {
 			// Pin the selection for the complete request, including retries and a
@@ -726,8 +729,8 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 
 	// Resin 反向代理模式：改写 URL，使用标准 HTTP 客户端
 	var client *http.Client
-	if IsResinEnabled() {
-		endpoint = BuildReverseProxyURLForPlatform(endpoint, resinPlatform)
+	if viaResin {
+		endpoint = BuildReverseProxyURLForContext(ctx, endpoint, resinPlatform)
 		client = getResinHTTPClient(account)
 	} else {
 		client = getPooledClient(account, proxyURL)
@@ -751,7 +754,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		ApplyCodexRoutingHint(req.Header, account, requestBody)
 
 		// Resin 反代：注入账号身份头
-		if IsResinEnabled() {
+		if viaResin {
 			req.Header.Set("X-Resin-Account", ResinAccountID(account))
 		}
 		logCodexFingerprintDebug("http", account, proxyURL, req.Header)
@@ -988,8 +991,10 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = WithResinConfig(ctx, ResinConfigFromContext(ctx))
+	viaResin := IsResinEnabledForContext(ctx)
 	resinPlatform := ""
-	if IsResinEnabled() {
+	if viaResin {
 		resinPlatform = resinPlatformForExecutor(ctx, sessionID, headers, requestBody, apiKey)
 		if resinPlatform != "" && ResinPlatformFromContext(ctx) == "" {
 			ctx = WithResinPlatform(ctx, resinPlatform)
@@ -1046,8 +1051,8 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 
 	// Resin 反向代理模式
 	var client *http.Client
-	if IsResinEnabled() {
-		endpoint = BuildReverseProxyURLForPlatform(endpoint, resinPlatform)
+	if viaResin {
+		endpoint = BuildReverseProxyURLForContext(ctx, endpoint, resinPlatform)
 		client = getResinHTTPClient(account)
 	} else {
 		client = getPooledClient(account, proxyURL)
@@ -1062,7 +1067,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	// routing hint 由网关按最终出站 body 合成，须在账号自定义头之后设置。
 	ApplyCodexRoutingHint(req.Header, account, requestBody)
 
-	if IsResinEnabled() {
+	if viaResin {
 		req.Header.Set("X-Resin-Account", ResinAccountID(account))
 	}
 	logCodexFingerprintDebug("compact", account, proxyURL, req.Header)

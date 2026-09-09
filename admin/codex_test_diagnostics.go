@@ -2,6 +2,7 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/proxy"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/tidwall/gjson"
 )
@@ -58,6 +60,9 @@ type codexTestDiagnostics struct {
 	Model          string `json:"model"`
 	ResponseModel  string `json:"response_model,omitempty"`
 	Transport      string `json:"transport,omitempty"`
+	Egress         string `json:"egress,omitempty"`
+	ResinPlatform  string `json:"resin_platform,omitempty"`
+	ResinAccountID string `json:"resin_account_id,omitempty"`
 	RequestID      string `json:"request_id,omitempty"`
 	ResponseID     string `json:"response_id,omitempty"`
 	CFRay          string `json:"cf_ray,omitempty"`
@@ -167,8 +172,16 @@ type codexTestRecorder struct {
 	account *auth.Account
 }
 
-func newCodexTestRecorder(resp *http.Response, model string, account *auth.Account, start time.Time) *codexTestRecorder {
+func newCodexTestRecorder(resp *http.Response, model string, account *auth.Account, start time.Time, requestContexts ...context.Context) *codexTestRecorder {
 	secrets := codexTestSecrets(account)
+	var requestCtx context.Context
+	if len(requestContexts) > 0 {
+		requestCtx = requestContexts[0]
+		if cfg := proxy.ResinConfigFromContext(requestCtx); cfg != nil {
+			// HTTP 错误可能包含反代 URL，诊断中不能泄露路径里的 Resin Token。
+			secrets = append(secrets, strings.TrimRight(cfg.BaseURL, "/"))
+		}
+	}
 	lookahead := 0
 	for _, secret := range secrets {
 		lookahead = max(lookahead, len(secret))
@@ -180,6 +193,15 @@ func newCodexTestRecorder(resp *http.Response, model string, account *auth.Accou
 		account: account,
 		// 多留一段,保证跨越预览边界的凭据也能被整体替换。
 		capture: codexTestCapture{limit: codexTestBodyLimit + lookahead},
+	}
+	if requestCtx != nil && proxy.AccountSupportsResin(account) {
+		if proxy.IsResinEnabledForContext(requestCtx) {
+			r.details.Egress = "resin"
+			r.details.ResinPlatform = proxy.ResinPlatformFromContext(requestCtx)
+			r.details.ResinAccountID = proxy.ResinAccountID(account)
+		} else {
+			r.details.Egress = "default"
+		}
 	}
 	if resp == nil {
 		return r
@@ -206,7 +228,7 @@ func newCodexTestRecorder(resp *http.Response, model string, account *auth.Accou
 	return r
 }
 
-// codexTestTransport 区分 HTTP 直连与强制 WebSocket:WS 路径合成的响应头是 101
+// codexTestTransport 区分 HTTP 与 WebSocket 传输，两者都可经 Resin；WS 合成的响应头是 101
 // 握手头,带 Upgrade/Sec-WebSocket-Accept,此时 x-codex-* 用量会以 codex.rate_limits
 // 帧而非响应头出现。
 func codexTestTransport(header http.Header) string {

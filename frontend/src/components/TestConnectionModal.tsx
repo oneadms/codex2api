@@ -527,6 +527,9 @@ export default function TestConnectionModal({
   const identityRows: Array<{ label: string; value?: string; hint?: string }> = [
     { label: t("accounts.testDiagResponseModel"), value: diagnostics?.response_model },
     { label: t("accounts.testDiagTransport"), value: diagnostics?.transport },
+    { label: t("accounts.testDiagEgress"), value: diagnostics?.egress === "resin" ? "Resin" : diagnostics?.egress === "default" ? t("accounts.testDiagDefaultEgress") : undefined },
+    { label: t("accounts.testDiagResinPlatform"), value: diagnostics?.resin_platform },
+    { label: t("accounts.testDiagResinAccount"), value: diagnostics?.resin_account_id },
     { label: t("accounts.testDiagPlan"), value: diagnostics?.plan_type },
     { label: t("accounts.testDiagSafetyBuffering"), value: safetyBuffering, hint: t("accounts.testDiagSafetyBufferingHint") },
     { label: "Response ID", value: diagnostics?.response_id },
