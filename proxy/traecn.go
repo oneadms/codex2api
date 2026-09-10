@@ -321,6 +321,11 @@ func traeCNRequestBodyPlan(canonical []byte) ([]byte, string, traeCNBridges, tra
 	if hint := traeCNUltraDelegationHint(root.Get("reasoning.effort").String(), root.Get("tools")); hint != "" {
 		messages = traeCNAppendSystemInstruction(messages, hint)
 	}
+	// 反收尾规则：Trae 后端模型爱把"接下来要做什么"当最终答复，客户端就判定本轮
+	// 结束（不设 goal 时表现为任务自己停）。只在请求带了工具时注入。
+	if hint := traeCNContinueWorkingHint(root.Get("tools")); hint != "" && !traeCNMessagesContain(messages, traeContinueWorkingMarker) {
+		messages = traeCNAppendSystemInstruction(messages, hint)
+	}
 	body := map[string]any{"messages": messages, "function": functionName, "stream": true}
 	if targetModel != "" && !strings.EqualFold(targetModel, "auto") {
 		// 内置兼容别名表已删除：管理员在 TRAECN 设置里配置的映射目标就是上游模型名。

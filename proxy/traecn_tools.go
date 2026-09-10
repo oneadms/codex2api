@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -279,6 +280,18 @@ func traeCNUltraDelegationHint(effort string, tools gjson.Result) string {
 
 // traeCNHasCollaborationTool 判断客户端是否声明了多智能体协作工具。
 func traeCNHasCollaborationTool(tools gjson.Result) bool {
+	return traeCNAnyTool(tools, func(name, _ string) bool {
+		switch name {
+		case "spawn_agent", "followup_task", "send_message", "list_agents":
+			return true
+		}
+		return false
+	})
+}
+
+// traeCNAnyTool 遍历工具声明（含 namespace 嵌套），命中 match 即返回。
+// name 已小写；typ 为声明形态（function / custom / namespace 子项等，可能为空）。
+func traeCNAnyTool(tools gjson.Result, match func(name, typ string) bool) bool {
 	found := false
 	var scan func(list gjson.Result)
 	scan = func(list gjson.Result) {
@@ -286,19 +299,83 @@ func traeCNHasCollaborationTool(tools gjson.Result) bool {
 			if found || !tool.IsObject() {
 				return !found
 			}
-			switch strings.ToLower(traeCNDeclarationName(tool)) {
-			case "spawn_agent", "followup_task", "send_message", "list_agents":
+			typ := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
+			name := strings.ToLower(traeCNDeclarationName(tool))
+			if typ == "namespace" {
+				scan(tool.Get("tools"))
+				return !found
+			}
+			if name != "" && match(name, typ) {
 				found = true
 				return false
-			}
-			if nested := tool.Get("tools"); nested.IsArray() {
-				scan(nested)
 			}
 			return !found
 		})
 	}
 	scan(tools)
 	return found
+}
+
+// traeCNHasCallableTool 判断本轮是否给了模型任何能调用的工具。
+func traeCNHasCallableTool(tools gjson.Result) bool {
+	return traeCNAnyTool(tools, func(_, typ string) bool {
+		switch typ {
+		case "", "function", "custom", "apply_patch", "local_shell", "shell":
+			return true
+		}
+		return false
+	})
+}
+
+// traeContinueWorkingMarker 标记网关注入的反收尾规则。
+const traeContinueWorkingMarker = "[codex2api continue-working guard]"
+
+// traeCNContinueGuardDisabled 允许运维关闭反收尾规则（TRAECN_CONTINUE_GUARD_DISABLED=1）。
+func traeCNContinueGuardDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TRAECN_CONTINUE_GUARD_DISABLED"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// traeCNContinueWorkingHint 在请求带了工具时追加一条反收尾规则。
+//
+// Trae 上游模型习惯把"我接下来要做什么"当最终答复发出来，而 Responses 语义里
+// assistant message 不带后续工具调用就等于本轮结束——表现就是"不设 goal 时任务跑
+// 一会就自己停了"。这里要求它：要么继续调用工具，要么给出带结果的最终答复，
+// 不要只用一句计划/进度说明收尾。没有工具可调用的纯问答请求不注入。
+func traeCNContinueWorkingHint(tools gjson.Result) string {
+	if traeCNContinueGuardDisabled() || !traeCNHasCallableTool(tools) {
+		return ""
+	}
+	return traeContinueWorkingMarker + "\n" +
+		"Do not end the turn with a status note or a plan. Keep calling tools until the work is actually done, " +
+		"and only then give the final answer with the concrete results. " +
+		"Never reply with only \"I will…\", \"Let's…\" or a progress sentence: if the task is unfinished, call the next tool instead of replying."
+}
+
+// traeCNMessagesContain 判断系统指令里是否已经包含某段文本（避免重复注入）。
+func traeCNMessagesContain(messages []map[string]any, needle string) bool {
+	if needle == "" {
+		return false
+	}
+	for _, message := range messages {
+		content, ok := message["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rawPart := range content {
+			part, ok := rawPart.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text, ok := part["text"].(string); ok && strings.Contains(text, needle) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // traeCNAppendSystemInstruction 把一段指令并进系统消息（没有系统消息时补一条）。

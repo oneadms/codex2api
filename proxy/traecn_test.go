@@ -55,11 +55,11 @@ func TestBuildTraeCNRequestBodyPreservesCanonicalSemantics(t *testing.T) {
 	if root.Get("function").String() != "chat_v3" || !root.Get("stream").Bool() {
 		t.Fatalf("unexpected request mode: %s", body)
 	}
-	if root.Get("messages.0.role").String() != "system" || root.Get("messages.0.content.0.text").String() != "follow the system instruction" {
+	if root.Get("messages.0.role").String() != "system" || !strings.Contains(root.Get("messages.0.content.0.text").String(), "follow the system instruction") {
 		t.Fatalf("instructions were not preserved: %s", body)
 	}
-	if root.Get("messages.1.content.1.image_url.url").String() != "https://example.test/image.png" {
-		t.Fatalf("image URL was not preserved: %s", body)
+	if root.Get("messages.1.content.0.text").String() != "hello" || root.Get("messages.1.content.1.image_url.url").String() != "https://example.test/image.png" {
+		t.Fatalf("user content shifted: %s", body)
 	}
 	if root.Get("messages.2.tool_calls.0.function_call.name").String() != "lookup" || root.Get("messages.3.tool_call_id").String() != "call_1" {
 		t.Fatalf("tool history was not preserved: %s", body)

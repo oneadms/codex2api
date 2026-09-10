@@ -32,7 +32,14 @@ func TestTraeCNToolHistoryUsesNativeFunctionCall(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			call := gjson.GetBytes(body, "messages.0.tool_calls.0")
+			// 网关会在带工具的请求里追加一条反收尾 system 消息，因此不能写死下标。
+			var call gjson.Result
+			for _, message := range gjson.GetBytes(body, "messages").Array() {
+				if message.Get("tool_calls.0").Exists() {
+					call = message.Get("tool_calls.0")
+					break
+				}
+			}
 			if call.Get("id").String() != "call_read" || call.Get("function_call.name").String() != "read_file" ||
 				call.Get("function_call.arguments").String() != `{"path":"a.go"}` || call.Get("function").Exists() {
 				t.Fatalf("invalid native tool history: %s", body)

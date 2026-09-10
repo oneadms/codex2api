@@ -104,13 +104,21 @@ func TestTraeCNAcceptsCustomToolCallHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("traeCNRequestBodyPlan() error = %v", err)
 	}
-	call := gjson.GetBytes(body, "messages.0.tool_calls.0")
+	// 带工具的请求会被追加一条反收尾 system 消息，因此按下标找不到调用，需按内容定位。
+	var call, result gjson.Result
+	for _, message := range gjson.GetBytes(body, "messages").Array() {
+		if call.Get("id").String() == "" && message.Get("tool_calls.0").Exists() {
+			call = message.Get("tool_calls.0")
+		}
+		if message.Get("role").String() == "tool" {
+			result = message
+		}
+	}
 	if call.Get("id").String() != "call_patch" || call.Get("function_call.name").String() != "apply_patch" ||
 		call.Get("function_call.arguments").String() != `{"input":"*** Begin Patch\n*** End Patch"}` {
 		t.Fatalf("custom history was not rewrapped as a function call: %s", body)
 	}
-	if gjson.GetBytes(body, "messages.1.tool_call_id").String() != "call_patch" ||
-		gjson.GetBytes(body, "messages.1.content.0.text").String() != "Done!" {
+	if result.Get("tool_call_id").String() != "call_patch" || result.Get("content.0.text").String() != "Done!" {
 		t.Fatalf("custom tool output was lost: %s", body)
 	}
 }
@@ -265,5 +273,61 @@ func TestScopedCodexManifestScopesCapabilitiesPerChannel(t *testing.T) {
 		default:
 			t.Fatalf("unexpected model %s", slug)
 		}
+	}
+}
+
+// Trae 后端模型爱把"接下来要做什么"当最终答复发出来，客户端就判定本轮结束
+// （不设 goal 时表现为任务自己停）。网关在带了工具的请求里注入反收尾规则。
+func TestTraeCNInjectsContinueWorkingGuardWhenToolsAreAvailable(t *testing.T) {
+	canonical := func(tools string) []byte {
+		return []byte(`{"model":"deepseek-v3","input":"finish the task","instructions":"You are Codex.","tools":[` + tools + `]}`)
+	}
+	systemText := func(body []byte) string {
+		for _, message := range gjson.GetBytes(body, "messages").Array() {
+			if message.Get("role").String() == "system" {
+				return message.Get("content.0.text").String()
+			}
+		}
+		return ""
+	}
+
+	body, _, _, _, err := traeCNRequestBodyPlan(canonical(`{"type":"function","name":"exec_command","parameters":{"type":"object"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	system := systemText(body)
+	if !strings.Contains(system, traeContinueWorkingMarker) || !strings.Contains(system, "Do not end the turn with a status note") {
+		t.Fatalf("反收尾规则未注入: %s", system)
+	}
+	if !strings.Contains(system, "You are Codex.") {
+		t.Fatalf("原有 instructions 被覆盖: %s", system)
+	}
+
+	// 没有工具（纯问答）时不注入，否则模型可能不肯给结论。
+	bare, _, _, _, err := traeCNRequestBodyPlan([]byte(`{"model":"deepseek-v3","input":"say hi"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(systemText(bare), traeContinueWorkingMarker) {
+		t.Fatalf("无工具请求被注入反收尾规则: %s", bare)
+	}
+
+	// 客户端提示里已经带了同一段规则时不重复注入。
+	duplicated, _, _, _, err := traeCNRequestBodyPlan([]byte(`{"model":"deepseek-v3","input":"x","instructions":"` + traeContinueWorkingMarker + ` already here","tools":[{"type":"function","name":"exec_command","parameters":{"type":"object"}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(systemText(duplicated), traeContinueWorkingMarker); count != 1 {
+		t.Fatalf("反收尾规则重复注入 %d 次: %s", count, systemText(duplicated))
+	}
+
+	// 开关可关闭。
+	t.Setenv("TRAECN_CONTINUE_GUARD_DISABLED", "1")
+	disabled, _, _, _, err := traeCNRequestBodyPlan(canonical(`{"type":"function","name":"exec_command","parameters":{"type":"object"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(systemText(disabled), traeContinueWorkingMarker) {
+		t.Fatalf("开关未生效: %s", disabled)
 	}
 }
