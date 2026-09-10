@@ -7,6 +7,7 @@ import {
   Copy,
   Edit3,
   Layers,
+  CalendarCheck,
   ListRestart,
   Loader2,
   Plus,
@@ -593,6 +594,7 @@ function AccountActions({
   onTest,
   onRefresh,
   onSyncModels,
+  onCheckin,
   onEdit,
   onToggle,
   onDelete,
@@ -602,6 +604,7 @@ function AccountActions({
   onTest: () => void;
   onRefresh: () => void;
   onSyncModels: () => void;
+  onCheckin: () => void;
   onEdit: () => void;
   onToggle: () => void;
   onDelete: () => void;
@@ -615,6 +618,9 @@ function AccountActions({
       </Button>
       <Button variant="ghost" size="icon-xs" title={t("traecn.refreshAccount")} disabled={isBusy} onClick={onRefresh}>
         <RefreshCw className={cn("size-3.5", busy === "refresh" && "animate-spin")} />
+      </Button>
+      <Button variant="ghost" size="icon-xs" title={t("traecn.checkin")} aria-label={t("traecn.checkin")} disabled={isBusy} onClick={onCheckin}>
+        <CalendarCheck className={cn("size-3.5", busy === "checkin" && "animate-pulse")} />
       </Button>
       <Button variant="ghost" size="icon-xs" title={t("traecn.syncModels")} aria-label={t("traecn.syncModels")} disabled={isBusy} onClick={onSyncModels}>
         <ListRestart className={cn("size-3.5", busy === "syncModels" && "animate-spin")} />
@@ -780,7 +786,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
     finally { setSaving(false); }
   };
 
-  const runAccountAction = async (account: AccountRow, action: "refresh" | "syncModels" | "toggle" | "delete") => {
+  const runAccountAction = async (account: AccountRow, action: "refresh" | "syncModels" | "toggle" | "delete" | "checkin") => {
     if (action === "delete") {
       const ok = await confirm({ title: t("traecn.deleteTitle"), description: t("traecn.deleteDescription", { account: accountLabel(account) }), tone: "destructive", confirmVariant: "destructive", confirmText: t("common.confirm") });
       if (!ok) return;
@@ -789,6 +795,12 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
     try {
       if (action === "refresh") await api.refreshTraeCNAccount(account.id);
       else if (action === "syncModels") await api.syncAccountModelsUpstream(account.id);
+      else if (action === "checkin") {
+        const result = await api.checkinTraeCNAccount(account.id);
+        showToast(result.message || t("traecn.checkinSuccess"), "success");
+        await reload(true);
+        return;
+      }
       else if (action === "toggle") await api.toggleAccountEnabled(account.id, account.enabled === false);
       else await api.deleteAccount(account.id);
       showToast(t(`traecn.${action === "refresh" ? "refreshSuccess" : action === "syncModels" ? "syncModelsSuccess" : action === "toggle" ? (account.enabled === false ? "enableSuccess" : "disableSuccess") : "deleteSuccess"}`), "success");
@@ -874,6 +886,11 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
                         >
                           {account.email || `ID ${account.id}`}
                         </div>
+                        {account.traecn_checkin_date ? (
+                          <div className="mt-0.5 truncate text-[10px] text-muted-foreground" title={account.traecn_checkin_result || ""}>
+                            {t("traecn.checkinLast", { date: account.traecn_checkin_date, credits: account.traecn_checkin_credits ?? 0 })}
+                          </div>
+                        ) : null}
                       </td>
                       <td className="px-3 py-3 align-top">
                         <TraeCNModelsCell account={account} catalog={models} onOpen={() => setModelsAccount(account)} />
@@ -884,7 +901,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
                       </td>
                       <td className="px-3 py-3"><GroupChips account={account} groups={traeGroups} /></td>
                       <td className="px-3 py-3"><div className="flex items-center gap-1.5"><StatusBadge status={account.status} />{account.enabled === false ? <Badge variant="outline">{t("traecn.disabledBadge")}</Badge> : null}</div></td>
-                      <td className="px-3 py-3"><AccountActions account={account} busy={accountBusy} onTest={() => setTestingAccount(account)} onRefresh={() => void runAccountAction(account, "refresh")} onSyncModels={() => void runAccountAction(account, "syncModels")} onEdit={() => openEdit(account)} onToggle={() => void runAccountAction(account, "toggle")} onDelete={() => void runAccountAction(account, "delete")} /></td>
+                      <td className="px-3 py-3"><AccountActions account={account} busy={accountBusy} onTest={() => setTestingAccount(account)} onRefresh={() => void runAccountAction(account, "refresh")} onSyncModels={() => void runAccountAction(account, "syncModels")} onCheckin={() => void runAccountAction(account, "checkin")} onEdit={() => openEdit(account)} onToggle={() => void runAccountAction(account, "toggle")} onDelete={() => void runAccountAction(account, "delete")} /></td>
                     </tr>
                   );
                 })}

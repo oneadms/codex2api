@@ -255,7 +255,10 @@
     "modelsShowing": "显示 {{shown}} / {{total}}",
     "modelsNoMatch": "没有匹配的模型",
     "modelsCopyAll": "复制全部",
-    "modelsCopyOne": "复制 {{model}}"
+    "modelsCopyOne": "复制 {{model}}",
+    "checkin": "立即签到",
+    "checkinSuccess": "签到成功",
+    "checkinLast": "{{date}} 已签 · 积分 {{credits}}"
   },
   "grok": {
     "pageTitle": "Grok 账号",

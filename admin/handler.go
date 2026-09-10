@@ -1116,6 +1116,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/:id/antigravity/capabilities/probe", h.ProbeAntigravityAccountCapabilities)
 	api.POST("/accounts/traecn", h.AddTraeCNAccounts)
 	api.POST("/accounts/:id/traecn/refresh", h.RefreshTraeCNAccount)
+	api.POST("/accounts/:id/traecn/checkin", h.TriggerTraeCNCheckin)
 	api.PATCH("/accounts/:id/traecn", h.UpdateTraeCNAccount)
 	api.PATCH("/accounts/:id/grok", h.UpdateGrokAccount)
 	api.GET("/accounts/:id/grok/state", h.GetGrokAccountState)
@@ -1614,6 +1615,10 @@ type accountResponse struct {
 	TraeCNUpstreamModels          []string                    `json:"traecn_upstream_models,omitempty"`
 	TraeCNModelAllowlist          []string                    `json:"traecn_model_allowlist,omitempty"`
 	TraeCNModelsSyncedAt          string                      `json:"traecn_models_synced_at,omitempty"`
+	TraeCNCheckinDate             string                      `json:"traecn_checkin_date,omitempty"`
+	TraeCNCheckinAt               string                      `json:"traecn_checkin_at,omitempty"`
+	TraeCNCheckinCredits          int64                       `json:"traecn_checkin_credits,omitempty"`
+	TraeCNCheckinResult           string                      `json:"traecn_checkin_result,omitempty"`
 	BalanceQueryURL               string                      `json:"balance_query_url,omitempty"`
 	Models                        []string                    `json:"models,omitempty"`
 	ModelMapping                  string                      `json:"model_mapping,omitempty"`

@@ -693,6 +693,11 @@ export const api = {
       method: 'POST',
       timeoutMs: 45_000,
     }),
+  checkinTraeCNAccount: (id: number) =>
+    request<{ message: string; checked_in: boolean; claimed: boolean; skipped?: string; credits?: number; extra?: number; date?: string }>(`/accounts/${id}/traecn/checkin`, {
+      method: 'POST',
+      timeoutMs: 60_000,
+    }),
   fetchAntigravityModels: (data: AddAntigravityAccountRequest) =>
     request<{ models: string[] }>('/accounts/antigravity/models', {
       method: 'POST',

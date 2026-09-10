@@ -255,7 +255,10 @@
     "modelsShowing": "Showing {{shown}} / {{total}}",
     "modelsNoMatch": "No matching model",
     "modelsCopyAll": "Copy all",
-    "modelsCopyOne": "Copy {{model}}"
+    "modelsCopyOne": "Copy {{model}}",
+    "checkin": "Check in now",
+    "checkinSuccess": "Check-in succeeded",
+    "checkinLast": "Checked in {{date}} · {{credits}} credits"
   },
   "grok": {
     "pageTitle": "Grok Accounts",

@@ -79,7 +79,10 @@
     "modelsShowing": "顯示 {{shown}} / {{total}}",
     "modelsNoMatch": "沒有符合的模型",
     "modelsCopyAll": "複製全部",
-    "modelsCopyOne": "複製 {{model}}"
+    "modelsCopyOne": "複製 {{model}}",
+    "checkin": "立即簽到",
+    "checkinSuccess": "簽到成功",
+    "checkinLast": "{{date}} 已簽 · 積分 {{credits}}"
   },
   "antigravity": {
     "authKind": "憑證類型",

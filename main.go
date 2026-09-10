@@ -386,6 +386,8 @@ func main() {
 
 	// Claude Code CLI 版本同步：启动先用生效版本回写账号指纹，再按 ClaudeConfig 开关/间隔联网同步。
 	proxy.StartClaudeCLIVersionSync(backgroundCtx, db, store, store.GetProxyURL)
+	// Trae CN 每日自动签到（随机时段，每账号每天一次；TRAECN_CHECKIN_DISABLED=1 可关）。
+	proxy.StartTraeCNCheckinScheduler(backgroundCtx, store, db)
 
 	log.Printf("账号就绪: %d/%d 可用", store.AvailableCount(), store.AccountCount())
 

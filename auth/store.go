@@ -167,6 +167,7 @@ type Account struct {
 	// upstream. TraeCNModelAllowlist is an optional per-account narrowing list;
 	// Models is kept as the effective (routable) projection for legacy callers.
 	TraeCNUpstreamModelCatalog      []string
+	traeCNCheckin                   TraeCNCheckinSnapshot
 	TraeCNModelAllowlist            []string
 	TraeCNModelAllowlistSet         bool
 	TraeCNModelCatalogSyncedAtValue time.Time
@@ -5318,6 +5319,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		}
 		account.TraeCNUpstreamModelCatalog = normalizeModelList(row.GetCredentialStringSlice(TraeCNUpstreamModelsCredentialKey))
 		account.TraeCNModelAllowlist = normalizeModelList(row.GetCredentialStringSlice(TraeCNModelAllowlistCredentialKey))
+		account.traeCNCheckin = traeCNCheckinFromCredentials(row)
 		account.TraeCNModelAllowlistSet = row.GetCredentialBool(TraeCNModelAllowlistSetCredentialKey) || len(account.TraeCNModelAllowlist) > 0
 		if synced := strings.TrimSpace(row.GetCredential(TraeCNModelsSyncedAtCredentialKey)); synced != "" {
 			if parsed, err := time.Parse(time.RFC3339Nano, synced); err == nil {

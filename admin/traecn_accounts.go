@@ -13,6 +13,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
+	"github.com/codex2api/proxy"
 	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
 )
@@ -441,4 +442,49 @@ func (h *Handler) UpdateTraeCNAccount(c *gin.Context) {
 	}
 	h.db.InsertAccountEventAsync(id, "updated", "manual_traecn")
 	writeMessage(c, http.StatusOK, "Trae CN 账号设置已更新")
+}
+
+// TriggerTraeCNCheckin 手动触发一次积分签到（供管理台按钮/排障使用）。
+// 自动签到每天一次、时刻随机；手动触发同样把当天标记为已签到，避免与调度器重复领取。
+func (h *Handler) TriggerTraeCNCheckin(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(c, http.StatusBadRequest, "无效的账号 ID")
+		return
+	}
+	if h == nil || h.store == nil {
+		writeError(c, http.StatusServiceUnavailable, "账号服务不可用")
+		return
+	}
+	account := h.store.FindByID(id)
+	if account == nil || !account.IsTraeCNAPI() {
+		writeError(c, http.StatusNotFound, "Trae CN 账号不存在")
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	defer cancel()
+	outcome, checkinErr := proxy.RunTraeCNCheckin(ctx, h.store, account, "")
+	message := outcome.Message()
+	snapshot := auth.TraeCNCheckinSnapshot{Date: time.Now().Format("2006-01-02"), At: time.Now(), Credits: outcome.Status.Credits, Result: message}
+	if checkinErr != nil {
+		snapshot.Result = "签到失败: " + checkinErr.Error()
+		snapshot.Credits = 0
+	}
+	h.store.PersistTraeCNCheckin(id, snapshot)
+	if h.db != nil {
+		h.db.InsertAccountEventAsync(id, "traecn_checkin", snapshot.Result)
+	}
+	if checkinErr != nil {
+		writeError(c, http.StatusBadGateway, snapshot.Result)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"message":    message,
+		"checked_in": outcome.CheckedIn,
+		"claimed":    outcome.Claimed,
+		"skipped":    outcome.Skipped,
+		"credits":    outcome.Status.Credits,
+		"extra":      outcome.Status.Extra,
+		"date":       snapshot.Date,
+	})
 }

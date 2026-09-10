@@ -288,6 +288,10 @@ export interface AccountRow {
   traecn_upstream_models?: string[]
   traecn_model_allowlist?: string[]
   traecn_models_synced_at?: string
+  traecn_checkin_date?: string
+  traecn_checkin_at?: string
+  traecn_checkin_credits?: number
+  traecn_checkin_result?: string
   balance_query_url?: string
   models?: string[]
   model_mapping?: string

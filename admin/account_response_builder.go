@@ -215,6 +215,7 @@ func (h *Handler) buildAccountResponse(
 	}
 	traeCNUpstreamModels := row.GetCredentialStringSlice(auth.TraeCNUpstreamModelsCredentialKey)
 	traeCNModelAllowlist := row.GetCredentialStringSlice(auth.TraeCNModelAllowlistCredentialKey)
+	traeCNCheckinCredits, _ := strconv.ParseInt(strings.TrimSpace(row.GetCredential(auth.TraeCNCheckinCreditsCredentialKey)), 10, 64)
 	// Pre-catalog rows stored the optional Trae narrowing list in the generic
 	// `models` field. Preserve it for the editor only when the dedicated fields
 	// have never been initialized; a synchronized catalog (or an explicit empty
@@ -266,6 +267,10 @@ func (h *Handler) buildAccountResponse(
 		TraeCNUpstreamModels:         traeCNUpstreamModels,
 		TraeCNModelAllowlist:         traeCNModelAllowlist,
 		TraeCNModelsSyncedAt:         row.GetCredential(auth.TraeCNModelsSyncedAtCredentialKey),
+		TraeCNCheckinDate:            row.GetCredential(auth.TraeCNCheckinDateCredentialKey),
+		TraeCNCheckinAt:              row.GetCredential(auth.TraeCNCheckinAtCredentialKey),
+		TraeCNCheckinCredits:         traeCNCheckinCredits,
+		TraeCNCheckinResult:          row.GetCredential(auth.TraeCNCheckinResultCredentialKey),
 		BalanceQueryURL:              balanceQueryURL,
 		Models:                       row.GetCredentialStringSlice("models"),
 		ModelMapping:                 modelMapping,
