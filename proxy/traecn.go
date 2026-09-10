@@ -434,7 +434,27 @@ const (
 	traeCNModelsPath             = "/v1/models"
 	traeCNModelsDetailCompatPath = "/v1/models/detail?function=chat_v3"
 	traeCNModelsDetailPath       = "/api/ide/v1/get_detail_param"
+	// 桌面客户端真正在用的是批量接口：单数 get_detail_param 返回的目录会落后
+	// （实测 chat_v3 少 9 个模型，包括 glm-5.3-flash / kimi-k3 / qwen3.8-*）。
+	traeCNModelsBatchDetailPath = "/api/ide/v1/batch_get_detail_param"
 )
+
+// traeCNBatchDetailBody 构造客户端同款批量目录请求。functions 只取对话与 Agent
+// 两个分组：其它分组（code_reviewer / refactor / inline_chat 等）是插件内部用途，
+// 混进来会暴露根本无法对话的 config。
+func traeCNBatchDetailBody() []byte {
+	payload, _ := json.Marshal(map[string]any{
+		"functions":                 []string{"chat_v3", "solo_agent"},
+		"agent_type":                "solo_agent",
+		"current_config_info":       map[string]any{"config_name": "", "is_custom_model": false},
+		"mode_type":                 0,
+		"access_type":               0,
+		"ab_force_vids":             "",
+		"ab_autotest_advanced_mode": 0,
+		"show_custom_model":         true,
+	})
+	return payload
+}
 
 // FetchTraeCNModels fetches the logical model IDs exposed by a Trae-compatible
 // upstream. The preferred endpoint is the OpenAI-compatible GET /v1/models
@@ -546,6 +566,20 @@ func fetchTraeCNModels(ctx context.Context, store *auth.Store, account *auth.Acc
 	}
 
 	var failures []string
+	// 批量目录接口优先：客户端就是用它渲染模型选择器的，单数接口与兼容面
+	// （/v1/models）给的目录都可能落后，新上线的模型只有这里能看到。
+	for _, providerAuth := range []bool{true, false} {
+		raw, _, requestErr := doRequest(http.MethodPost, traeCNModelsBatchDetailPath, traeCNBatchDetailBody(), providerAuth)
+		if requestErr == nil {
+			if models := extractTraeCNModelIDs(raw); len(models) > 0 {
+				return models, nil
+			}
+			failures = append(failures, "POST /api/ide/v1/batch_get_detail_param returned no model IDs")
+		} else {
+			failures = append(failures, fmt.Sprintf("POST /api/ide/v1/batch_get_detail_param: %v", requestErr))
+		}
+	}
+
 	// First try the OpenAI-compatible surface. It is the canonical endpoint
 	// exposed by the integrated trae-local-api project.
 	for _, providerAuth := range []bool{false, true} {
@@ -660,6 +694,44 @@ func traeCNPublicIDsForConfig(configName string) []string {
 	return []string{configName}
 }
 
+// traeCNFunctionConfigInfoListRaw 把 batch_get_detail_param 的
+// function_configs[].config_info_list 合并成一个 JSON 数组；没有该结构时返回空串。
+func traeCNFunctionConfigInfoListRaw(root gjson.Result) string {
+	functions := root.Get("function_configs")
+	if !functions.IsArray() {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteByte('[')
+	first := true
+	functions.ForEach(func(_, entry gjson.Result) bool {
+		if !entry.IsObject() {
+			return true
+		}
+		list := entry.Get("config_info_list")
+		if !list.IsArray() {
+			list = entry.Get("configInfoList")
+		}
+		if !list.IsArray() {
+			return true
+		}
+		list.ForEach(func(_, item gjson.Result) bool {
+			if !first {
+				b.WriteByte(',')
+			}
+			first = false
+			b.WriteString(item.Raw)
+			return true
+		})
+		return true
+	})
+	if first {
+		return ""
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
 func traeCNConfigInfoList(root gjson.Result) gjson.Result {
 	if !root.Exists() || root.Type == gjson.Null {
 		return gjson.Result{}
@@ -690,6 +762,11 @@ func extractTraeCNModelIDs(body []byte) []string {
 		return nil
 	}
 	root := gjson.ParseBytes(body)
+	// batch 响应把目录按 function 分组（function_configs[].config_info_list）。
+	// 合并成一个扁平 config 列表后复用下面的过滤规则，避免两套解析分叉。
+	if merged := traeCNFunctionConfigInfoListRaw(root); merged != "" {
+		root = gjson.Parse(`{"config_info_list":` + merged + `}`)
+	}
 	seen := make(map[string]struct{})
 	result := make([]string, 0)
 	add := func(value string) {

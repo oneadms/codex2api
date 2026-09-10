@@ -50,13 +50,19 @@ const (
 	// TraeCNAuthHost is the current Trae CN account/authentication domain.
 	// The agent/chat service still uses TraeCNDefaultHost, but its historical
 	// ExchangeToken route now returns a TLB 404 there.
-	TraeCNAuthHost         = "https://api.trae.cn"
-	TraeCNExchangePath     = "/cloudide/api/v3/trae/oauth/ExchangeToken"
-	TraeCNChatPath         = "/api/agent/v3/llm_utils_chat"
-	TraeCNOAuthClientID    = "ono9krqynydwx5"
-	TraeCNAppID            = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"
-	TraeCNDefaultIDE       = "3.3.94"
-	TraeCNDefaultIDECode   = "20260212"
+	TraeCNAuthHost      = "https://api.trae.cn"
+	TraeCNExchangePath  = "/cloudide/api/v3/trae/oauth/ExchangeToken"
+	TraeCNChatPath      = "/api/agent/v3/llm_utils_chat"
+	TraeCNOAuthClientID = "ono9krqynydwx5"
+	TraeCNAppID         = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"
+	TraeCNDefaultIDE    = "3.3.99"
+	// TraeCNDefaultIDECode 是 Trae CN 3.3.99 桌面端真实发布的版本码（抓包实测
+	// x-ide-version-code 就是这个值）。Trae 按它灰度下发模型目录：同一账号同一
+	// 令牌下 20260212 只给 85 个 config（没有 glm-5.3-flash），20260901 起给 107
+	// 个。它是客户端的发布标识、必须保持真实且恒定——不能按当天日期伪造，否则
+	// 每天变化的版本码本身就是异常指纹。客户端升级后用 TRAECN_IDE_VERSION_CODE
+	// 覆盖，或更新这里的常量。
+	TraeCNDefaultIDECode   = "20260901"
 	TraeCNDefaultUserAgent = "node-fetch/1.0 (+https://github.com/bitinn/node-fetch)"
 	TraeCNExchangeTimeout  = 30 * time.Second
 	TraeCNAccessTokenGrace = 5 * time.Minute
@@ -992,6 +998,16 @@ func discoverTraeCNDeviceProfile() traeCNDeviceProfile {
 // traeCNDeviceIDForMachineID mirrors the desktop client's 32-bit JavaScript
 // string hash. Trae expects x-device-id and x-machine-id to be distinct: the
 // former is this numeric derivative, while the latter is the telemetry ID.
+// traeCNPreferredIDECode 选择要上报的客户端发布码：优先用本机 app 里发现的更新
+// 值，否则回落到内置的真实发布码。YYYYMMDD 是定长数字，字典序即时间序。
+func traeCNPreferredIDECode(discovered string) string {
+	discovered = strings.TrimSpace(discovered)
+	if discovered > strings.TrimSpace(TraeCNDefaultIDECode) {
+		return discovered
+	}
+	return TraeCNDefaultIDECode
+}
+
 func traeCNDeviceIDForMachineID(machineID string) string {
 	var hash int32
 	for _, char := range machineID {
@@ -1030,8 +1046,10 @@ func traeCNDeviceProfileForSeed(seed string) traeCNDeviceProfile {
 	if value := firstTraeCNEnv("TRAECN_IDE_VERSION", "TRAE_IDE_VERSION"); value != "" {
 		profile.IDEVersion = value
 	}
+	explicitIDECode := false
 	if value := firstTraeCNEnv("TRAECN_IDE_VERSION_CODE", "TRAE_IDE_VERSION_CODE"); value != "" {
 		profile.IDEVersionCode = value
+		explicitIDECode = true
 	}
 	if profile.MachineID == "" {
 		digest := sha256.Sum256([]byte(seed))
@@ -1058,6 +1076,10 @@ func traeCNDeviceProfileForSeed(seed string) traeCNDeviceProfile {
 	if profile.IDEVersionCode == "" {
 		profile.IDEVersionCode = TraeCNDefaultIDECode
 	}
+	// 未被显式覆盖时对齐到真实的客户端发布码（客户端升级后由常量或 env 跟进）。
+	if !explicitIDECode {
+		profile.IDEVersionCode = traeCNPreferredIDECode(profile.IDEVersionCode)
+	}
 	return profile
 }
 
@@ -1070,29 +1092,7 @@ func TraeCNRequestHeaders(account *Account, accessToken, requestID string) http.
 	if requestID == "" {
 		requestID = uuid.NewString()
 	}
-	userID := ""
-	seed := requestID
-	if account != nil {
-		account.mu.RLock()
-		userID = strings.TrimSpace(account.TraeCNUserID)
-		stableIdentity := strings.TrimSpace(account.CredentialFamilyID)
-		if stableIdentity == "" {
-			stableIdentity = strings.TrimSpace(account.AccountID)
-		}
-		if stableIdentity == "" && account.DBID > 0 {
-			stableIdentity = strconv.FormatInt(account.DBID, 10)
-		}
-		refreshToken := strings.TrimSpace(account.RefreshToken)
-		account.mu.RUnlock()
-		if stableIdentity != "" {
-			seed = "traecn:" + stableIdentity
-		} else if refreshToken != "" {
-			// Transient accounts may not have a DB identity yet. Hash the RT as a
-			// last-resort seed without putting the credential itself in headers.
-			digest := sha256.Sum256([]byte(refreshToken))
-			seed = hex.EncodeToString(digest[:])
-		}
-	}
+	seed, userID := traeCNHeaderIdentity(account, requestID)
 	profile := traeCNDeviceProfileForSeed(seed)
 	traceID := strings.ReplaceAll(uuid.NewString(), "-", "")
 	appID := firstTraeCNEnv("TRAECN_APP_ID", "TRAE_APP_ID")
@@ -1127,6 +1127,34 @@ func TraeCNRequestHeaders(account *Account, accessToken, requestID string) http.
 	headers.Set("X-Request-ID", requestID)
 	headers.Set("X-Trae-Request-ID", requestID)
 	return headers
+}
+
+// traeCNHeaderIdentity 派生每个账号稳定的设备种子与 user id。账号无 DB 身份时
+// 用 RT 摘要兜底，绝不把凭据本身放进请求头。
+func traeCNHeaderIdentity(account *Account, requestID string) (seed, userID string) {
+	seed = requestID
+	if account == nil {
+		return seed, ""
+	}
+	account.mu.RLock()
+	userID = strings.TrimSpace(account.TraeCNUserID)
+	stableIdentity := strings.TrimSpace(account.CredentialFamilyID)
+	if stableIdentity == "" {
+		stableIdentity = strings.TrimSpace(account.AccountID)
+	}
+	if stableIdentity == "" && account.DBID > 0 {
+		stableIdentity = strconv.FormatInt(account.DBID, 10)
+	}
+	refreshToken := strings.TrimSpace(account.RefreshToken)
+	account.mu.RUnlock()
+	if stableIdentity != "" {
+		return "traecn:" + stableIdentity, userID
+	}
+	if refreshToken != "" {
+		digest := sha256.Sum256([]byte(refreshToken))
+		return hex.EncodeToString(digest[:]), userID
+	}
+	return seed, userID
 }
 
 // refreshTraeCNAccount exchanges the account RT under a per-account mutex and

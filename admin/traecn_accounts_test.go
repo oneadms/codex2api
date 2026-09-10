@@ -174,6 +174,17 @@ func TestSyncTraeCNUpstreamModelsPersistsCatalogAndLegacyAllowlist(t *testing.T)
     {"config_name":"summary","usage":"summary","config_switch":true}
   ]
 }`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/ide/v1/batch_get_detail_param":
+			// 同步现在优先走客户端同款批量接口。
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+  "function_configs": [
+    {"function":"chat_v3","config_info_list":[
+      {"config_name":"DeepSeek-V4-Pro","config_switch":true},
+      {"config_name":"glm-5.2","config_switch":true}
+    ]}
+  ]
+}`))
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
