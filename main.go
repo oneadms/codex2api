@@ -233,6 +233,15 @@ func main() {
 		}
 	}
 	antigravityCfgCancel()
+	traeCNCfgCtx, traeCNCfgCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	if raw, err := db.LoadTraeCNConfig(traeCNCfgCtx); err != nil {
+		log.Printf("加载 TRAECN 配置失败: %v", err)
+	} else if parsed, parseErr := auth.ParseTraeCNSettings(raw); parseErr != nil {
+		log.Printf("TRAE 模型映射解析失败，请在设置页重新保存: %v", parseErr)
+	} else {
+		auth.SetConfiguredTraeCNSettings(parsed)
+	}
+	traeCNCfgCancel()
 
 	appliedResponseCache := proxy.GetResponseCacheAppliedConfig()
 	log.Printf(

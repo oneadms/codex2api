@@ -30,6 +30,11 @@ export interface AntigravitySettingsResponse {
   choices: AntigravityRedirectChoice[]
 }
 
+export interface TraeCNSettingsResponse {
+  model_mapping: Record<string, string>
+  models: string[]
+}
+
 export interface VisibleChannelsSettings {
   channels: UpstreamChannel[]
   all: UpstreamChannel[]

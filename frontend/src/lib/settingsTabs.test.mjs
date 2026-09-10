@@ -2,16 +2,16 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
-const settings = readFileSync(new URL('../pages/Settings.tsx', import.meta.url), 'utf8')
+const settings = readFileSync(new URL('../pages/Settings.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 const zh = JSON.parse(readFileSync(new URL('../locales/zh.json', import.meta.url), 'utf8'))
 const en = JSON.parse(readFileSync(new URL('../locales/en.json', import.meta.url), 'utf8'))
 
-const TABS = ['codex', 'claude', 'antigravity', 'grok', 'appearance', 'general']
+const TABS = ['codex', 'claude', 'antigravity', 'grok', 'traecn', 'appearance', 'general']
 
 test('settings page is split into one panel per tab driven by ?tab=', () => {
   assert.match(settings, /useSearchParams\(\)/)
   assert.match(settings, /searchParams\.get\('tab'\)/)
-  assert.match(settings, /type SettingsTabKey = 'codex' \| 'claude' \| 'antigravity' \| 'grok' \| 'appearance' \| 'general'/)
+  assert.match(settings, /type SettingsTabKey = 'codex' \| 'claude' \| 'antigravity' \| 'grok' \| 'traecn' \| 'appearance' \| 'general'/)
   for (const tab of TABS) {
     assert.match(settings, new RegExp(`\\{ id: '${tab}', label: t\\('settings\\.nav\\.${tab}'\\)`), `tab pill ${tab}`)
     assert.match(settings, new RegExp(`\\{activeTab === '${tab}' \\? \\(`), `panel ${tab}`)
@@ -46,6 +46,9 @@ test('channel-specific cards live in their channel tab, shared cards in general'
   assert.ok(panel('claude').includes('<ClaudeCodeSettingsCard />'))
   assert.ok(panel('antigravity').includes('settings.antigravityOAuth.title'))
   assert.ok(panel('grok').includes('settings.grokSettingsTitle'))
+  assert.ok(panel('traecn').includes('<TraeCNModelMapping />'))
+  assert.ok(panel('traecn').includes('settings.traecnDefaultModel'))
+  assert.ok(!codex.includes('settings.traecnDefaultModel'))
   const appearance = panel('appearance')
   assert.ok(appearance.includes('settings.display') && appearance.includes('settings.backgroundImage'))
   const general = panel('general')

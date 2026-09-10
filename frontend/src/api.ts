@@ -148,6 +148,7 @@ import type {
   ChannelTestSettings,
   ChannelTestSettingsResponse,
   AntigravitySettingsResponse,
+  TraeCNSettingsResponse,
 } from './types'
 
 const BASE = '/api/admin'
@@ -1001,6 +1002,12 @@ export const api = {
     request<VisibleChannelsSettings>('/settings/visible-channels', {
       method: 'PUT',
       body: JSON.stringify({ channels }),
+    }),
+  getTraeCNSettings: () => request<TraeCNSettingsResponse>('/settings/traecn'),
+  updateTraeCNSettings: (modelMapping: Record<string, string>) =>
+    request<TraeCNSettingsResponse>('/settings/traecn', {
+      method: 'PUT',
+      body: JSON.stringify({ model_mapping: modelMapping }),
     }),
   getAntigravitySettings: () => request<AntigravitySettingsResponse>('/settings/antigravity'),
   updateAntigravitySettings: (patch: { model_redirects?: Record<string, string>; redirect_overrides_effort?: boolean }) =>

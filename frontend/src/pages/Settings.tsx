@@ -5,6 +5,7 @@ import { api, resetAdminAuthState, setAdminKey } from '../api'
 import { formatBeijingTime, getTimezone, setTimezone } from '../utils/time'
 import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
+import TraeCNModelMapping from '../components/TraeCNModelMapping'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
 import type { AntigravityOAuthClientSetting, AntigravitySettingsResponse, ChannelTestSettings, HealthResponse, ModelInfo, SiteBranding, SystemSettings, UpstreamChannel } from '../types'
@@ -157,7 +158,7 @@ const DEFAULT_CODEX_UA_CONFIG: Required<CodexUserAgentConfig> = {
   terminal: 'xterm-256color',
 }
 
-type SettingsTabKey = 'codex' | 'claude' | 'antigravity' | 'grok' | 'appearance' | 'general'
+type SettingsTabKey = 'codex' | 'claude' | 'antigravity' | 'grok' | 'traecn' | 'appearance' | 'general'
 // 设置项适用渠道（按后端消费点核对）：
 //   CODEX_ONLY   仅 Codex（Responses/WS、生图存储、Tier 计费、模型清单）
 //   CODEX_CLAUDE 依赖 5h/7d 用量窗口的逻辑，Codex 与 Claude 都会写该窗口
@@ -167,7 +168,7 @@ const CHANNELS_CODEX_ONLY: readonly UpstreamChannel[] = ['codex']
 const CHANNELS_CODEX_CLAUDE: readonly UpstreamChannel[] = ['codex', 'claude']
 const CHANNELS_STREAMING: readonly UpstreamChannel[] = ['codex', 'grok', 'antigravity']
 const CHANNELS_RELAY: readonly UpstreamChannel[] = ['codex', 'antigravity']
-const SETTINGS_TAB_KEYS: readonly SettingsTabKey[] = ['codex', 'claude', 'antigravity', 'grok', 'appearance', 'general']
+const SETTINGS_TAB_KEYS: readonly SettingsTabKey[] = ['codex', 'claude', 'antigravity', 'grok', 'traecn', 'appearance', 'general']
 const DEFAULT_SETTINGS_TAB: SettingsTabKey = 'codex'
 const isSettingsTabKey = (value: string | null): value is SettingsTabKey =>
   value !== null && (SETTINGS_TAB_KEYS as readonly string[]).includes(value)
@@ -186,6 +187,7 @@ const LEGACY_SECTION_TABS: Record<string, SettingsTabKey> = {
   'settings-grok': 'grok',
   'settings-claude': 'claude',
   'settings-antigravity': 'antigravity',
+  'settings-traecn': 'traecn',
   'settings-appearance': 'appearance',
 }
 // 每个 Tab 内的分区目录：多于一个分区的 Tab 渲染侧边目录并按滚动位置高亮。
@@ -200,6 +202,7 @@ const SETTINGS_TAB_SECTION_INDEX: Record<SettingsTabKey, ReadonlyArray<{ id: str
   claude: [{ id: 'settings-claude', labelKey: 'settings.nav.claude', icon: <ChannelLogo channel="claude" size={16} /> }],
   antigravity: [{ id: 'settings-antigravity', labelKey: 'settings.nav.antigravity', icon: <ChannelLogo channel="antigravity" size={16} /> }],
   grok: [{ id: 'settings-grok', labelKey: 'settings.nav.grok', icon: <ChannelLogo channel="grok" size={16} /> }],
+  traecn: [{ id: 'settings-traecn', labelKey: 'settings.traecnSettingsTitle', icon: <ChannelLogo channel="traecn" size={16} /> }],
   appearance: [{ id: 'settings-appearance', labelKey: 'settings.nav.appearance', icon: <Palette /> }],
   general: [
     { id: 'settings-overview', labelKey: 'settings.nav.overview', icon: <Activity /> },
@@ -3036,6 +3039,7 @@ export default function Settings() {
         { id: 'claude', label: t('settings.nav.claude'), icon: <ChannelLogo channel="claude" size={16} /> },
         { id: 'antigravity', label: t('settings.nav.antigravity'), icon: <ChannelLogo channel="antigravity" size={16} /> },
         { id: 'grok', label: t('settings.nav.grok'), icon: <ChannelLogo channel="grok" size={16} /> },
+        { id: 'traecn', label: t('settings.nav.traecn'), icon: <ChannelLogo channel="traecn" size={16} /> },
         { id: 'appearance', label: t('settings.nav.appearance'), icon: <Palette className="size-4" /> },
         { id: 'general', label: t('settings.nav.general'), icon: <SlidersHorizontal className="size-4" /> },
       ] as const satisfies ReadonlyArray<{ id: SettingsTabKey; label: string; icon: ReactNode }>,
@@ -3117,7 +3121,7 @@ export default function Settings() {
         <PageHeader
           title={t('settings.title')}
           description={t('settings.description')}
-          actions={
+          actions={activeTab === 'traecn' ? null :
             <>
               <SaveStatusPill autoSaveStatus={autoSaveStatus} dirtyCount={dirtyCount} />
               {renderSaveButton('shrink-0')}
@@ -3372,35 +3376,6 @@ export default function Settings() {
                     onCheckedChange={(checked) => autoSaveBooleanField('auto_activate_5h_window_enabled', checked)}
                   />
                 </SettingField>
-              </SettingsCard>
-
-              <SettingsCard
-                title={t('settings.traecnSettingsTitle')}
-                description={t('settings.traecnSettingsDesc')}
-                icon={<ChannelLogo channel="traecn" size={16} />}
-              >
-                <div className={SETTINGS_FIELD_GRID}>
-                  <SettingField
-                    label={t('settings.traecnDefaultModel')}
-                    description={t('settings.traecnDefaultModelDesc')}
-                  >
-                    <Select
-                      value={settingsForm.traecn_default_model || 'auto'}
-                      onValueChange={(value) => autoSaveStringField('traecn_default_model', value)}
-                      options={traeCNModelOptions}
-                    />
-                  </SettingField>
-                  <SettingField
-                    label={t('settings.traecnTestModel')}
-                    description={t('settings.traecnTestModelDesc')}
-                  >
-                    <Select
-                      value={settingsForm.traecn_test_model || 'auto'}
-                      onValueChange={(value) => autoSaveStringField('traecn_test_model', value)}
-                      options={traeCNModelOptions}
-                    />
-                  </SettingField>
-                </div>
               </SettingsCard>
 
               <SettingsCard title={t('settings.globalAutoPauseTitle')} description={t('settings.globalAutoPauseDesc')} icon={<Activity className="size-4" />} channels={CHANNELS_CODEX_CLAUDE}>
@@ -4310,6 +4285,24 @@ export default function Settings() {
                 </Sheet>
               </SettingsSection>
             </>
+          ) : null}
+
+          {activeTab === 'traecn' ? (
+            <SettingsSection id="settings-traecn" title={t('settings.traecnSettingsTitle')} description={t('settings.traecnMapping.sectionDescription')} icon={<ChannelLogo channel="traecn" size={16} />}>
+              <SettingsCard title={t('settings.traecnMapping.title')} description={t('settings.traecnMapping.description')} icon={<Shuffle className="size-4" />}>
+                <TraeCNModelMapping />
+              </SettingsCard>
+              <SettingsCard title={t('settings.traecnMapping.defaults')} description={t('settings.traecnSettingsDesc')} icon={<ChannelLogo channel="traecn" size={16} />}>
+                <div className={SETTINGS_FIELD_GRID}>
+                  <SettingField label={t('settings.traecnDefaultModel')} description={t('settings.traecnDefaultModelDesc')}>
+                    <Select value={settingsForm.traecn_default_model || 'auto'} onValueChange={(value) => autoSaveStringField('traecn_default_model', value)} options={traeCNModelOptions} />
+                  </SettingField>
+                  <SettingField label={t('settings.traecnTestModel')} description={t('settings.traecnTestModelDesc')}>
+                    <Select value={settingsForm.traecn_test_model || 'auto'} onValueChange={(value) => autoSaveStringField('traecn_test_model', value)} options={traeCNModelOptions} />
+                  </SettingField>
+                </div>
+              </SettingsCard>
+            </SettingsSection>
           ) : null}
 
           {activeTab === 'claude' ? (

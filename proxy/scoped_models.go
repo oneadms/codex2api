@@ -230,8 +230,8 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 
 		case account.IsTraeCNAPI():
 			models := account.TraeCNEffectiveModels()
-			for _, id := range models {
-				addScopedModel(records, id, modelBackingTraeCN, time.Time{}, false)
+			for _, id := range auth.TraeCNPublicModels(models) {
+				addScopedModel(records, id, modelBackingTraeCN, time.Time{}, !modelIDInList(id, models))
 				addTarget(id)
 			}
 

@@ -242,12 +242,13 @@ func buildTraeCNRequestBody(canonical []byte) ([]byte, string, error) {
 		return nil, model, err
 	}
 	functionName := "chat_v3"
-	if model == "" || strings.EqualFold(model, "auto") {
+	targetModel := auth.TraeCNRequestModel(model)
+	if targetModel == "" || strings.EqualFold(targetModel, "auto") {
 		functionName = "inline_chat"
 	}
 	body := map[string]any{"messages": messages, "function": functionName, "stream": true}
-	if model != "" && !strings.EqualFold(model, "auto") {
-		body["model"] = auth.TraeCNWireModel(model)
+	if targetModel != "" && !strings.EqualFold(targetModel, "auto") {
+		body["model"] = auth.TraeCNWireModel(targetModel)
 	}
 	tools, err := traeCNToolsFromResponses(root.Get("tools"))
 	if err != nil {
@@ -758,7 +759,7 @@ type traeCNOutputRef struct {
 }
 
 type traeCNToolCall struct {
-	key          string
+	providerID   string
 	id           string
 	callID       string
 	name         string
@@ -870,7 +871,7 @@ func (s *traeCNCanonicalState) emitReasoning(writer io.Writer, text string) erro
 	}))
 }
 
-func traeToolCalls(root gjson.Result) []gjson.Result {
+func traeToolCalls(root gjson.Result, eventName string) []gjson.Result {
 	for _, path := range []string{"tool_calls", "message.tool_calls", "choices.0.delta.tool_calls", "choices.0.message.tool_calls"} {
 		value := root.Get(path)
 		if value.IsArray() {
@@ -880,7 +881,11 @@ func traeToolCalls(root gjson.Result) []gjson.Result {
 			return []gjson.Result{value}
 		}
 	}
-	switch strings.ToLower(strings.TrimSpace(root.Get("type").String())) {
+	typ := strings.TrimSpace(root.Get("type").String())
+	if typ == "" {
+		typ = eventName
+	}
+	switch strings.ToLower(typ) {
 	case "tool_call", "function_call", "custom_tool_call":
 		return []gjson.Result{root}
 	}
@@ -897,9 +902,28 @@ func traeToolField(root gjson.Result, paths ...string) gjson.Result {
 }
 
 func (s *traeCNCanonicalState) mergeToolCall(writer io.Writer, raw gjson.Result, position int) error {
+	if !raw.IsObject() {
+		return nil
+	}
 	id := strings.TrimSpace(traeFirstText(raw, "id", "call_id", "tool_call_id"))
 	callID := strings.TrimSpace(traeFirstText(raw, "call_id", "id", "tool_call_id"))
-	name := strings.TrimSpace(traeFirstText(raw, "function.name", "name", "tool_name"))
+	function := raw.Get("function")
+	// 部分上游把 function 编码成 JSON 字符串，先解开对象再读取名称和参数。
+	if function.Type == gjson.String {
+		function = gjson.Parse(function.String())
+	}
+	name := strings.TrimSpace(traeFirstText(function, "name"))
+	if name == "" {
+		name = strings.TrimSpace(traeFirstText(raw, "name", "tool_name"))
+	}
+	argument := traeArgumentString(traeToolField(function, "arguments", "input"))
+	if argument == "" {
+		argument = traeArgumentString(traeToolField(raw, "arguments", "input", "params", "arguments_delta"))
+	}
+	// 空数组占位和只有 index 的心跳不构成工具调用，避免创建无名称的输出项。
+	if id == "" && name == "" && argument == "" {
+		return nil
+	}
 	index := position
 	if raw.Get("index").Exists() {
 		index = int(raw.Get("index").Int())
@@ -911,33 +935,40 @@ func (s *traeCNCanonicalState) mergeToolCall(writer io.Writer, raw gjson.Result,
 	}
 	tool := s.toolByKey[key]
 	if tool == nil && key != indexKey {
-		tool = s.toolByKey[indexKey]
+		candidate := s.toolByKey[indexKey]
+		// 数组位置会在下一批调用中复用；不同的上游 ID 不能合并成同一调用。
+		if candidate != nil && (candidate.providerID == "" || candidate.providerID == id) {
+			tool = candidate
+		}
 	}
 	if tool == nil {
+		providerID := id
 		if id == "" {
 			id = "call_" + uuid.NewString()
 		}
 		if callID == "" {
 			callID = id
 		}
-		tool = &traeCNToolCall{key: key, id: id, callID: callID, name: name, outputIndex: len(s.output), custom: strings.EqualFold(raw.Get("type").String(), "custom_tool_call")}
+		tool = &traeCNToolCall{providerID: providerID, id: id, callID: callID, name: name, outputIndex: len(s.output), custom: strings.EqualFold(raw.Get("type").String(), "custom_tool_call")}
 		s.toolByKey[key] = tool
 		s.toolByKey[indexKey] = tool
 		s.tools = append(s.tools, tool)
 		s.output = append(s.output, traeCNOutputRef{kind: traeCNOutputTool, tool: tool})
 	} else {
-		// Providers commonly include id/name only in the first tool delta and
-		// identify later argument fragments solely by index. Alias both keys so
-		// those fragments continue the same canonical output item.
+		// 名称、ID 和参数可能分批到达；发出输出项后保持下游调用标识稳定。
 		s.toolByKey[indexKey] = tool
 		if id != "" {
 			s.toolByKey[id] = tool
+			tool.providerID = id
+			if !tool.itemAdded {
+				tool.id = id
+				tool.callID = callID
+			}
 		}
 	}
 	if tool.name == "" && name != "" {
 		tool.name = name
 	}
-	argument := traeArgumentString(traeToolField(raw, "function.arguments", "arguments", "input", "params", "function.input", "arguments_delta"))
 	if argument != "" {
 		current := tool.arguments.String()
 		switch {
@@ -1210,7 +1241,7 @@ func (s *traeCNCanonicalState) consume(writer io.Writer, eventName string, data 
 		if err := s.emitReasoning(writer, reasoning); err != nil {
 			return err
 		}
-		for index, tool := range traeToolCalls(parsed) {
+		for index, tool := range traeToolCalls(parsed, payloadEventName) {
 			if err := s.mergeToolCall(writer, tool, index); err != nil {
 				return err
 			}
@@ -1218,6 +1249,12 @@ func (s *traeCNCanonicalState) consume(writer io.Writer, eventName string, data 
 	case "token_usage", "usage":
 		s.updateUsage(parsed)
 	case "done", "end", "finish", "message_end":
+		// 结束事件可能携带最终的工具名称或完整参数，先合并再执行完整性校验。
+		for index, tool := range traeToolCalls(parsed, payloadEventName) {
+			if err := s.mergeToolCall(writer, tool, index); err != nil {
+				return err
+			}
+		}
 		finishReason := traeFirstText(parsed, "finish_reason", "stop_reason", "reason")
 		if finishReason == "" {
 			finishReason = "stop"
@@ -1229,7 +1266,11 @@ func (s *traeCNCanonicalState) consume(writer io.Writer, eventName string, data 
 		// Forward-compatible fallback for a renamed output event.
 		content := traeFirstText(parsed, "response", "content", "text", "message.content")
 		reasoning := traeFirstText(parsed, "reasoning_content", "reasoning")
-		calls := traeToolCalls(parsed)
+		toolEventName := payloadEventName
+		if toolEventName == "" {
+			toolEventName = name
+		}
+		calls := traeToolCalls(parsed, toolEventName)
 		if content != "" || reasoning != "" || len(calls) > 0 {
 			if err := s.emitText(writer, content); err != nil {
 				return err

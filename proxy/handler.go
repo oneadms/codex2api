@@ -470,17 +470,14 @@ func traeCNChannelAccountFilter(model string) auth.AccountFilter {
 		if account == nil || !account.IsTraeCNAPI() {
 			return false
 		}
-		routedModel := model
-		if mappedModel, ok := resolveAccountModelMapping(account, model); ok && mappedModel != "" {
-			routedModel = mappedModel
-		}
+		routedModel := auth.TraeCNRequestModel(model)
 		if model != "" && account.IsModelRateLimited(model) {
 			return false
 		}
 		if routedModel != "" && !strings.EqualFold(routedModel, model) && account.IsModelRateLimited(routedModel) {
 			return false
 		}
-		return account.TraeCNSupportsModel(routedModel)
+		return account.TraeCNSupportsModel(model)
 	}
 }
 
@@ -8807,9 +8804,7 @@ func (h *Handler) supportedModelIDs(ctx context.Context) []string {
 				declared = append(append([]string{}, declared...), grokMediaModelsForAccount(account)...)
 			}
 			if account.IsTraeCNAPI() {
-				if len(declared) == 0 {
-					declared = account.TraeCNEffectiveModels()
-				}
+				declared = auth.TraeCNPublicModels(account.TraeCNEffectiveModels())
 			}
 			for _, model := range declared {
 				key := strings.ToLower(strings.TrimSpace(model))
@@ -8861,7 +8856,7 @@ func (h *Handler) supportedModelIDs(ctx context.Context) []string {
 
 func (h *Handler) traeCNChannelModels() []string {
 	if h == nil || h.store == nil {
-		return auth.TraeCNDefaultModelIDs()
+		return auth.TraeCNPublicModels(auth.TraeCNDefaultModelIDs())
 	}
 	seen := make(map[string]struct{})
 	models := make([]string, 0)
@@ -8869,7 +8864,7 @@ func (h *Handler) traeCNChannelModels() []string {
 		if account == nil || !account.IsTraeCNAPI() {
 			continue
 		}
-		declared := account.TraeCNEffectiveModels()
+		declared := auth.TraeCNPublicModels(account.TraeCNEffectiveModels())
 		for _, model := range declared {
 			model = strings.TrimSpace(model)
 			key := strings.ToLower(model)
@@ -8884,7 +8879,7 @@ func (h *Handler) traeCNChannelModels() []string {
 		}
 	}
 	if len(models) == 0 {
-		models = auth.TraeCNDefaultModelIDs()
+		models = auth.TraeCNPublicModels(auth.TraeCNDefaultModelIDs())
 	}
 	sort.Strings(models)
 	return models

@@ -1220,6 +1220,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.PUT("/settings/channel-tests", h.UpdateChannelTestSettings)
 	api.GET("/settings/antigravity", h.GetAntigravitySettings)
 	api.PUT("/settings/antigravity", h.UpdateAntigravitySettings)
+	api.GET("/settings/traecn", h.GetTraeCNSettings)
+	api.PUT("/settings/traecn", h.UpdateTraeCNSettings)
 	api.POST("/settings/background-upload", h.UploadBackgroundAsset)
 	api.POST("/settings/image-storage/test", h.TestImageStorageConnection)
 	api.GET("/prompt-filter/logs", h.ListPromptFilterLogs)

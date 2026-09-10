@@ -437,7 +437,7 @@ func (a *Account) EnsureTraeCNAccessToken(ctx context.Context, proxyURL string, 
 }
 
 func (a *Account) TraeCNSupportsModel(model string) bool {
-	model = strings.TrimSpace(model)
+	model = TraeCNRequestModel(model)
 	if model == "" {
 		return false
 	}
