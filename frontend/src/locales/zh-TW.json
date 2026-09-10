@@ -1,5 +1,10 @@
 {
-  "common": {"success":"成功","failed":"失敗","enabled":"開啟","disabled":"關閉"},
+  "common": {
+    "success": "成功",
+    "failed": "失敗",
+    "enabled": "開啟",
+    "disabled": "關閉"
+  },
   "traecn": {
     "pageTitle": "TRAECN 帳號",
     "pageDescription": "管理 Trae CN Refresh Token 號池、模型、代理與群組。",
@@ -62,7 +67,19 @@
     "emptyTitle": "尚無 TRAECN 帳號",
     "emptyDescription": "新增一個或多行 Trae CN Refresh Token 來建立號池。",
     "noMatchesTitle": "沒有符合的帳號",
-    "noMatchesDescription": "請調整搜尋關鍵字或狀態篩選。"
+    "noMatchesDescription": "請調整搜尋關鍵字或狀態篩選。",
+    "modelsInherited": "繼承全域目錄",
+    "modelsInheritedHint": "此帳號未單獨設定模型，目前使用閘道的 Trae CN 全域模型目錄",
+    "modelsOwn": "帳號自有模型",
+    "modelsViewAll": "全部 {{count}} 個",
+    "modelsViewList": "檢視模型",
+    "modelsViewAllHint": "檢視此帳號的完整模型清單",
+    "modelsModalTitle": "模型清單",
+    "modelsSearchPlaceholder": "搜尋模型…",
+    "modelsShowing": "顯示 {{shown}} / {{total}}",
+    "modelsNoMatch": "沒有符合的模型",
+    "modelsCopyAll": "複製全部",
+    "modelsCopyOne": "複製 {{model}}"
   },
   "antigravity": {
     "authKind": "憑證類型",
@@ -292,16 +309,16 @@
       "description": "為 TRAECN 模型設定對外名稱，儲存後立即生效。",
       "sectionDescription": "獨立管理 TRAECN 的模型映射、預設模型和測試模型。",
       "defaults": "預設模型與連線測試",
-      "hint": "客戶端使用左側名稱，TRAE 實際呼叫右側模型。支援覆蓋已有名稱；精確比對且不區分大小寫。僅作用於 TRAECN，目標模型仍須在帳號可用範圍內。",
+      "hint": "客戶端使用左側名稱，TRAE 實際呼叫右側的上游模型名（例如 Doubao_1_6）。支援覆蓋既有名稱；精確比對且不分大小寫，大小寫與分隔符差異（deepseek-v4-pro / DeepSeek-V4-Pro）視為同一個模型。僅作用於 TRAECN，目標模型仍需在該帳號的可用目錄內。",
       "empty": "尚未設定自訂映射，目前沿用 TRAE 內建模型名稱。",
       "source": "對外模型名",
-      "target": "TRAE 目標模型",
-      "selectTarget": "選擇目標模型",
+      "target": "TRAE 上游模型名",
       "invalid": "請填完整每一列，對外模型名稱不能重複。",
       "add": "新增映射",
       "reset": "復原未儲存修改",
       "save": "儲存映射",
-      "saved": "TRAE 模型映射已儲存並生效"
+      "saved": "TRAE 模型映射已儲存並生效",
+      "targetPlaceholder": "例如 Doubao_1_6"
     },
     "traecnSettingsTitle": "TRAECN 設定",
     "traecnSettingsDesc": "設定 TRAECN 請求未指定模型時的預設模型，以及帳號測試連線使用的模型。",

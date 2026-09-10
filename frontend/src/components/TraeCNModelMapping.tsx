@@ -7,7 +7,6 @@ import { getErrorMessage } from '../utils/error'
 import { serializeModelMappingEntries, type ModelMappingEntry } from '../lib/modelMapping'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
-import { Select } from './ui/select'
 import type { TraeCNSettingsResponse } from '../types'
 
 const entriesFrom = (settings: TraeCNSettingsResponse): ModelMappingEntry[] =>
@@ -18,6 +17,7 @@ export default function TraeCNModelMapping() {
   const { t } = useTranslation()
   const { showToast } = useToast()
   const sourceListId = useId()
+  const targetListId = useId()
   const [settings, setSettings] = useState<TraeCNSettingsResponse | null>(null)
   const [entries, setEntries] = useState<ModelMappingEntry[]>([])
   const [loading, setLoading] = useState(true)
@@ -67,7 +67,6 @@ export default function TraeCNModelMapping() {
   if (loading) return <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />{t('common.loading')}</div>
   if (!settings) return <div className="space-y-3"><p role="alert" className="text-sm text-destructive">{error}</p><Button variant="outline" onClick={() => void load()}>{t('common.retry')}</Button></div>
 
-  const options = settings.models.map((model) => ({ value: model, label: model }))
   return (
     <div className="space-y-4">
       <p className="text-sm leading-relaxed text-muted-foreground">{t('settings.traecnMapping.hint')}</p>
@@ -79,15 +78,18 @@ export default function TraeCNModelMapping() {
               <span>{t('settings.traecnMapping.source')}</span>
               <Input aria-label={`${t('settings.traecnMapping.source')} ${index + 1}`} value={entry.from} list={sourceListId} placeholder="my-code-model" disabled={saving} onChange={(event) => change(index, 'from', event.target.value)} className="font-mono text-sm" />
             </label>
-            <div className="space-y-1.5 text-xs font-medium">
+            <label className="space-y-1.5 text-xs font-medium">
               <span>{t('settings.traecnMapping.target')}</span>
-              <Select value={entry.to} placeholder={t('settings.traecnMapping.selectTarget')} options={entry.to && !settings.models.includes(entry.to) ? [...options, { value: entry.to, label: entry.to }] : options} disabled={saving} onValueChange={(value) => change(index, 'to', value)} />
-            </div>
+              {/* 目标就是 TRAE 上游模型名，可能不在网关目录里（例如 Doubao_1_6），
+                  因此这里必须是可自由输入的文本框，不能用只能选目录项的下拉。 */}
+              <Input aria-label={`${t('settings.traecnMapping.target')} ${index + 1}`} value={entry.to} list={targetListId} placeholder={t('settings.traecnMapping.targetPlaceholder')} disabled={saving} onChange={(event) => change(index, 'to', event.target.value)} className="font-mono text-sm" />
+            </label>
             <Button variant="ghost" size="icon" disabled={saving} aria-label={`${t('common.delete')} ${index + 1}`} onClick={() => setEntries((current) => current.filter((_, i) => i !== index))}><Trash2 className="size-4" /></Button>
           </div>
         ))}
       </div>
       <datalist id={sourceListId}>{settings.models.map((model) => <option key={model} value={model} />)}</datalist>
+      <datalist id={targetListId}>{settings.models.map((model) => <option key={model} value={model} />)}</datalist>
       {invalid && <p role="alert" className="text-sm text-destructive">{t('settings.traecnMapping.invalid')}</p>}
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       <div className="flex flex-wrap items-center justify-between gap-3">

@@ -2,8 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useTranslation } from "react-i18next";
 import {
   CheckCircle2,
+  ChevronDown,
   CircleAlert,
+  Copy,
   Edit3,
+  Layers,
   ListRestart,
   Loader2,
   Plus,
@@ -27,6 +30,7 @@ import StateShell from "../components/StateShell";
 import Pagination from "../components/Pagination";
 import StatusBadge from "../components/StatusBadge";
 import AccountGroupMultiSelect from "../components/AccountGroupMultiSelect";
+import ModelLogo from "../components/ModelLogo";
 import Modal from "../components/Modal";
 import { CompactStat } from "../components/CompactStat";
 import { Button } from "@/components/ui/button";
@@ -408,6 +412,181 @@ function GroupChips({ account, groups }: { account: AccountRow; groups: AccountG
   );
 }
 
+// 模型列：Trae CN 账号的模型目录动辄几十个（截图里是 44 个），单元格里只放前几个
+// 可读的，剩下的通过「全部 N」打开完整列表——以前只有一个 "+41" 的纯文本，压根看不出
+// 到底有哪些模型。
+const MODEL_CELL_LIMIT = 3;
+
+function ModelCatalogChip({ model, tone = "solid" }: { model: string; tone?: "solid" | "muted" }) {
+  return (
+    <span
+      title={model}
+      className={cn(
+        "inline-flex max-w-[11rem] items-center truncate rounded-md border px-1.5 py-0.5 font-mono text-[10px] leading-4",
+        tone === "solid"
+          ? "border-border/70 bg-muted/60 text-foreground/85"
+          : "border-dashed border-border/70 bg-transparent text-muted-foreground",
+      )}
+    >
+      {model}
+    </span>
+  );
+}
+
+function TraeCNModelsCell({
+  account,
+  catalog,
+  onOpen,
+}: {
+  account: AccountRow;
+  catalog: string[];
+  onOpen: () => void;
+}) {
+  const { t } = useTranslation();
+  const own = (account.models ?? []).filter(Boolean);
+  const inherited = own.length === 0;
+  const resolved = inherited ? catalog.filter(Boolean) : own;
+  if (resolved.length === 0) {
+    return <span className="text-xs text-muted-foreground">{t("common.noData")}</span>;
+  }
+  return (
+    <div className="flex max-w-[19rem] flex-col gap-1">
+      <div className="flex flex-wrap items-center gap-1">
+        {inherited ? (
+          <span
+            title={t("traecn.modelsInheritedHint")}
+            className="inline-flex items-center gap-1 rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary"
+          >
+            <Layers className="size-3" />
+            {t("traecn.modelsInherited")}
+          </span>
+        ) : null}
+        {resolved.slice(0, MODEL_CELL_LIMIT).map((model) => (
+          <ModelCatalogChip key={model} model={model} tone={inherited ? "muted" : "solid"} />
+        ))}
+      </div>
+      <button
+        type="button"
+        onClick={onOpen}
+        title={t("traecn.modelsViewAllHint")}
+        className="group inline-flex w-fit items-center gap-1 rounded-md border border-border/70 bg-background px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-primary"
+      >
+        {resolved.length > MODEL_CELL_LIMIT
+          ? t("traecn.modelsViewAll", { count: resolved.length })
+          : t("traecn.modelsViewList")}
+        <ChevronDown className="size-3 transition-transform group-hover:translate-y-px" />
+      </button>
+    </div>
+  );
+}
+
+function TraeCNModelsModal({
+  account,
+  catalog,
+  onClose,
+}: {
+  account: AccountRow | null;
+  catalog: string[];
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const { showToast } = useToast();
+  const [query, setQuery] = useState("");
+  useEffect(() => setQuery(""), [account?.id]);
+  const own = (account?.models ?? []).filter(Boolean);
+  const inherited = own.length === 0;
+  const resolved = useMemo(() => {
+    const source = inherited ? catalog : own;
+    const unique = Array.from(new Set(source.filter(Boolean)));
+    return inherited ? unique : unique.sort((a, b) => a.localeCompare(b));
+  }, [catalog, own, inherited]);
+  const keyword = query.trim().toLowerCase();
+  const filtered = useMemo(
+    () => (keyword ? resolved.filter((model) => model.toLowerCase().includes(keyword)) : resolved),
+    [keyword, resolved],
+  );
+  if (!account) return null;
+  const copy = async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      showToast(t("common.copied"), "success");
+    } catch {
+      showToast(t("common.copyFailed"), "error");
+    }
+  };
+  return (
+    <Modal
+      show
+      title={
+        <span className="flex items-center gap-2">
+          {t("traecn.modelsModalTitle")}
+          <Badge variant="secondary" className="font-mono text-[10px]">{resolved.length}</Badge>
+        </span>
+      }
+      onClose={onClose}
+      contentClassName="sm:max-w-[720px]"
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose}>{t("common.close")}</Button>
+          <Button onClick={() => void copy(resolved.join("\n"))} disabled={resolved.length === 0}>
+            <Copy className="size-4" />
+            {t("traecn.modelsCopyAll")}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <span className="truncate font-semibold text-foreground">{accountLabel(account)}</span>
+          <span
+            className={cn(
+              "inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-semibold",
+              inherited ? "bg-primary/10 text-primary" : "bg-muted text-foreground/80",
+            )}
+          >
+            {inherited ? <Layers className="size-3" /> : null}
+            {inherited ? t("traecn.modelsInherited") : t("traecn.modelsOwn")}
+          </span>
+          <span className="ml-auto font-mono text-[11px]">
+            {t("traecn.modelsShowing", { shown: filtered.length, total: resolved.length })}
+          </span>
+        </div>
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            autoFocus
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t("traecn.modelsSearchPlaceholder")}
+            className="pl-8"
+          />
+        </div>
+        {filtered.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
+            {t("traecn.modelsNoMatch")}
+          </div>
+        ) : (
+          <div className="flex max-h-[46vh] flex-wrap gap-1.5 overflow-y-auto rounded-lg border border-border/70 bg-muted/20 p-2">
+            {filtered.map((model) => (
+              <button
+                key={model}
+                type="button"
+                onClick={() => void copy(model)}
+                title={t("traecn.modelsCopyOne", { model })}
+                className="group inline-flex max-w-full items-center gap-1 rounded-md border border-border/70 bg-background px-2 py-1 font-mono text-[11px] text-foreground/85 transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-primary"
+              >
+                <ModelLogo model={model} size={16} className="shrink-0" />
+                <span className="truncate">{model}</span>
+                <Copy className="size-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-60" />
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 function AccountActions({
   account,
   busy,
@@ -474,6 +653,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const [status, setStatus] = useState<StatusFilter>("all");
   const [busy, setBusy] = useState<{ id: number; action: string } | null>(null);
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null);
+  const [modelsAccount, setModelsAccount] = useState<AccountRow | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [addForm, setAddForm] = useState({ name: "", refreshTokens: "", host: DEFAULT_HOST, proxyURL: "", groupIDs: [] as number[], enabled: true });
   const [addResult, setAddResult] = useState<AddTraeCNAccountsResponse | null>(null);
@@ -684,7 +864,6 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
                     : testingAccount?.id === account.id
                       ? "test"
                       : null;
-                  const accountModels = account.models?.length ? account.models : models;
                   return (
                     <tr key={account.id} className={cn("border-b border-border/70 last:border-0", account.enabled === false && "opacity-60")}>
                       <td className="max-w-[220px] px-3 py-3">
@@ -696,11 +875,8 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
                           {account.email || `ID ${account.id}`}
                         </div>
                       </td>
-                      <td className="max-w-[250px] px-3 py-3">
-                        <div className="flex flex-wrap gap-1">
-                          {accountModels.slice(0, 3).map((model) => <Badge key={model} variant="outline" className="max-w-48 truncate text-[10px]">{model}</Badge>)}
-                          {accountModels.length > 3 ? <span className="text-[11px] text-muted-foreground">+{accountModels.length - 3}</span> : null}
-                        </div>
+                      <td className="px-3 py-3 align-top">
+                        <TraeCNModelsCell account={account} catalog={models} onOpen={() => setModelsAccount(account)} />
                       </td>
                       <td className="max-w-[240px] px-3 py-3">
                         <div className="truncate font-mono text-xs" title={account.traecn_host || DEFAULT_HOST}>{account.traecn_host || DEFAULT_HOST}</div>
@@ -753,6 +929,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
           onClose={() => setTestingAccount(null)}
         />
       ) : null}
+      <TraeCNModelsModal account={modelsAccount} catalog={models} onClose={() => setModelsAccount(null)} />
       {confirmDialog}
     </div>
   );
