@@ -255,9 +255,17 @@ func TestScopedCodexManifestScopesCapabilitiesPerChannel(t *testing.T) {
 			if model.Get("apply_patch_tool_type").String() != "freeform" || !slices.Contains(efforts, "ultra") {
 				t.Fatalf("trae model lost bridged capabilities: %s", model.Raw)
 			}
+			// 客户端对官方 slug 会复用内置的 code_mode_only；网关必须显式声明
+			// direct，否则弱模型被迫用 JS 编排工具、频繁一句话收尾。
+			if got := model.Get("tool_mode").String(); got != "direct" {
+				t.Fatalf("trae model tool_mode = %q, want direct: %s", got, model.Raw)
+			}
 		case "grok-4.6":
 			if model.Get("apply_patch_tool_type").String() != "freeform" {
 				t.Fatalf("grok model lost apply_patch bridging: %s", model.Raw)
+			}
+			if model.Get("tool_mode").Exists() {
+				t.Fatalf("grok tool_mode must stay provider-owned: %s", model.Raw)
 			}
 			if len(efforts) != 0 {
 				t.Fatalf("grok reasoning ladder must stay provider-owned: %s", model.Raw)

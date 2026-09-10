@@ -215,7 +215,13 @@ type scopedCodexManifestItem struct {
 	// (spawn_agent / send_message / followup_task …)。官方 gpt-5.6 / gpt-6 系列
 	// 声明 "v2"；缺这个字段时根 agent 还能靠上层配置拿到工具，子 agent 换模型后
 	// 就没有协作工具了（codex-rs core/src/tools/spec_plan.rs collab_tools_enabled）。
-	MultiAgentVersion          string         `json:"multi_agent_version,omitempty"`
+	MultiAgentVersion string `json:"multi_agent_version,omitempty"`
+	// ToolMode 决定客户端怎么把工具交给模型：Direct 直接给 function 工具，
+	// CodeMode/CodeModeOnly 则只暴露 code mode（写 JS 调 tools.*）。
+	// 客户端对官方 slug 会复用内置条目的 code_mode_only，Trae 这类后端模型在 JS
+	// 编排模式下表现很差（频繁用一句正文收尾、任务看起来"自己停了"），因此在
+	// 网关自有渠道显式声明 direct 覆盖它。
+	ToolMode                   string         `json:"tool_mode,omitempty"`
 	ExperimentalSupportedTools []string       `json:"experimental_supported_tools"`
 	TruncationPolicy           map[string]any `json:"truncation_policy"`
 	ContextWindow              int            `json:"context_window,omitempty"`
@@ -258,6 +264,9 @@ func applyCodexManifestChannelCapabilities(item *scopedCodexManifestItem, owner 
 		item.ApplyPatchToolType = "freeform"
 		item.SupportedReasoningLevels = codexDefaultReasoningLevels()
 		item.DefaultReasoningLevel = "medium"
+		// 覆盖客户端内置条目的 code_mode_only：Trae 后端模型直接调 function 工具
+		// 才稳定（与直连第三方 GLM key 的体验一致）。
+		item.ToolMode = "direct"
 	case "xai":
 		item.ApplyPatchToolType = "freeform"
 	}
