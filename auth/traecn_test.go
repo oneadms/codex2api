@@ -50,26 +50,29 @@ func TestTraeCNSupportsModelHonorsExplicitModelsAllowlist(t *testing.T) {
 	}
 }
 
-func TestTraeCNSupportsModelMatchesPublicAliasToWireCatalog(t *testing.T) {
+// 内置别名表删除后，只有大小写/分隔符差异仍算同一个模型；deepseek-v3 不再等于
+// deepseek-v4-pro，改名由管理员的 TRAECN 模型映射负责。
+func TestTraeCNSupportsModelMatchesCatalogNamesAcrossNamingStyles(t *testing.T) {
 	t.Parallel()
 	account := &Account{
 		UpstreamType:               UpstreamTraeCN,
 		AccessToken:                "at",
 		RefreshToken:               "rt",
-		TraeCNUpstreamModelCatalog: []string{"DeepSeek-V4-Pro", "auto"},
+		TraeCNUpstreamModelCatalog: []string{"DeepSeek-V4-Pro", "Doubao_1_6", "auto"},
 	}
-	if !account.TraeCNSupportsModel("deepseek-v3") {
-		t.Fatal("public deepseek-v3 alias should match the synchronized wire catalog")
+	for _, model := range []string{"deepseek-v4-pro", "DeepSeek-V4-Pro", "doubao-1-6", "auto"} {
+		if !account.TraeCNSupportsModel(model) {
+			t.Errorf("catalog model %q should be routable", model)
+		}
 	}
-	if !account.TraeCNSupportsModel("auto") {
-		t.Fatal("Trae auto sentinel should remain routable")
-	}
-	if account.TraeCNSupportsModel("gpt-5.6-sol") {
-		t.Fatal("Codex-only model must not match a Trae wire catalog")
+	for _, model := range []string{"deepseek-v3", "gpt-5.6-sol", "claude-opus-4-7"} {
+		if account.TraeCNSupportsModel(model) {
+			t.Errorf("model %q must not match a Trae catalog without an explicit mapping", model)
+		}
 	}
 }
 
-func TestTraeCNAllowlistIntersectsByWireModel(t *testing.T) {
+func TestTraeCNAllowlistIntersectsByNamingStyle(t *testing.T) {
 	t.Parallel()
 	account := &Account{
 		UpstreamType:               UpstreamTraeCN,
@@ -77,9 +80,14 @@ func TestTraeCNAllowlistIntersectsByWireModel(t *testing.T) {
 		RefreshToken:               "rt",
 		TraeCNUpstreamModelCatalog: []string{"DeepSeek-V4-Pro", "glm-5.2"},
 	}
-	got := account.TraeCNModelsForAllowlist([]string{"deepseek-v3"})
+	// 允许清单写目录风格的名字，provider 目录写成 DeepSeek-V4-Pro，仍要命中。
+	got := account.TraeCNModelsForAllowlist([]string{"deepseek-v4-pro"})
 	if len(got) != 1 || got[0] != "DeepSeek-V4-Pro" {
-		t.Fatalf("wire-aware allowlist intersection = %#v", got)
+		t.Fatalf("allowlist intersection = %#v", got)
+	}
+	// 别名表已删除：旧兼容 ID 不再等价于别的模型。
+	if got := account.TraeCNModelsForAllowlist([]string{"deepseek-v3"}); len(got) != 0 {
+		t.Fatalf("removed alias still matched a catalog model: %#v", got)
 	}
 }
 

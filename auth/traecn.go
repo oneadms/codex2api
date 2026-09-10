@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 )
@@ -261,45 +262,14 @@ func TraeCNIntersectModelIDs(catalog, allowlist []string) []string {
 	return traeCNModelIntersection(catalog, allowlist)
 }
 
-// traeCNIsCanonicalPublicModelID distinguishes IDs emitted by the local
-// compatibility surface from provider config names.  The distinction matters
-// when applying an allowlist: selecting deepseek-v4-pro must not implicitly
-// enable every Claude alias that happens to share its wire config, while a
-// raw provider value such as DeepSeek-V4-Pro should still match that alias.
+// traeCNIsCanonicalPublicModelID reports whether a model name is a catalog ID
+// as advertised by the provider (as opposed to a wire/config name). Without a
+// built-in alias table the two coincide; the check is kept for the allowlist
+// and intersection paths that still need to recognize catalog spellings.
 func traeCNIsCanonicalPublicModelID(model string) bool {
 	model = strings.TrimSpace(model)
 	if model == "" {
 		return false
-	}
-	// Prefer an exact public spelling. Some provider wire IDs differ only by
-	// case from a public alias (for example DeepSeek-V4-Pro vs
-	// deepseek-v4-pro); checking exact public IDs first keeps the lower-case
-	// compatibility ID canonical while allowing the provider's exact casing to
-	// be recognized as a raw wire value below.
-	for publicID := range traeCNWireModels {
-		if publicID == model {
-			return true
-		}
-	}
-	for _, publicID := range TraeCNDefaultModelIDs() {
-		if publicID == model {
-			return true
-		}
-	}
-	// A synchronized catalog normally preserves the provider's casing. Treat
-	// an exact wire value as provider-owned even when its lower-case form is
-	// also a public compatibility ID.
-	for _, wire := range traeCNWireModels {
-		if wire == model {
-			return false
-		}
-	}
-	// Be lenient about casing for public IDs that do not collide with an exact
-	// provider spelling.
-	for publicID := range traeCNWireModels {
-		if strings.EqualFold(publicID, model) {
-			return true
-		}
 	}
 	for _, publicID := range TraeCNDefaultModelIDs() {
 		if strings.EqualFold(publicID, model) {
@@ -309,9 +279,11 @@ func traeCNIsCanonicalPublicModelID(model string) bool {
 	return false
 }
 
-// traeCNModelsEquivalent compares a public compatibility ID and a provider
-// wire/config ID.  A synchronized catalog may contain either form depending
-// on which upstream endpoint answered; routing must remain stable across both.
+// traeCNModelsEquivalent compares two model identifiers。内置别名表已删除，因此不再
+// 按「上游 wire 名」互相换算，只允许大小写与分隔符差异：provider 目录写
+// DeepSeek-V4-Pro / Doubao_1_6，网关目录写 deepseek-v4-pro / doubao-1-6，它们指向
+// 同一个模型，必须仍然匹配；deepseek-v3 与 deepseek-v4-pro 这类不同模型不再互相
+// 命中。真正的改名交给管理员的 TRAECN 模型映射。
 func traeCNModelsEquivalent(left, right string) bool {
 	left = strings.TrimSpace(left)
 	right = strings.TrimSpace(right)
@@ -321,15 +293,19 @@ func traeCNModelsEquivalent(left, right string) bool {
 	if strings.EqualFold(left, right) {
 		return true
 	}
-	// Two distinct public aliases may intentionally point at the same provider
-	// wire model. Treating them as interchangeable would let a narrow allowlist
-	// for one alias silently expose its siblings; only compare by wire name when
-	// at least one side is a raw/provider identifier.
-	if traeCNIsCanonicalPublicModelID(left) && traeCNIsCanonicalPublicModelID(right) {
-		return false
+	leftKey, rightKey := traeCNModelKey(left), traeCNModelKey(right)
+	return leftKey != "" && leftKey == rightKey
+}
+
+// traeCNModelKey 归一化模型名：只保留字母数字，用于跨命名风格比较。
+func traeCNModelKey(value string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(value)) {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			b.WriteRune(r)
+		}
 	}
-	return strings.EqualFold(TraeCNWireModel(left), right) ||
-		strings.EqualFold(left, TraeCNWireModel(right))
+	return b.String()
 }
 
 // traeCNEffectiveModelsLocked computes the routable logical catalog. The
@@ -437,10 +413,11 @@ func (a *Account) EnsureTraeCNAccessToken(ctx context.Context, proxyURL string, 
 }
 
 func (a *Account) TraeCNSupportsModel(model string) bool {
-	model = TraeCNRequestModel(model)
+	model = strings.TrimSpace(model)
 	if model == "" {
 		return false
 	}
+	model = TraeCNRequestModel(model)
 	models := a.TraeCNEffectiveModels()
 	for _, candidate := range models {
 		if traeCNModelsEquivalent(candidate, model) {

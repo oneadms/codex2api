@@ -20,8 +20,9 @@ import (
 // A key with the default (auto) upstream channel must not silently fall back
 // to a Trae CN account when a Codex model has no Codex account available.  The
 // previous resolver treated every Trae account with an empty Models list as a
-// generic relay, so this request reached the Trae converter and failed with a
-// misleading 400 (for example, additional_tools is not representable there).
+// generic relay, so this request reached the wrong upstream altogether; the
+// misleading 400 it produced (additional_tools used to be unrepresentable in
+// the Trae converter) was only the symptom of that misrouting.
 func TestDefaultChannelCodexRequestDoesNotFallbackToTraeCN(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -49,8 +50,11 @@ func TestDefaultChannelCodexRequestDoesNotFallbackToTraeCN(t *testing.T) {
 	})
 	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
 
-	// additional_tools is valid Responses input but intentionally unsupported by
-	// the Trae converter; seeing that converter's 400 would prove misrouting.
+	// The body keeps the Responses Lite tool carrier a Codex client sends.  That
+	// carrier no longer fails inside the Trae converter (see
+	// traecn_additional_tools_test.go), so misrouting is asserted the direct way
+	// below: no Trae upstream call may happen and the request must not degrade
+	// into a conversion error.
 	body := []byte(`{"model":"gpt-5.4","stream":false,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},{"type":"additional_tools","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}]}`)
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)

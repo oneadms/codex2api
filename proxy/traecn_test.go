@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -47,7 +46,7 @@ func TestBuildTraeCNRequestBodyPreservesCanonicalSemantics(t *testing.T) {
 		t.Fatalf("model = %q", model)
 	}
 	root := gjson.ParseBytes(body)
-	if root.Get("model").String() != "DeepSeek-V4-Pro" {
+	if root.Get("model").String() != "deepseek-v3" {
 		t.Fatalf("wire model = %q, body=%s", root.Get("model").String(), body)
 	}
 	if root.Get("config_name").Exists() {
@@ -130,8 +129,9 @@ func TestFetchTraeCNModelsUsesWrapperDetailEndpoint(t *testing.T) {
 	if detailCalls != 1 {
 		t.Fatalf("detail calls = %d, want 1", detailCalls)
 	}
-	if len(models) != 3 || !containsFold(models, "deepseek-v3") || !containsFold(models, "deepseek-v4-pro") || !containsFold(models, "auto") {
-		t.Fatalf("models = %#v, want public aliases plus auto", models)
+	// 别名表删除后，provider 的 config 名称就是对外 ID（按目录里的写法归一大小写）。
+	if len(models) != 2 || !containsFold(models, "deepseek-v4-pro") || !containsFold(models, "auto") {
+		t.Fatalf("models = %#v, want the provider config name plus auto", models)
 	}
 }
 
@@ -330,29 +330,44 @@ func TestExecuteTraeCNRequestAggregatesNonStreamingResponses(t *testing.T) {
 	if gjson.GetBytes(payload, "output.0.content.0.text").String() != "hello" || gjson.GetBytes(payload, "usage.total_tokens").Int() != 3 {
 		t.Fatalf("unexpected aggregated response: %s", payload)
 	}
-	if gjson.GetBytes(requestBody, "model").String() != "DeepSeek-V4-Pro" || gjson.GetBytes(requestBody, "config_name").Exists() || !gjson.GetBytes(requestBody, "stream").Bool() {
+	if gjson.GetBytes(requestBody, "model").String() != "deepseek-v3" || gjson.GetBytes(requestBody, "config_name").Exists() || !gjson.GetBytes(requestBody, "stream").Bool() {
 		t.Fatalf("unexpected upstream request: %s", requestBody)
 	}
 }
 
-func TestTraeCNWireModelCatalogMatchesExpectedAliases(t *testing.T) {
-	t.Parallel()
-	want := map[string]string{
-		"claude-opus-4-7": "glm-5.2",
-		"deepseek-v3":     "DeepSeek-V4-Pro",
-		"qwen3.7-plus":    "qwen-3.7-plus",
-		"gpt-4o":          "custom_model_gpt-5",
-	}
-	for model, wire := range want {
-		if got := auth.TraeCNWireModel(model); got != wire {
-			t.Errorf("TraeCNWireModel(%q) = %q, want %q", model, got, wire)
+// 内置兼容别名表已删除：默认把请求里的模型名原样发给 Trae，只有管理员在 TRAECN
+// 设置里配置的映射才会改写上游模型名。
+func TestTraeCNUpstreamModelUsesRequestedOrMappedName(t *testing.T) {
+	previous := auth.ConfiguredTraeCNSettings()
+	t.Cleanup(func() { auth.SetConfiguredTraeCNSettings(previous) })
+	auth.SetConfiguredTraeCNSettings(auth.TraeCNSettings{})
+
+	for _, model := range []string{"claude-opus-4-7", "deepseek-v3", "glm-5.2"} {
+		body, got, err := buildTraeCNRequestBody([]byte(`{"model":"` + model + `","input":"hi"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != model || gjson.GetBytes(body, "model").String() != model {
+			t.Fatalf("model %q was rewritten to %q: %s", model, gjson.GetBytes(body, "model").String(), body)
 		}
 	}
-	// Ensure the generated request remains valid JSON as a final regression
-	// guard for map-based request construction.
-	body, _, err := buildTraeCNRequestBody([]byte(`{"model":"auto","input":"hi"}`))
-	if err != nil || !json.Valid(body) {
-		t.Fatalf("auto request = %s, err=%v", body, err)
+
+	// 管理员映射（对外名 -> 上游模型名）是唯一的改写来源。
+	auth.SetConfiguredTraeCNSettings(auth.TraeCNSettings{ModelMapping: map[string]string{"claude-opus-4-7": "DeepSeek-V4-Pro"}})
+	body, _, err := buildTraeCNRequestBody([]byte(`{"model":"claude-opus-4-7","input":"hi"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gjson.GetBytes(body, "model").String(); got != "DeepSeek-V4-Pro" {
+		t.Fatalf("configured mapping was not applied: %q", got)
+	}
+	// 未配置映射的模型不受影响。
+	body, _, err = buildTraeCNRequestBody([]byte(`{"model":"glm-5.2","input":"hi"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gjson.GetBytes(body, "model").String(); got != "glm-5.2" {
+		t.Fatalf("unmapped model changed: %q", got)
 	}
 }
 
@@ -374,7 +389,7 @@ func TestExtractTraeCNModelIDsFromConfigInfoList(t *testing.T) {
 }`)
 	got := extractTraeCNModelIDs(body)
 	joined := strings.Join(got, "\n")
-	for _, want := range []string{"deepseek-v3", "deepseek-v4-pro", "doubao-1-6", "doubao-seed-code", "gpt-4o", "gpt-4o-mini", "new-provider-model", "auto"} {
+	for _, want := range []string{"deepseek-v4-pro", "doubao-1-6", "doubao-seed-code", "new-provider-model", "auto"} {
 		if !modelIDInList(want, got) {
 			t.Errorf("catalog missing %q: %v", want, got)
 		}
@@ -413,7 +428,7 @@ func TestTraeCNAPIKeyRoutesAllProtocolsToTraeUpstream(t *testing.T) {
 			model:      "deepseek-v3",
 			body:       `{"model":"deepseek-v3","input":"hello","stream":true}`,
 			invoke:     func(h *Handler, c *gin.Context) { h.Responses(c) },
-			wireModel:  "DeepSeek-V4-Pro",
+			wireModel:  "deepseek-v3",
 			outputMark: `"type":"response.output_text.delta"`,
 		},
 		{
@@ -422,7 +437,7 @@ func TestTraeCNAPIKeyRoutesAllProtocolsToTraeUpstream(t *testing.T) {
 			model:      "deepseek-v3",
 			body:       `{"model":"deepseek-v3","messages":[{"role":"user","content":"hello"}],"stream":true}`,
 			invoke:     func(h *Handler, c *gin.Context) { h.ChatCompletions(c) },
-			wireModel:  "DeepSeek-V4-Pro",
+			wireModel:  "deepseek-v3",
 			outputMark: `"content":"ok"`,
 		},
 		{
@@ -431,7 +446,7 @@ func TestTraeCNAPIKeyRoutesAllProtocolsToTraeUpstream(t *testing.T) {
 			model:      "claude-opus-4-7",
 			body:       `{"model":"claude-opus-4-7","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"stream":true}`,
 			invoke:     func(h *Handler, c *gin.Context) { h.Messages(c) },
-			wireModel:  "glm-5.2",
+			wireModel:  "claude-opus-4-7",
 			outputMark: `"text":"ok"`,
 		},
 	}
@@ -504,7 +519,7 @@ func TestTraeCNAPIKeyRoutesNonStreamingChatAndMessages(t *testing.T) {
 			model:     "deepseek-v3",
 			body:      `{"model":"deepseek-v3","messages":[{"role":"user","content":"hello"}],"stream":false}`,
 			invoke:    func(h *Handler, c *gin.Context) { h.ChatCompletions(c) },
-			wireModel: "DeepSeek-V4-Pro", contentPath: "choices.0.message.content",
+			wireModel: "deepseek-v3", contentPath: "choices.0.message.content",
 		},
 		{
 			name:      "anthropic messages",
@@ -512,7 +527,7 @@ func TestTraeCNAPIKeyRoutesNonStreamingChatAndMessages(t *testing.T) {
 			model:     "claude-opus-4-7",
 			body:      `{"model":"claude-opus-4-7","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"stream":false}`,
 			invoke:    func(h *Handler, c *gin.Context) { h.Messages(c) },
-			wireModel: "glm-5.2", contentPath: "content.0.text",
+			wireModel: "claude-opus-4-7", contentPath: "content.0.text",
 		},
 	}
 	for index, tc := range tests {

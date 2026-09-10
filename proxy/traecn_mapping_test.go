@@ -19,7 +19,8 @@ func TestTraeCNModelMappingAllProtocols(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previous := auth.ConfiguredTraeCNSettings()
 	t.Cleanup(func() { auth.SetConfiguredTraeCNSettings(previous) })
-	auth.SetConfiguredTraeCNSettings(auth.TraeCNSettings{ModelMapping: map[string]string{"gpt-5.6-sol": "doubao-seed-code", "claude-opus-4-6": "doubao-seed-code"}})
+	// 映射目标直接写上游模型名（内置别名表已删除）。
+	auth.SetConfiguredTraeCNSettings(auth.TraeCNSettings{ModelMapping: map[string]string{"gpt-5.6-sol": "Doubao_1_6", "claude-opus-4-6": "Doubao_1_6"}})
 	for _, stream := range []bool{false, true} {
 		for _, tc := range []struct {
 			path   string
@@ -71,7 +72,7 @@ func TestTraeCNModelMappingAllProtocols(t *testing.T) {
 func TestTraeCNModelMappingCatalogAndChannelIsolation(t *testing.T) {
 	previous := auth.ConfiguredTraeCNSettings()
 	t.Cleanup(func() { auth.SetConfiguredTraeCNSettings(previous) })
-	auth.SetConfiguredTraeCNSettings(auth.TraeCNSettings{ModelMapping: map[string]string{"my-code": "doubao-seed-code", "gpt-5.5": "doubao-seed-code"}})
+	auth.SetConfiguredTraeCNSettings(auth.TraeCNSettings{ModelMapping: map[string]string{"my-code": "Doubao_1_6", "gpt-5.5": "doubao-seed-code"}})
 	handler := newTraeCNContextTestHandler(t, func(w http.ResponseWriter, r *http.Request) { t.Error("catalog lookup must not contact upstream") })
 	if !modelIDInList("my-code", handler.traeCNChannelModels()) {
 		t.Fatal("alias missing from TRAECN catalog")

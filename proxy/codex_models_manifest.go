@@ -204,9 +204,66 @@ type scopedCodexManifestItem struct {
 	SupportsReasoningSummaries bool                  `json:"supports_reasoning_summaries"`
 	SupportVerbosity           bool                  `json:"support_verbosity"`
 	SupportsParallelToolCalls  bool                  `json:"supports_parallel_tool_calls"`
-	ExperimentalSupportedTools []string              `json:"experimental_supported_tools"`
-	TruncationPolicy           map[string]any        `json:"truncation_policy"`
-	ContextWindow              int                   `json:"context_window,omitempty"`
+	// ApplyPatchToolType 决定 Codex 是否为该模型注册 apply_patch 工具：
+	// codex-rs 只在 model_info.apply_patch_tool_type 非空时才加这个工具
+	// (core/src/tools/spec_plan.rs)。官方 manifest 会给出 "freeform"；网关自建
+	// 条目一旦漏掉，客户端就不给模型任何原生改文件的手段——模型只能去调提示词里
+	// 提到、但客户端并未注册的工具（js / write_file 之类），客户端回
+	// "unsupported call"，而且因为根本没有补丁调用，审批提示也不会出现。
+	ApplyPatchToolType string `json:"apply_patch_tool_type,omitempty"`
+	// MultiAgentVersion 决定 Codex 是否给模型注册多智能体协作工具
+	// (spawn_agent / send_message / followup_task …)。官方 gpt-5.6 / gpt-6 系列
+	// 声明 "v2"；缺这个字段时根 agent 还能靠上层配置拿到工具，子 agent 换模型后
+	// 就没有协作工具了（codex-rs core/src/tools/spec_plan.rs collab_tools_enabled）。
+	MultiAgentVersion          string         `json:"multi_agent_version,omitempty"`
+	ExperimentalSupportedTools []string       `json:"experimental_supported_tools"`
+	TruncationPolicy           map[string]any `json:"truncation_policy"`
+	ContextWindow              int            `json:"context_window,omitempty"`
+}
+
+// codexDefaultReasoningLevels 是网关模型对外声明的思考档位，与官方 agentic
+// 模型（gpt-5.6 / gpt-6 系列）一致，含 ultra。
+func codexDefaultReasoningLevels() []codexReasoningLevel {
+	return []codexReasoningLevel{
+		{Effort: "low", Description: "Fast responses with lighter reasoning"},
+		{Effort: "medium", Description: "Balances speed and reasoning depth for everyday tasks"},
+		{Effort: "high", Description: "Greater reasoning depth for complex problems"},
+		{Effort: "xhigh", Description: "Extra high reasoning depth for complex problems"},
+		{Effort: "max", Description: "Maximum reasoning depth for the hardest problems"},
+		{Effort: "ultra", Description: "Maximum reasoning with automatic task delegation"},
+	}
+}
+
+// applyCodexManifestChannelCapabilities 按渠道补齐网关自建条目的能力声明。
+//
+// 这些字段直接决定客户端给模型注册什么工具、放哪些思考档位，属于「上游能力」，
+// 因此只在网关确实实现了对应桥接的渠道上声明，其余渠道保持原样：
+//
+//   - trae：apply_patch freeform 由 Trae 转换器双向桥接（custom -> function ->
+//     custom_tool_call），思考档位含 ultra（"Maximum reasoning with automatic task
+//     delegation"），默认 medium；
+//   - xai（Grok）：apply_patch 同样有 custom 别名桥接，但思考档位沿用 Grok 自己的
+//     接受范围，不套用含 ultra 的默认表；
+//   - relay / Antigravity / 其他：不声明，避免把 freeform 工具或 ultra 档位丢给
+//     没有对应桥接（Antigravity 只桥接 function 工具）或未知的上游。
+func applyCodexManifestChannelCapabilities(item *scopedCodexManifestItem, owner string) {
+	if item == nil {
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(owner)) {
+	case "openai":
+		// 官方 Codex 账号的模型由上游 manifest 自带能力声明，这里不插手。
+		return
+	case "trae":
+		item.ApplyPatchToolType = "freeform"
+		item.SupportedReasoningLevels = codexDefaultReasoningLevels()
+		item.DefaultReasoningLevel = "medium"
+	case "xai":
+		item.ApplyPatchToolType = "freeform"
+	}
+	// 多智能体协作工具由客户端执行，声明 v2 只是让子 agent 也保留
+	// spawn_agent / send_message；对网关各渠道的上游都无害。
+	item.MultiAgentVersion = "v2"
 }
 
 func buildScopedCodexManifest(models []api.Model) ([]byte, error) {
@@ -245,6 +302,7 @@ func buildScopedCodexManifest(models []api.Model) ([]byte, error) {
 		if strings.Contains(key, "image") {
 			item.InputModalities = []string{"text", "image"}
 		}
+		applyCodexManifestChannelCapabilities(&item, model.OwnedBy)
 		// Antigravity's reasoning metadata is provider-specific. Never infer
 		// levels from names such as "thinking" or "reason": Claude Opus
 		// `*-thinking` is not a Gemini reasoning-control model.

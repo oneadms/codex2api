@@ -190,7 +190,8 @@ func TestSyncTraeCNUpstreamModelsPersistsCatalogAndLegacyAllowlist(t *testing.T)
 		"expires_at":    time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 		"traecn_host":   provider.URL,
 		// This emulates a row created before the dedicated allowlist field.
-		"models": []string{"deepseek-v3"},
+		// 内置别名表已删除，允许清单必须写 provider 目录里的名字。
+		"models": []string{"deepseek-v4-pro"},
 	}, "")
 	if err != nil {
 		t.Fatal(err)
@@ -217,10 +218,10 @@ func TestSyncTraeCNUpstreamModelsPersistsCatalogAndLegacyAllowlist(t *testing.T)
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if !containsStringFold(response.Models, "deepseek-v3") || !containsStringFold(response.Models, "auto") {
+	if !containsStringFold(response.Models, "deepseek-v4-pro") || !containsStringFold(response.Models, "auto") {
 		t.Fatalf("synced catalog = %#v", response.Models)
 	}
-	if len(response.EffectiveModels) != 1 || !containsStringFold(response.EffectiveModels, "deepseek-v3") {
+	if len(response.EffectiveModels) != 1 || !containsStringFold(response.EffectiveModels, "deepseek-v4-pro") {
 		t.Fatalf("effective models = %#v, want legacy allowlist intersection", response.EffectiveModels)
 	}
 	if response.SyncedAt == "" {
@@ -230,14 +231,14 @@ func TestSyncTraeCNUpstreamModelsPersistsCatalogAndLegacyAllowlist(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsStringFold(row.GetCredentialStringSlice(auth.TraeCNUpstreamModelsCredentialKey), "deepseek-v3") {
+	if !containsStringFold(row.GetCredentialStringSlice(auth.TraeCNUpstreamModelsCredentialKey), "deepseek-v4-pro") {
 		t.Fatalf("persisted upstream catalog = %#v", row.GetCredentialStringSlice(auth.TraeCNUpstreamModelsCredentialKey))
 	}
-	if allowlist := row.GetCredentialStringSlice(auth.TraeCNModelAllowlistCredentialKey); len(allowlist) != 1 || !containsStringFold(allowlist, "deepseek-v3") {
+	if allowlist := row.GetCredentialStringSlice(auth.TraeCNModelAllowlistCredentialKey); len(allowlist) != 1 || !containsStringFold(allowlist, "deepseek-v4-pro") {
 		t.Fatalf("persisted allowlist = %#v", allowlist)
 	}
 	runtime := store.FindByID(id)
-	if runtime == nil || !runtime.TraeCNSupportsModel("deepseek-v3") || runtime.TraeCNSupportsModel("glm-5.2") {
+	if runtime == nil || !runtime.TraeCNSupportsModel("deepseek-v4-pro") || runtime.TraeCNSupportsModel("glm-5.2") {
 		t.Fatalf("runtime catalog/allowlist mismatch: %#v", runtime)
 	}
 }

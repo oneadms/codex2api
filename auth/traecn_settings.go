@@ -107,23 +107,28 @@ func traeCNModelInCatalog(model string, catalog []string) bool {
 	return false
 }
 
-// TraeCNPublicModels 仅公开目标仍在账号目录和白名单中的别名。
-// 覆盖已有名称时同样校验映射目标，避免别名绕过账号的模型限制。
+// TraeCNPublicModels 拼出对外可见的 TRAECN 目录：账号目录原样公开，再加上管理员在
+// TRAECN 模型映射里配置的对外名称。
+//
+// 别名表删除后映射目标就是上游模型名，通常与目录里的写法只差大小写或分隔符
+// （Doubao_1_6 vs doubao-1-6），按 traeCNModelsEquivalent 匹配即可；目标不在账号
+// 目录（含允许清单收窄后的结果）里的映射不对外暴露，避免别名绕过账号限制。
 func TraeCNPublicModels(catalog []string) []string {
 	snapshot, _ := configuredTraeCNSettings.Load().(traeCNSettingsSnapshot)
-	models := make([]string, 0, len(catalog)+len(snapshot.targets))
-	available := make(map[string]bool, len(catalog))
-	for _, model := range catalog {
-		available[strings.ToLower(model)] = true
-	}
-	seen := make(map[string]bool)
+	models := make([]string, 0, len(catalog)+len(snapshot.settings.ModelMapping))
+	seen := make(map[string]bool, len(catalog)+len(snapshot.settings.ModelMapping))
 	add := func(model string) {
-		key := strings.ToLower(model)
-		target := traeCNRequestModel(snapshot, model)
-		if !seen[key] && (available[strings.ToLower(target)] || traeCNModelInCatalog(target, catalog)) {
-			seen[key] = true
-			models = append(models, model)
+		key := strings.ToLower(strings.TrimSpace(model))
+		if key == "" {
+			return
 		}
+		// 覆盖已有名称时同样校验映射目标：映射把某个名字指到账号服务不了的模型时，
+		// 这个名字不对外暴露，避免出现「列表里看得到、请求必然失败」的条目。
+		if seen[key] || !traeCNModelInCatalog(traeCNRequestModel(snapshot, model), catalog) {
+			return
+		}
+		seen[key] = true
+		models = append(models, model)
 	}
 	for _, model := range catalog {
 		add(model)

@@ -83,10 +83,14 @@ func traeToolOutputText(value gjson.Result) string {
 
 // traeCNMessagesFromResponses converts the canonical Responses request used by
 // the proxy handlers into the message envelope expected by llm_utils_chat.
-func traeCNMessagesFromResponses(body []byte) ([]map[string]any, error) {
+// The second return value carries the raw tool declarations lifted out of
+// Responses Lite input carrier items (type=additional_tools); the caller merges
+// them into the top-level tools[] because Trae only accepts function
+// declarations there.
+func traeCNMessagesFromResponses(body []byte) ([]map[string]any, []string, traeCNBridges, error) {
 	root := gjson.ParseBytes(body)
 	if !root.IsObject() {
-		return nil, fmt.Errorf("Trae CN request must be a JSON object")
+		return nil, nil, nil, fmt.Errorf("Trae CN request must be a JSON object")
 	}
 	messages := make([]map[string]any, 0)
 	if instructions := strings.TrimSpace(root.Get("instructions").String()); instructions != "" {
@@ -154,6 +158,21 @@ func traeCNMessagesFromResponses(body []byte) ([]map[string]any, error) {
 
 	input := root.Get("input")
 	knownCalls := make(map[string]struct{})
+	// 载体项声明的工具按名去重（续会话回放会重复带上同一个载体）。
+	var carrierTools []string
+	carrierToolNames := make(map[string]struct{})
+	// 被降级成 function 的工具（freeform / 托管 shell）：响应侧要按这个名字还原
+	// 成客户端能执行的 item 形态。历史里的调用同样登记，续会话照旧可用。
+	bridges := traeCNBridges{}
+	appendToolCall := func(call traeCNBridgedCall) {
+		messages = append(messages, map[string]any{
+			"role": "assistant", "content": []any{},
+			"tool_calls": []any{map[string]any{"id": call.CallID, "type": "function", "function_call": map[string]any{"name": call.Name, "arguments": call.Arguments}}},
+		})
+	}
+	appendToolOutput := func(callID, text string) {
+		messages = append(messages, map[string]any{"role": "tool", "tool_call_id": callID, "content": []any{map[string]any{"type": "text", "text": text}}})
+	}
 	if input.Type == gjson.String {
 		messages = append(messages, map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": input.String()}}})
 	} else if input.IsArray() {
@@ -209,16 +228,61 @@ func traeCNMessagesFromResponses(body []byte) ([]map[string]any, error) {
 					return false
 				}
 				messages = append(messages, map[string]any{"role": "tool", "tool_call_id": callID, "content": []any{map[string]any{"type": "text", "text": traeToolOutputText(item.Get("output"))}}})
+			case "custom_tool_call", "local_shell_call", "shell_call", "apply_patch_call",
+				"tool_search_call", "mcp_tool_call", "mcp_call", "computer_call",
+				"code_interpreter_call", "file_search_call":
+				// 客户端执行的调用项：归一成 Trae 的 function 调用历史。Codex 会在
+				// 下一轮回放这些形态（含托管 shell / 托管补丁），不处理就整轮 400。
+				call, ok := traeCNBridgedCallFromItem(item, typ)
+				if !ok {
+					conversionErr = fmt.Errorf("Responses input item type %q cannot be represented by Trae CN", typ)
+					return false
+				}
+				knownCalls[call.CallID] = struct{}{}
+				bridges.add(call.Name, call.Bridge)
+				appendToolCall(call)
+			case "custom_tool_call_output", "local_shell_call_output", "shell_call_output",
+				"apply_patch_call_output", "tool_search_output", "tool_search_call_output",
+				"mcp_tool_call_output", "mcp_call_output", "computer_call_output",
+				"code_interpreter_call_output", "file_search_call_output":
+				callID, text, placeholder := traeCNBridgedOutputFromItem(item, typ)
+				if callID == "" {
+					// 输出项没有 call_id：保持内容，作为一个用户可见的结果文本。
+					messages = append(messages, map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": text}}})
+					return true
+				}
+				if _, known := knownCalls[callID]; !known {
+					// 历史从中间开始：补一条占位调用，保持「调用 + 结果」配对。
+					knownCalls[callID] = struct{}{}
+					appendToolCall(traeCNBridgedCall{Name: placeholder, CallID: callID, Arguments: "{}"})
+				}
+				appendToolOutput(callID, text)
+			case "additional_tools":
+				// Responses Lite 把延迟工具声明放进 input[] 载体项，它本身不是
+				// 对话内容：可表示的工具提升到顶层 tools[]，不产生消息。
+				carrierTools = append(carrierTools, traeCNCarrierToolRaws(item, carrierToolNames)...)
 			case "":
 				// Ignore empty input items emitted by some Responses clients.
 			default:
+				if traeCNInputItemIsMetadata(typ) {
+					// 只承载元数据（item_reference、压缩标记、托管工具的结果载体等）：
+					// 没有对话内容可表达，跳过。
+					return true
+				}
+				if role, text := traeCNInputItemText(item, typ); role != "" {
+					if text == "" {
+						return true
+					}
+					messages = append(messages, map[string]any{"role": role, "content": []any{map[string]any{"type": "text", "text": text}}})
+					return true
+				}
 				conversionErr = fmt.Errorf("Responses input item type %q cannot be represented by Trae CN", typ)
 				return false
 			}
 			return true
 		})
 		if conversionErr != nil {
-			return nil, conversionErr
+			return nil, nil, nil, conversionErr
 		}
 	} else if messagesInput := root.Get("messages"); messagesInput.IsArray() {
 		// Defensive support for direct tests/callers; production handlers provide
@@ -228,31 +292,47 @@ func traeCNMessagesFromResponses(body []byte) ([]map[string]any, error) {
 	if len(messages) == 0 {
 		messages = append(messages, map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": ""}}})
 	}
-	return messages, nil
+	return messages, carrierTools, bridges, nil
 }
 
 func buildTraeCNRequestBody(canonical []byte) ([]byte, string, error) {
+	body, model, _, _, err := traeCNRequestBodyPlan(canonical)
+	return body, model, err
+}
+
+// traeCNRequestBodyPlan 除了 Trae 请求体与模型名，还回传被降级成 function 的
+// custom 工具名（Codex 的 freeform apply_patch 等）：响应侧必须把这些名字的调用
+// 还原成 custom_tool_call，否则客户端只会看到一个它无法执行的 function_call。
+func traeCNRequestBodyPlan(canonical []byte) ([]byte, string, traeCNBridges, traeCNContracts, error) {
 	root := gjson.ParseBytes(canonical)
 	if !root.IsObject() {
-		return nil, "", fmt.Errorf("invalid canonical request")
+		return nil, "", nil, nil, fmt.Errorf("invalid canonical request")
 	}
 	model := strings.TrimSpace(root.Get("model").String())
-	messages, err := traeCNMessagesFromResponses(canonical)
+	messages, carrierTools, bridges, err := traeCNMessagesFromResponses(canonical)
 	if err != nil {
-		return nil, model, err
+		return nil, model, nil, nil, err
 	}
 	functionName := "chat_v3"
 	targetModel := auth.TraeCNRequestModel(model)
 	if targetModel == "" || strings.EqualFold(targetModel, "auto") {
 		functionName = "inline_chat"
 	}
+	if hint := traeCNUltraDelegationHint(root.Get("reasoning.effort").String(), root.Get("tools")); hint != "" {
+		messages = traeCNAppendSystemInstruction(messages, hint)
+	}
 	body := map[string]any{"messages": messages, "function": functionName, "stream": true}
 	if targetModel != "" && !strings.EqualFold(targetModel, "auto") {
-		body["model"] = auth.TraeCNWireModel(targetModel)
+		// 内置兼容别名表已删除：管理员在 TRAECN 设置里配置的映射目标就是上游模型名。
+		body["model"] = targetModel
 	}
-	tools, err := traeCNToolsFromResponses(root.Get("tools"))
+	specs, contracts := traeCNToolPlanFromResponses(root.Get("tools"), carrierTools)
+	for name, contract := range contracts {
+		bridges.add(name, contract.Bridge)
+	}
+	tools, err := traeCNToolsFromResponses(specs)
 	if err != nil {
-		return nil, model, err
+		return nil, model, nil, nil, err
 	}
 	if len(tools) > 0 {
 		body["tools"] = tools
@@ -260,7 +340,7 @@ func buildTraeCNRequestBody(canonical []byte) ([]byte, string, error) {
 	if choice := root.Get("tool_choice"); choice.Exists() {
 		converted, choiceErr := responsesToolChoiceToChat(choice)
 		if choiceErr != nil {
-			return nil, model, choiceErr
+			return nil, model, nil, nil, choiceErr
 		}
 		if converted != nil {
 			body["tool_choice"] = converted
@@ -298,7 +378,7 @@ func buildTraeCNRequestBody(canonical []byte) ([]byte, string, error) {
 		body["n"] = n.Value()
 	}
 	encoded, err := json.Marshal(body)
-	return encoded, model, err
+	return encoded, model, bridges, contracts, err
 }
 
 func traeCanonicalFailure(id, model, code, message string) []byte {
@@ -551,35 +631,31 @@ func traeCNDetailConfigIsInternal(configName, usage string) bool {
 }
 
 // traeCNPublicIDsForConfig converts a config_name from get_detail_param into
-// IDs that clients can send to this gateway.  Known configs use the aliases
-// shared with TraeCNWireModel; unknown non-custom configs remain selectable by
-// their exact provider name so a newly introduced model is not discarded.
+// IDs that clients can send to this gateway.  There is no built-in alias table
+// any more: a provider config is exposed under its own name (normalized to the
+// catalog's spelling when it only differs by casing), and placeholders stay
+// hidden.  Friendly names come from the administrator's TRAECN model mapping.
 func traeCNPublicIDsForConfig(configName string) []string {
 	configName = strings.TrimSpace(configName)
 	if configName == "" {
 		return nil
 	}
-	if aliases := auth.TraeCNPublicModelIDsForWire(configName); len(aliases) > 0 {
-		return aliases
+	name := strings.ToLower(configName)
+	// Generic custom_model_* entries are implementation placeholders; leaking
+	// them makes them appear routable while their provider identity is
+	// account-specific. Map them explicitly if a deployment needs them.
+	if strings.HasPrefix(name, "custom_model_") {
+		return nil
 	}
-	configKey := traeCNModelTokenKey(configName)
-	if configKey != "" {
+	if configKey := traeCNModelTokenKey(configName); configKey != "" {
 		for _, publicID := range auth.TraeCNDefaultModelIDs() {
 			if strings.EqualFold(publicID, "auto") {
 				continue
 			}
-			if configKey == traeCNModelTokenKey(publicID) || configKey == traeCNModelTokenKey(auth.TraeCNWireModel(publicID)) {
+			if configKey == traeCNModelTokenKey(publicID) {
 				return []string{publicID}
 			}
 		}
-	}
-	name := strings.ToLower(configName)
-	// Generic custom_model_* entries are implementation placeholders.  Only
-	// the stable aliases in traeCNWireModels are exposed (for example gpt-4o or
-	// deepseek-r1); leaking arbitrary placeholders makes them appear routable
-	// while their provider identity is account-specific.
-	if strings.HasPrefix(name, "custom_model_") {
-		return nil
 	}
 	return []string{configName}
 }
@@ -768,6 +844,9 @@ type traeCNToolCall struct {
 	emittedBytes int
 	itemAdded    bool
 	custom       bool
+	// bridge 非空表示该调用的参数要还原成托管 item（local_shell_call / shell_call）
+	// 而不是原生 function_call。
+	bridge string
 }
 
 type traeCNCanonicalState struct {
@@ -784,6 +863,11 @@ type traeCNCanonicalState struct {
 	reasoning    strings.Builder
 	tools        []*traeCNToolCall
 	toolByKey    map[string]*traeCNToolCall
+	// bridges 是「Trae 函数名 -> 客户端能执行的 item 类型」：上游只能回 function
+	// 调用，这些名字的输出项要还原成 custom_tool_call / local_shell_call / shell_call。
+	bridges traeCNBridges
+	// contracts 记录每个函数的声明契约（顶层必填字段），用于修复模型多包一层的参数。
+	contracts traeCNContracts
 }
 
 func newTraeCNCanonicalState(model string) *traeCNCanonicalState {
@@ -794,6 +878,19 @@ func newTraeCNCanonicalState(model string) *traeCNCanonicalState {
 		toolByKey:  make(map[string]*traeCNToolCall),
 		messageIdx: -1, reasoningIdx: -1,
 	}
+}
+
+// newTraeCNCanonicalStateWithBridges 带上「函数名 -> item 类型」的还原表，用于把
+// 上游的 function 调用还原成客户端能执行的 custom_tool_call / local_shell_call 等。
+func newTraeCNCanonicalStateWithBridges(model string, bridges traeCNBridges, contracts traeCNContracts) *traeCNCanonicalState {
+	state := newTraeCNCanonicalState(model)
+	if len(bridges) > 0 {
+		state.bridges = bridges
+	}
+	if len(contracts) > 0 {
+		state.contracts = contracts
+	}
+	return state
 }
 
 func writeTraeCanonicalEvent(writer io.Writer, payload []byte) error {
@@ -969,6 +1066,10 @@ func (s *traeCNCanonicalState) mergeToolCall(writer io.Writer, raw gjson.Result,
 	if tool.name == "" && name != "" {
 		tool.name = name
 	}
+	if bridge, declared := s.bridges[tool.name]; declared {
+		tool.bridge = bridge
+		tool.custom = bridge == traeCNBridgeCustomTool
+	}
 	if argument != "" {
 		current := tool.arguments.String()
 		switch {
@@ -992,14 +1093,15 @@ func (s *traeCNCanonicalState) emitToolProgress(writer io.Writer, tool *traeCNTo
 	if tool == nil || tool.name == "" {
 		return nil
 	}
+	if tool.custom || tool.bridge != "" {
+		// 降级工具的载荷要等完整后才能脱壳/还原成客户端契约的 item，不能按增量
+		// 下发：输出项统一在终态补齐。
+		return nil
+	}
 	if !tool.itemAdded {
-		itemType := "function_call"
-		if tool.custom {
-			itemType = "custom_tool_call"
-		}
 		if err := writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent("response.output_item.added", map[string]any{
 			"response_id": s.responseID, "output_index": tool.outputIndex,
-			"item": map[string]any{"id": tool.id, "type": itemType, "call_id": tool.callID, "name": tool.name, "arguments": "", "input": "", "status": "in_progress"},
+			"item": map[string]any{"id": tool.id, "type": "function_call", "call_id": tool.callID, "name": tool.name, "arguments": "", "input": "", "status": "in_progress"},
 		})); err != nil {
 			return err
 		}
@@ -1148,19 +1250,45 @@ func (s *traeCNCanonicalState) terminalOutput(writer io.Writer, status string) (
 			if !tool.custom && !json.Valid([]byte(tool.arguments.String())) {
 				return nil, fmt.Errorf("Trae CN returned invalid JSON arguments for tool %q", tool.name)
 			}
+			if tool.bridge == traeCNBridgeLocalShell || tool.bridge == traeCNBridgeShellCall {
+				// 托管 shell：还原成 local_shell_call / shell_call，客户端才会执行。
+				item, err := s.emitBridgedHostedTool(writer, tool, status)
+				if err != nil {
+					return nil, err
+				}
+				output = append(output, item)
+				continue
+			}
 			if err := s.emitToolProgress(writer, tool); err != nil {
 				return nil, err
 			}
 			itemType := "function_call"
 			doneEvent := "response.function_call_arguments.done"
+			// 终态里给出修正后的参数：模型若把参数多包了一层（{"args":{...}}），
+			// 客户端只会看到解开的版本，done/item/completed 三处一致。
+			arguments := traeCNUnwrapArguments(tool.arguments.String(), s.contracts[tool.name])
 			if tool.custom {
 				itemType = "custom_tool_call"
 				doneEvent = "response.custom_tool_call_input.done"
+				// 降级后的 function 参数是 {"input": "..."}；客户端要的是原始文本。
+				arguments = traeCNCustomToolInput(arguments)
+				// added 事件在终态补齐（降级工具的载荷要完整后才能脱壳）。
+				if err := writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent("response.output_item.added", map[string]any{
+					"response_id": s.responseID, "output_index": tool.outputIndex,
+					"item": map[string]any{"id": tool.id, "type": itemType, "call_id": tool.callID, "name": tool.name, "arguments": "", "input": "", "status": "in_progress"},
+				})); err != nil {
+					return nil, err
+				}
+				if err := writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent("response.custom_tool_call_input.delta", map[string]any{
+					"response_id": s.responseID, "output_index": tool.outputIndex, "item_id": tool.id, "call_id": tool.callID, "delta": arguments,
+				})); err != nil {
+					return nil, err
+				}
 			}
-			item := map[string]any{"id": tool.id, "type": itemType, "call_id": tool.callID, "name": tool.name, "arguments": tool.arguments.String(), "input": tool.arguments.String(), "status": status}
+			item := map[string]any{"id": tool.id, "type": itemType, "call_id": tool.callID, "name": tool.name, "arguments": arguments, "input": arguments, "status": status}
 			output = append(output, item)
 			if status == "completed" {
-				if err := writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent(doneEvent, map[string]any{"response_id": s.responseID, "output_index": tool.outputIndex, "item_id": tool.id, "call_id": tool.callID, "arguments": tool.arguments.String(), "input": tool.arguments.String()})); err != nil {
+				if err := writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent(doneEvent, map[string]any{"response_id": s.responseID, "output_index": tool.outputIndex, "item_id": tool.id, "call_id": tool.callID, "arguments": arguments, "input": arguments})); err != nil {
 					return nil, err
 				}
 				if err := writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent("response.output_item.done", map[string]any{"response_id": s.responseID, "output_index": tool.outputIndex, "item": item})); err != nil {
@@ -1170,6 +1298,27 @@ func (s *traeCNCanonicalState) terminalOutput(writer io.Writer, status string) (
 		}
 	}
 	return output, nil
+}
+
+// emitBridgedHostedTool 把降级过的托管 shell 调用还原成客户端能执行的 item：
+// 输出项事件（added + done）都按 item 契约发出，action 由模型给的 {"command": ...} 还原。
+func (s *traeCNCanonicalState) emitBridgedHostedTool(writer io.Writer, tool *traeCNToolCall, status string) (map[string]any, error) {
+	action := traeCNShellAction(tool.arguments.String(), tool.bridge)
+	if err := writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent("response.output_item.added", map[string]any{
+		"response_id": s.responseID, "output_index": tool.outputIndex,
+		"item": map[string]any{"id": tool.id, "type": tool.bridge, "call_id": tool.callID, "status": "in_progress", "action": action},
+	})); err != nil {
+		return nil, err
+	}
+	item := map[string]any{"id": tool.id, "type": tool.bridge, "call_id": tool.callID, "status": status, "action": action}
+	if status == "completed" {
+		if err := writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent("response.output_item.done", map[string]any{
+			"response_id": s.responseID, "output_index": tool.outputIndex, "item": item,
+		})); err != nil {
+			return nil, err
+		}
+	}
+	return item, nil
 }
 
 func (s *traeCNCanonicalState) emitCompleted(writer io.Writer, finishReason string) error {
@@ -1291,11 +1440,17 @@ func (s *traeCNCanonicalState) consume(writer io.Writer, eventName string, data 
 // traeCNCanonicalStream projects the provider's named SSE events onto the
 // canonical Responses stream consumed by all three existing HTTP handlers.
 func traeCNCanonicalStream(source io.ReadCloser, model string) io.ReadCloser {
+	return traeCNCanonicalStreamForTools(source, model, nil, nil)
+}
+
+// traeCNCanonicalStreamForTools 额外接收客户端声明为 custom 的工具名，把这些工具的
+// 上游 function 调用还原成 custom_tool_call。
+func traeCNCanonicalStreamForTools(source io.ReadCloser, model string, bridges traeCNBridges, contracts traeCNContracts) io.ReadCloser {
 	reader, writer := io.Pipe()
 	go func() {
 		defer source.Close()
 		defer writer.Close()
-		state := newTraeCNCanonicalState(model)
+		state := newTraeCNCanonicalStateWithBridges(model, bridges, contracts)
 		if err := state.emitCreated(writer); err != nil {
 			return
 		}
@@ -1435,7 +1590,7 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 		!responsesBodyRequestsImageGeneration(inboundBody) {
 		canonical = stripResponsesImageGenerationCapabilities(canonical)
 	}
-	body, model, err := buildTraeCNRequestBody(canonical)
+	body, model, bridges, contracts, err := traeCNRequestBodyPlan(canonical)
 	if err != nil {
 		return nil, ErrBadRequest("Trae CN request conversion failed: " + err.Error())
 	}
@@ -1518,7 +1673,7 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return resp, nil
 	}
-	canonicalStream := traeCNCanonicalStream(resp.Body, model)
+	canonicalStream := traeCNCanonicalStreamForTools(resp.Body, model, bridges, contracts)
 	// Chat and Messages handlers deliberately aggregate canonical SSE for their
 	// non-stream response types. Native Responses non-stream instead expects one
 	// response JSON object, so aggregate only that inbound protocol here.

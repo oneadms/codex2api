@@ -129,7 +129,8 @@ func TestTraeCNResponsesToolContinuationPreservesEarlierMessages(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previous := auth.ConfiguredTraeCNSettings()
 	t.Cleanup(func() { auth.SetConfiguredTraeCNSettings(previous) })
-	auth.SetConfiguredTraeCNSettings(auth.TraeCNSettings{ModelMapping: map[string]string{"gpt-5.6-sol": "doubao-seed-code"}})
+	// 映射目标直接就是上游模型名（别名表已删除）。
+	auth.SetConfiguredTraeCNSettings(auth.TraeCNSettings{ModelMapping: map[string]string{"gpt-5.6-sol": "Doubao_1_6"}})
 	for _, echoCall := range []bool{false, true} {
 		t.Run(fmt.Sprintf("echo_call=%t", echoCall), func(t *testing.T) {
 			resetResponseCacheStateForTest(testResponseCacheConfig())
