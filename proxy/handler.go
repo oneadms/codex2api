@@ -4081,12 +4081,23 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 			upstreamEndpoint := relayUpstreamEndpointForProtocol(account, GrokProtocolResponses, attemptEffectiveModel)
 			upstreamBody := getOpenAIResponsesBody()
-			if account.IsAntigravityAPI() || account.IsTraeCNAPI() {
-				// Antigravity has no upstream previous_response_id store. Use the
-				// owner-scoped, locally expanded body so a later function_call_output
-				// still carries the matching function_call/name history. Trae CN is
-				// likewise stateless from the gateway's point of view.
+			if account.IsAntigravityAPI() {
+				// Antigravity 没有上游响应存储，使用按 API Key 展开的本地工具历史配对输出。
 				upstreamBody = codexBody
+			}
+			if account.IsTraeCNAPI() {
+				// TRAE 需要双方的完整前文，不能复用只为 Codex 工具续链准备的历史。
+				prepared := prepareTraeCNResponsesContext(upstreamBody, respCacheOwner)
+				if status, reason, unavailable := responseCachePreparationFailure(prepared); unavailable {
+					stopTTFTGuard()
+					h.store.Release(account)
+					if reason == "missing_required_call_context" {
+						reason = "missing_required_conversation_context"
+					}
+					sendResponseContextUnavailable(c, status, reason)
+					return
+				}
+				upstreamBody = prepared.Body
 			}
 			var mappedBody []byte
 			var mappedModel string
@@ -4460,6 +4471,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			var nonStreamFailure *streamOutcome
 			var nonStreamResponseBody []byte
 			nonStreamContentType := "application/json"
+			var traeCompletedResponse []byte
 			var compactionProvenancePayloads [][]byte
 			promptPolicyIncidentID := ""
 			upstreamCyberPolicyLogged := false
@@ -4514,6 +4526,9 @@ func (h *Handler) Responses(c *gin.Context) {
 					}
 					if isResponsesSuccessTerminalEvent(eventType) {
 						usage = extractUsageFromResult(parsed.Get("response.usage"))
+						if account.IsTraeCNAPI() && eventType == "response.completed" {
+							traeCompletedResponse = []byte(parsed.Get("response").Raw)
+						}
 						if tier := parsed.Get("response.service_tier").String(); tier != "" {
 							actualServiceTier = tier
 						}
@@ -4607,6 +4622,9 @@ func (h *Handler) Responses(c *gin.Context) {
 					gotTerminal = true
 					if contentType := resp.Header.Get("Content-Type"); contentType != "" {
 						nonStreamContentType = contentType
+					}
+					if account.IsTraeCNAPI() {
+						traeCompletedResponse = nonStreamResponseBody
 					}
 					if failure, failed := protocolNonStreamFailure(GrokProtocolResponses, respBody); failed {
 						failureCopy := failure
@@ -4712,6 +4730,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				} else {
 					for _, payload := range compactionProvenancePayloads {
 						h.recordCompactionProvenanceFromPayload(context.Background(), account, payload)
+					}
+					if len(traeCompletedResponse) > 0 {
+						cacheTraeCNResponseContext(respCacheOwner, upstreamBody, traeCompletedResponse)
 					}
 				}
 			}
