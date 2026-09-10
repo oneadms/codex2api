@@ -249,10 +249,11 @@ func buildTraeCNRequestBody(canonical []byte) ([]byte, string, error) {
 	if model != "" && !strings.EqualFold(model, "auto") {
 		body["model"] = auth.TraeCNWireModel(model)
 	}
-	if err := validateCrossProtocolTools(root.Get("tools"), "Trae CN"); err != nil {
+	tools, err := traeCNToolsFromResponses(root.Get("tools"))
+	if err != nil {
 		return nil, model, err
 	}
-	if tools := responsesToolsToChat(root.Get("tools")); len(tools) > 0 {
+	if len(tools) > 0 {
 		body["tools"] = tools
 	}
 	if choice := root.Get("tool_choice"); choice.Exists() {
