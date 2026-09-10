@@ -62,7 +62,7 @@ func TestBuildTraeCNRequestBodyPreservesCanonicalSemantics(t *testing.T) {
 	if root.Get("messages.1.content.1.image_url.url").String() != "https://example.test/image.png" {
 		t.Fatalf("image URL was not preserved: %s", body)
 	}
-	if root.Get("messages.2.tool_calls.0.function.name").String() != "lookup" || root.Get("messages.3.tool_call_id").String() != "call_1" {
+	if root.Get("messages.2.tool_calls.0.function_call.name").String() != "lookup" || root.Get("messages.3.tool_call_id").String() != "call_1" {
 		t.Fatalf("tool history was not preserved: %s", body)
 	}
 	if root.Get("messages.3.content.0.text").String() != `{"ok":true}` {

@@ -8,6 +8,15 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// 原生 output 事件使用 function_call，后续分片可以只带参数并把名称留空。
+const traeCNNativeReadFileOutput = `event: output
+data: {"response":"","tool_calls":[{"index":0,"id":"call_read","type":"function","function_call":{"name":"read_file","arguments":"{\"path\":"}}]}
+
+event: output
+data: {"response":"","tool_calls":[{"index":0,"function_call":{"name":"","arguments":"\"a.go\"}"}}]}
+
+`
+
 // 名称和参数可以分批到达，结束事件中的完整调用也必须参与合并。
 func TestTraeCNStreamToolCallVariants(t *testing.T) {
 	t.Parallel()
@@ -15,6 +24,22 @@ func TestTraeCNStreamToolCallVariants(t *testing.T) {
 		name   string
 		stream string
 	}{
+		{"native_function_call_deltas", traeCNNativeReadFileOutput},
+		{"native_function_call", `event: output
+data: {"response":"","tool_calls":[{"id":"call_read","function_call":{"name":"read_file","arguments":"{\"path\":\"a.go\"}"}}]}
+
+`},
+		{"encoded_native_function_call", `event: output
+data: {"tool_calls":[{"id":"call_read","function_call":"{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"a.go\\\"}\"}"}]}
+
+`},
+		{"native_name_in_done", `event: output
+data: {"tool_calls":[{"index":0,"function_call":{"arguments":"{\"path\":\"a.go\"}"}}]}
+
+event: done
+data: {"finish_reason":"stop","tool_calls":[{"index":0,"id":"call_read","function_call":{"name":"read_file","arguments":"{\"path\":\"a.go\"}"}}]}
+
+`},
 		{"named_event", "event: tool_call\ndata: {\"index\":0,\"id\":\"call_read\",\"function\":{\"name\":\"read_file\"}}\n\nevent: output\ndata: {\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\\\"a.go\\\"}\"}}]}\n\n"},
 		{"encoded_function", `event: output
 data: {"tool_calls":[{"index":0,"id":"call_read","function":"{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"a.go\\\"}\"}"}]}

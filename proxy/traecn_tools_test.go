@@ -15,6 +15,35 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// 工具定义保留 function，历史中的工具调用则必须使用原生的 function_call 字段。
+func TestTraeCNToolHistoryUsesNativeFunctionCall(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		input string
+	}{
+		{"responses_item", `"input":[{"type":"function_call","call_id":"call_read","name":"read_file","arguments":"{\"path\":\"a.go\"}"}]`},
+		{"responses_message", `"input":[{"role":"assistant","tool_calls":[{"id":"call_read","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.go\"}"}}]}]`},
+		{"chat_message", `"messages":[{"role":"assistant","tool_calls":[{"id":"call_read","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.go\"}"}}]}]`},
+		{"native_message", `"messages":[{"role":"assistant","tool_calls":[{"id":"call_read","type":"function","function_call":{"name":"read_file","arguments":"{\"path\":\"a.go\"}"}}]}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, _, err := buildTraeCNRequestBody([]byte(`{"model":"doubao-seed-code",` + tc.input + `,"tools":[{"type":"function","name":"read_file","parameters":{"type":"object"}}]}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := gjson.GetBytes(body, "messages.0.tool_calls.0")
+			if call.Get("id").String() != "call_read" || call.Get("function_call.name").String() != "read_file" ||
+				call.Get("function_call.arguments").String() != `{"path":"a.go"}` || call.Get("function").Exists() {
+				t.Fatalf("invalid native tool history: %s", body)
+			}
+			if gjson.GetBytes(body, "tools.0.function.name").String() != "read_file" || gjson.GetBytes(body, "tools.0.function_call").Exists() {
+				t.Fatalf("tool definition was changed with history: %s", body)
+			}
+		})
+	}
+}
+
 func TestTraeCNToolParametersUseJSONString(t *testing.T) {
 	t.Parallel()
 	schema := `{"type":"object","properties":{"path":{"type":"string","description":"路径包含引号 \" 和反斜杠 \\"}},"required":["path"],"additionalProperties":false}`

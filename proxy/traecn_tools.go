@@ -7,6 +7,24 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// 历史工具调用使用 function_call，工具定义仍使用 function，不能在整个请求中统一替换。
+func traeCNToolHistoryFromChat(calls gjson.Result) []any {
+	history, _ := calls.Value().([]any)
+	for _, raw := range history {
+		call, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if function, exists := call["function"]; exists {
+			if call["function_call"] == nil {
+				call["function_call"] = function
+			}
+			delete(call, "function")
+		}
+	}
+	return history
+}
+
 // TRAE 的 FunctionDefinition 将 parameters 定义为字符串，发送前需要把
 // JSON Schema 对象序列化一次。已编码的字符串保持原样，避免重复转义。
 func traeCNToolsFromResponses(specs gjson.Result) ([]any, error) {

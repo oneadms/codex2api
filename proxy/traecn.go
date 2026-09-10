@@ -147,7 +147,7 @@ func traeCNMessagesFromResponses(body []byte) ([]map[string]any, error) {
 			message["tool_call_id"] = callID
 		}
 		if calls := item.Get("tool_calls"); calls.IsArray() {
-			message["tool_calls"] = calls.Value()
+			message["tool_calls"] = traeCNToolHistoryFromChat(calls)
 		}
 		messages = append(messages, message)
 	}
@@ -196,7 +196,7 @@ func traeCNMessagesFromResponses(body []byte) ([]map[string]any, error) {
 				knownCalls[callID] = struct{}{}
 				messages = append(messages, map[string]any{
 					"role": "assistant", "content": []any{},
-					"tool_calls": []any{map[string]any{"id": callID, "type": "function", "function": map[string]any{"name": item.Get("name").String(), "arguments": arguments}}},
+					"tool_calls": []any{map[string]any{"id": callID, "type": "function", "function_call": map[string]any{"name": item.Get("name").String(), "arguments": arguments}}},
 				})
 			case "function_call_output":
 				callID := strings.TrimSpace(item.Get("call_id").String())
@@ -907,8 +907,8 @@ func (s *traeCNCanonicalState) mergeToolCall(writer io.Writer, raw gjson.Result,
 	}
 	id := strings.TrimSpace(traeFirstText(raw, "id", "call_id", "tool_call_id"))
 	callID := strings.TrimSpace(traeFirstText(raw, "call_id", "id", "tool_call_id"))
-	function := raw.Get("function")
-	// 部分上游把 function 编码成 JSON 字符串，先解开对象再读取名称和参数。
+	// 原生工具调用使用 function_call，兼容层可能使用 function；两者也可能编码成 JSON 字符串。
+	function := traeToolField(raw, "function_call", "function")
 	if function.Type == gjson.String {
 		function = gjson.Parse(function.String())
 	}

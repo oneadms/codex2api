@@ -19,7 +19,7 @@ func TestTraeCNModelMappingAllProtocols(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previous := auth.ConfiguredTraeCNSettings()
 	t.Cleanup(func() { auth.SetConfiguredTraeCNSettings(previous) })
-	auth.SetConfiguredTraeCNSettings(auth.TraeCNSettings{ModelMapping: map[string]string{"my-code": "doubao-seed-code", "claude-opus-4-6": "doubao-seed-code"}})
+	auth.SetConfiguredTraeCNSettings(auth.TraeCNSettings{ModelMapping: map[string]string{"gpt-5.6-sol": "doubao-seed-code", "claude-opus-4-6": "doubao-seed-code"}})
 	for _, stream := range []bool{false, true} {
 		for _, tc := range []struct {
 			path   string
@@ -30,7 +30,7 @@ func TestTraeCNModelMappingAllProtocols(t *testing.T) {
 			{"/v1/chat/completions", `{"messages":[{"role":"user","content":"read file"}]}`, (*Handler).ChatCompletions},
 			{"/v1/messages", `{"max_tokens":64,"messages":[{"role":"user","content":"read file"}]}`, (*Handler).Messages},
 		} {
-			for _, model := range []string{"my-code", "claude-opus-4-6"} {
+			for _, model := range []string{"gpt-5.6-sol", "claude-opus-4-6"} {
 				t.Run(fmt.Sprintf("%s/%s/stream=%t", tc.path, model, stream), func(t *testing.T) {
 					resetResponseCacheStateForTest(testResponseCacheConfig())
 					t.Cleanup(func() { resetResponseCacheStateForTest(defaultResponseCacheConfig()) })
@@ -42,10 +42,10 @@ func TestTraeCNModelMappingAllProtocols(t *testing.T) {
 							t.Errorf("wrong upstream model: %s", body)
 						}
 						w.Header().Set("Content-Type", "text/event-stream")
-						io.WriteString(w, "event: tool_call\ndata: {\"index\":0,\"id\":\"call_read\",\"function\":{\"name\":\"read_file\"}}\n\nevent: output\ndata: {\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\\\"a.go\\\"}\"}}]}\n\nevent: done\ndata: {\"finish_reason\":\"tool_calls\"}\n\n")
+						io.WriteString(w, traeCNNativeReadFileOutput+"event: done\ndata: {\"finish_reason\":\"stop\"}\n\n")
 					})
-					handler.store.SetCodexModelMapping(`{"my-code":"gpt-5.5","claude-opus-4-6":"gpt-5.5"}`)
-					handler.store.SetModelMapping(`{"my-code":"gpt-5.5","claude-opus-4-6":"gpt-5.5"}`)
+					handler.store.SetCodexModelMapping(`{"gpt-5.6-sol":"gpt-5.5","claude-opus-4-6":"gpt-5.5"}`)
+					handler.store.SetModelMapping(`{"gpt-5.6-sol":"gpt-5.5","claude-opus-4-6":"gpt-5.5"}`)
 					body := strings.TrimSuffix(tc.body, "}") + fmt.Sprintf(`,"model":%q,"stream":%t}`, model, stream)
 					recorder := httptest.NewRecorder()
 					ctx, _ := gin.CreateTestContext(recorder)
@@ -58,6 +58,9 @@ func TestTraeCNModelMappingAllProtocols(t *testing.T) {
 					}
 					if !strings.Contains(recorder.Body.String(), `"model":"`+model+`"`) {
 						t.Fatalf("public model not preserved: %s", recorder.Body.String())
+					}
+					if !strings.Contains(recorder.Body.String(), `"call_read"`) || !strings.Contains(recorder.Body.String(), "a.go") {
+						t.Fatalf("tool identity or arguments lost: %s", recorder.Body.String())
 					}
 				})
 			}

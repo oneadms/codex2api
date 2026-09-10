@@ -127,6 +127,9 @@ func TestTraeCNResponsesMissingContextDoesNotSilentlyStartNewConversation(t *tes
 
 func TestTraeCNResponsesToolContinuationPreservesEarlierMessages(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	previous := auth.ConfiguredTraeCNSettings()
+	t.Cleanup(func() { auth.SetConfiguredTraeCNSettings(previous) })
+	auth.SetConfiguredTraeCNSettings(auth.TraeCNSettings{ModelMapping: map[string]string{"gpt-5.6-sol": "doubao-seed-code"}})
 	for _, echoCall := range []bool{false, true} {
 		t.Run(fmt.Sprintf("echo_call=%t", echoCall), func(t *testing.T) {
 			resetResponseCacheStateForTest(testResponseCacheConfig())
@@ -135,15 +138,18 @@ func TestTraeCNResponsesToolContinuationPreservesEarlierMessages(t *testing.T) {
 			handler := newTraeCNContextTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 				body, _ := io.ReadAll(r.Body)
 				seenBodies = append(seenBodies, body)
+				if gjson.GetBytes(body, "model").String() != "Doubao_1_6" {
+					t.Errorf("wrong upstream model: %s", body)
+				}
 				w.Header().Set("Content-Type", "text/event-stream")
 				if len(seenBodies) == 1 {
-					io.WriteString(w, "event: output\ndata: {\"type\":\"text\",\"content\":\"checking the project\",\"tool_calls\":[{\"id\":\"call_lookup\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}\n\nevent: done\ndata: {\"finish_reason\":\"tool_calls\"}\n\n")
+					io.WriteString(w, "event: output\ndata: {\"response\":\"checking the project\",\"tool_calls\":[{\"id\":\"call_lookup\",\"function_call\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}\n\nevent: done\ndata: {\"finish_reason\":\"stop\"}\n\n")
 				} else {
 					io.WriteString(w, "event: output\ndata: {\"type\":\"text\",\"content\":\"done\"}\n\nevent: done\ndata: {\"finish_reason\":\"stop\"}\n\n")
 				}
 			})
 			first := traeCNContextTestResponse(t, invokeTraeCNContextTestRequest(t, handler, 91083, database.UpstreamChannelTraeCN, map[string]any{
-				"model": "deepseek-v3", "input": "project is cedar", "stream": true,
+				"model": "gpt-5.6-sol", "input": "project is cedar", "stream": true,
 			}), true)
 			var input []any
 			if echoCall {
@@ -151,12 +157,15 @@ func TestTraeCNResponsesToolContinuationPreservesEarlierMessages(t *testing.T) {
 			}
 			input = append(input, map[string]any{"type": "function_call_output", "call_id": "call_lookup", "output": "found cedar"})
 			traeCNContextTestResponse(t, invokeTraeCNContextTestRequest(t, handler, 91083, database.UpstreamChannelTraeCN, map[string]any{
-				"model": "deepseek-v3", "previous_response_id": first.Get("id").String(), "input": input, "stream": false,
+				"model": "gpt-5.6-sol", "previous_response_id": first.Get("id").String(), "input": input, "stream": false,
 			}), false)
 			messages := gjson.GetBytes(seenBodies[1], "messages").Array()
 			if len(messages) != 4 || messages[0].Get("content.0.text").String() != "project is cedar" ||
 				messages[1].Get("content.0.text").String() != "checking the project" ||
 				messages[2].Get("tool_calls.0.id").String() != "call_lookup" ||
+				messages[2].Get("tool_calls.0.function_call.name").String() != "lookup" ||
+				messages[2].Get("tool_calls.0.function_call.arguments").String() != "{}" ||
+				messages[2].Get("tool_calls.0.function").Exists() ||
 				messages[3].Get("tool_call_id").String() != "call_lookup" {
 				t.Fatalf("tool continuation lost or duplicated prior context: %s", seenBodies[1])
 			}
