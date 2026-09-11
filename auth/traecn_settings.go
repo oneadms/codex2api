@@ -83,7 +83,7 @@ func ParseTraeCNSettings(raw string) (TraeCNSettings, error) {
 	return NormalizeTraeCNSettings(settings)
 }
 
-// 映射只应用一次，目标是 TRAE 的模型目录名称，再由内置表转换成上游名称。
+// 映射只应用一次，目标就是上游的 config_name（provider 的逐字写法，大小写敏感）。
 // 这样允许覆盖已有名称，也不会因两条规则互相引用而循环解析。
 func traeCNRequestModel(snapshot traeCNSettingsSnapshot, model string) string {
 	model = strings.TrimSpace(model)
@@ -100,7 +100,7 @@ func TraeCNRequestModel(model string) string {
 
 func traeCNModelInCatalog(model string, catalog []string) bool {
 	for _, candidate := range catalog {
-		if traeCNModelsEquivalent(candidate, model) {
+		if TraeCNModelsEquivalent(candidate, model) {
 			return true
 		}
 	}

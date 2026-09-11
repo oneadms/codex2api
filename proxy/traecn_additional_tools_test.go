@@ -141,7 +141,7 @@ func TestTraeCNResponsesAdditionalToolsCarrierReachesUpstream(t *testing.T) {
 		io.WriteString(w, "event: output\ndata: {\"type\":\"text\",\"content\":\"ok\"}\n\nevent: done\ndata: {\"finish_reason\":\"stop\"}\n\n")
 	})
 	recorder := invokeTraeCNContextTestRequest(t, handler, 91090, database.UpstreamChannelTraeCN, map[string]any{
-		"model": "deepseek-v3", "stream": false,
+		"model": "DeepSeek-V4-Pro", "stream": false,
 		"input": []any{
 			map[string]any{"type": "additional_tools", "tools": []any{
 				map[string]any{"type": "tool_search"},

@@ -106,7 +106,7 @@ func TestListModelsOrManifestServesTraeCNAsScopedCodexManifest(t *testing.T) {
 	t.Cleanup(store.Stop)
 	store.AddAccount(&auth.Account{
 		DBID: 10, UpstreamType: auth.UpstreamTraeCN, AccessToken: "trae-token",
-		Models: []string{"claude-sonnet-4-6", "deepseek-v4-pro"},
+		Models: []string{"Doubao-Seed-Code", "DeepSeek-V4-Pro"},
 	})
 	handler := NewHandler(store, nil, nil, nil)
 	row := &database.APIKeyRow{ID: 4, Limits: database.APIKeyLimits{UpstreamChannel: database.UpstreamChannelTraeCN}}
@@ -140,7 +140,7 @@ func TestListModelsOrManifestServesTraeCNAsScopedCodexManifest(t *testing.T) {
 			t.Fatalf("slug %s prefer_websockets=true, TRAECN must stay on HTTP", model.Slug)
 		}
 	}
-	if len(got) != 2 || !got["claude-sonnet-4-6"] || !got["deepseek-v4-pro"] {
+	if len(got) != 2 || !got["Doubao-Seed-Code"] || !got["DeepSeek-V4-Pro"] {
 		t.Fatalf("manifest slugs = %v, want scoped TRAECN models", got)
 	}
 }

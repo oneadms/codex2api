@@ -19,6 +19,8 @@ func TestTraeCNToolSearchContinuesIntoLoadedNamespace(t *testing.T) {
 	previous := auth.ConfiguredTraeCNSettings()
 	t.Cleanup(func() { auth.SetConfiguredTraeCNSettings(previous) })
 	auth.SetConfiguredTraeCNSettings(auth.TraeCNSettings{ModelMapping: map[string]string{"gpt-5.6-sol": "doubao-seed-code"}})
+	// 映射目标写小写也能用：网关按账号目录把 config_name 校正成 provider 的逐字写法
+	// （Doubao-Seed-Code），配置名大小写不对时上游会直接返回 4001。
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
 			resetResponseCacheStateForTest(testResponseCacheConfig())
@@ -27,8 +29,8 @@ func TestTraeCNToolSearchContinuesIntoLoadedNamespace(t *testing.T) {
 			handler := newTraeCNContextTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 				body, _ := io.ReadAll(r.Body)
 				upstreamCalls++
-				if gjson.GetBytes(body, "model").String() != "doubao-seed-code" {
-					t.Errorf("model mapping changed: %s", body)
+				if got := gjson.GetBytes(body, "model").String(); got != "Doubao-Seed-Code" || gjson.GetBytes(body, "config_name").String() != "Doubao-Seed-Code" {
+					t.Errorf("model mapping changed: model=%q body=%s", got, body)
 				}
 				if !gjson.GetBytes(body, `tools.#(function.name=="tool_search")`).Exists() {
 					t.Errorf("tool search was dropped: %s", body)

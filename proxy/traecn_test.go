@@ -49,8 +49,9 @@ func TestBuildTraeCNRequestBodyPreservesCanonicalSemantics(t *testing.T) {
 	if root.Get("model").String() != "deepseek-v3" {
 		t.Fatalf("wire model = %q, body=%s", root.Get("model").String(), body)
 	}
-	if root.Get("config_name").Exists() {
-		t.Fatalf("config_name must not be sent: %s", body)
+	// Trae 按 config_name 选后端，必须与 model 一起发送，否则回落到默认模型。
+	if root.Get("config_name").String() != "deepseek-v3" || root.Get("model").String() != "deepseek-v3" {
+		t.Fatalf("config_name/model必须同时给出目标模型: %s", body)
 	}
 	if root.Get("function").String() != "chat_v3" || !root.Get("stream").Bool() {
 		t.Fatalf("unexpected request mode: %s", body)
@@ -314,7 +315,7 @@ func TestExecuteTraeCNRequestAggregatesNonStreamingResponses(t *testing.T) {
 		ExpiresAt:    time.Now().Add(time.Hour),
 		TraeCNHost:   server.URL,
 	}
-	inbound := []byte(`{"model":"deepseek-v3","input":"hi","stream":false}`)
+	inbound := []byte(`{"model":"DeepSeek-V4-Pro","input":"hi","stream":false}`)
 	resp, err := ExecuteTraeCNRequest(t.Context(), account, GrokProtocolResponses, inbound, inbound, "", http.Header{"User-Agent": []string{"traecn-test"}})
 	if err != nil {
 		t.Fatalf("ExecuteTraeCNRequest() error = %v", err)
@@ -330,7 +331,7 @@ func TestExecuteTraeCNRequestAggregatesNonStreamingResponses(t *testing.T) {
 	if gjson.GetBytes(payload, "output.0.content.0.text").String() != "hello" || gjson.GetBytes(payload, "usage.total_tokens").Int() != 3 {
 		t.Fatalf("unexpected aggregated response: %s", payload)
 	}
-	if gjson.GetBytes(requestBody, "model").String() != "deepseek-v3" || gjson.GetBytes(requestBody, "config_name").Exists() || !gjson.GetBytes(requestBody, "stream").Bool() {
+	if gjson.GetBytes(requestBody, "model").String() != "DeepSeek-V4-Pro" || gjson.GetBytes(requestBody, "config_name").String() != "DeepSeek-V4-Pro" || !gjson.GetBytes(requestBody, "stream").Bool() {
 		t.Fatalf("unexpected upstream request: %s", requestBody)
 	}
 }
@@ -389,7 +390,7 @@ func TestExtractTraeCNModelIDsFromConfigInfoList(t *testing.T) {
 }`)
 	got := extractTraeCNModelIDs(body)
 	joined := strings.Join(got, "\n")
-	for _, want := range []string{"deepseek-v4-pro", "doubao-1-6", "doubao-seed-code", "new-provider-model", "auto"} {
+	for _, want := range []string{"DeepSeek-V4-Pro", "Doubao_1_6", "Doubao-Seed-Code", "new-provider-model", "auto"} {
 		if !modelIDInList(want, got) {
 			t.Errorf("catalog missing %q: %v", want, got)
 		}
@@ -425,28 +426,28 @@ func TestTraeCNAPIKeyRoutesAllProtocolsToTraeUpstream(t *testing.T) {
 		{
 			name:       "responses",
 			path:       "/v1/responses",
-			model:      "deepseek-v3",
-			body:       `{"model":"deepseek-v3","input":"hello","stream":true}`,
+			model:      "DeepSeek-V4-Pro",
+			body:       `{"model":"DeepSeek-V4-Pro","input":"hello","stream":true}`,
 			invoke:     func(h *Handler, c *gin.Context) { h.Responses(c) },
-			wireModel:  "deepseek-v3",
+			wireModel:  "DeepSeek-V4-Pro",
 			outputMark: `"type":"response.output_text.delta"`,
 		},
 		{
 			name:       "chat completions",
 			path:       "/v1/chat/completions",
-			model:      "deepseek-v3",
-			body:       `{"model":"deepseek-v3","messages":[{"role":"user","content":"hello"}],"stream":true}`,
+			model:      "DeepSeek-V4-Pro",
+			body:       `{"model":"DeepSeek-V4-Pro","messages":[{"role":"user","content":"hello"}],"stream":true}`,
 			invoke:     func(h *Handler, c *gin.Context) { h.ChatCompletions(c) },
-			wireModel:  "deepseek-v3",
+			wireModel:  "DeepSeek-V4-Pro",
 			outputMark: `"content":"ok"`,
 		},
 		{
 			name:       "anthropic messages",
 			path:       "/v1/messages",
-			model:      "claude-opus-4-7",
-			body:       `{"model":"claude-opus-4-7","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"stream":true}`,
+			model:      "glm-5.3-flash",
+			body:       `{"model":"glm-5.3-flash","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"stream":true}`,
 			invoke:     func(h *Handler, c *gin.Context) { h.Messages(c) },
-			wireModel:  "claude-opus-4-7",
+			wireModel:  "glm-5.3-flash",
 			outputMark: `"text":"ok"`,
 		},
 	}
@@ -516,18 +517,18 @@ func TestTraeCNAPIKeyRoutesNonStreamingChatAndMessages(t *testing.T) {
 		{
 			name:      "chat completions",
 			path:      "/v1/chat/completions",
-			model:     "deepseek-v3",
-			body:      `{"model":"deepseek-v3","messages":[{"role":"user","content":"hello"}],"stream":false}`,
+			model:     "DeepSeek-V4-Pro",
+			body:      `{"model":"DeepSeek-V4-Pro","messages":[{"role":"user","content":"hello"}],"stream":false}`,
 			invoke:    func(h *Handler, c *gin.Context) { h.ChatCompletions(c) },
-			wireModel: "deepseek-v3", contentPath: "choices.0.message.content",
+			wireModel: "DeepSeek-V4-Pro", contentPath: "choices.0.message.content",
 		},
 		{
 			name:      "anthropic messages",
 			path:      "/v1/messages",
-			model:     "claude-opus-4-7",
-			body:      `{"model":"claude-opus-4-7","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"stream":false}`,
+			model:     "glm-5.3-flash",
+			body:      `{"model":"glm-5.3-flash","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"stream":false}`,
 			invoke:    func(h *Handler, c *gin.Context) { h.Messages(c) },
-			wireModel: "claude-opus-4-7", contentPath: "content.0.text",
+			wireModel: "glm-5.3-flash", contentPath: "content.0.text",
 		},
 	}
 	for index, tc := range tests {

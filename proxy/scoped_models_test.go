@@ -234,7 +234,7 @@ func TestScopedModelsTraeCNChannelExcludesOtherProviders(t *testing.T) {
 	defer store.Stop()
 	trae := &auth.Account{
 		DBID: 1, UpstreamType: auth.UpstreamTraeCN, AccessToken: "trae-at", RefreshToken: "trae-rt",
-		Models: []string{"deepseek-v3"},
+		Models: []string{"DeepSeek-V4-Pro"},
 	}
 	codex := &auth.Account{DBID: 2, AccessToken: "codex-at", Models: []string{"gpt-5.4"}}
 	grok := &auth.Account{DBID: 3, UpstreamType: auth.UpstreamGrok, APIKey: "grok-key", Models: []string{"grok-only"}}
@@ -244,7 +244,7 @@ func TestScopedModelsTraeCNChannelExcludesOtherProviders(t *testing.T) {
 	store.AddAccount(grok)
 	handler := NewHandler(store, nil, nil, nil)
 	models := listScopedModelsForTest(t, handler, &database.APIKeyRow{ID: 99, Limits: database.APIKeyLimits{UpstreamChannel: database.UpstreamChannelTraeCN}})
-	if owner, _, ok := scopedModelByID(models, "deepseek-v3"); !ok || owner != "trae" {
+	if owner, _, ok := scopedModelByID(models, "DeepSeek-V4-Pro"); !ok || owner != "trae" {
 		t.Fatalf("TRAECN model = owner:%q present:%t, want owner trae; models=%+v", owner, ok, models)
 	}
 	for _, id := range []string{"gpt-5.4", "grok-only"} {

@@ -221,7 +221,7 @@ func traeCNModelIntersection(catalog, allowlist []string) []string {
 	result := make([]string, 0, len(catalog))
 	for _, model := range catalog {
 		for _, allowed := range allowlist {
-			if traeCNModelsEquivalent(model, allowed) {
+			if TraeCNModelsEquivalent(model, allowed) {
 				result = append(result, model)
 				break
 			}
@@ -285,12 +285,12 @@ func traeCNIsCanonicalPublicModelID(model string) bool {
 	return false
 }
 
-// traeCNModelsEquivalent compares two model identifiers。内置别名表已删除，因此不再
+// TraeCNModelsEquivalent compares two model identifiers。内置别名表已删除，因此不再
 // 按「上游 wire 名」互相换算，只允许大小写与分隔符差异：provider 目录写
 // DeepSeek-V4-Pro / Doubao_1_6，网关目录写 deepseek-v4-pro / doubao-1-6，它们指向
 // 同一个模型，必须仍然匹配；deepseek-v3 与 deepseek-v4-pro 这类不同模型不再互相
 // 命中。真正的改名交给管理员的 TRAECN 模型映射。
-func traeCNModelsEquivalent(left, right string) bool {
+func TraeCNModelsEquivalent(left, right string) bool {
 	left = strings.TrimSpace(left)
 	right = strings.TrimSpace(right)
 	if left == "" || right == "" {
@@ -426,7 +426,7 @@ func (a *Account) TraeCNSupportsModel(model string) bool {
 	model = TraeCNRequestModel(model)
 	models := a.TraeCNEffectiveModels()
 	for _, candidate := range models {
-		if traeCNModelsEquivalent(candidate, model) {
+		if TraeCNModelsEquivalent(candidate, model) {
 			return true
 		}
 	}

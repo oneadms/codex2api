@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/codex2api/auth"
 	"github.com/google/uuid"
@@ -314,7 +313,13 @@ func buildTraeCNRequestBody(canonical []byte) ([]byte, string, error) {
 // traeCNRequestBodyPlan 除了 Trae 请求体与模型名，还回传被降级成 function 的
 // custom 工具名（Codex 的 freeform apply_patch 等）：响应侧必须把这些名字的调用
 // 还原成 custom_tool_call，否则客户端只会看到一个它无法执行的 function_call。
-func traeCNRequestBodyPlan(canonical []byte) ([]byte, string, traeCNBridges, traeCNContracts, error) {
+// knownConfigSets[0] 是账号可用模型名集合（= 上游 config_name）。不传或传 nil 表示
+// 调用方不做校验（测试/无账号上下文），此时只要不是 auto 就照发。
+func traeCNRequestBodyPlan(canonical []byte, knownConfigSets ...[]string) ([]byte, string, traeCNBridges, traeCNContracts, error) {
+	var knownConfigs []string
+	if len(knownConfigSets) > 0 {
+		knownConfigs = knownConfigSets[0]
+	}
 	root := gjson.ParseBytes(canonical)
 	if !root.IsObject() {
 		return nil, "", nil, nil, fmt.Errorf("invalid canonical request")
@@ -344,7 +349,23 @@ func traeCNRequestBodyPlan(canonical []byte) ([]byte, string, traeCNBridges, tra
 	body := map[string]any{"messages": messages, "function": functionName, "stream": true}
 	if targetModel != "" && !strings.EqualFold(targetModel, "auto") {
 		// 内置兼容别名表已删除：管理员在 TRAECN 设置里配置的映射目标就是上游模型名。
+		//
+		// 关键：Trae 服务端按 `config_name` 选后端，`model` 只是展示名——只发 model
+		// 时上游会回落到默认后端（实测同一个账号：只发 model=glm-5.3-flash 得到
+		// "我是豆包大语言模型"，补上 config_name=glm-5.3-flash 才真的走 GLM）。
+		// auto（inline_chat）不指定，交给上游自动选。
 		body["model"] = targetModel
+		// Trae 按 config_name 选后端、而且区分大小写（deepseek-v4-pro -> 4001，
+		// DeepSeek-V4-Pro -> 正常），所以先用账号目录把名字校正成 provider 的逐字写法。
+		if knownConfigs == nil {
+			body["config_name"] = targetModel
+		} else if configName := traeCNResolveConfigName(targetModel, knownConfigs); configName != "" {
+			body["model"] = configName
+			body["config_name"] = configName
+		} else {
+			// 名字不在目录里：宁可只发 model（上游回落默认后端）也不要发出去拿 4001。
+			log.Printf("[TRAECN] model %q is not an upstream config_name; sending model only (upstream will pick its default backend)", targetModel)
+		}
 	}
 	for name, contract := range contracts {
 		bridges.add(name, contract.Bridge)
@@ -650,19 +671,6 @@ func fetchTraeCNModels(ctx context.Context, store *auth.Store, account *auth.Acc
 	return nil, fmt.Errorf("Trae CN model catalog unavailable (%s)", strings.Join(failures, "; "))
 }
 
-// traeCNModelTokenKey is used only for matching a provider config name to a
-// known public alias.  It deliberately drops punctuation so names such as
-// Doubao_1_6 and doubao-1-6 can share the same compatibility ID.
-func traeCNModelTokenKey(value string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(strings.TrimSpace(value)) {
-		if unicode.IsLetter(r) || unicode.IsNumber(r) {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
-
 func traeCNDetailConfigIsInternal(configName, usage string) bool {
 	name := strings.ToLower(strings.TrimSpace(configName))
 	if name == "" {
@@ -685,32 +693,45 @@ func traeCNDetailConfigIsInternal(configName, usage string) bool {
 
 // traeCNPublicIDsForConfig converts a config_name from get_detail_param into
 // IDs that clients can send to this gateway.  There is no built-in alias table
-// any more: a provider config is exposed under its own name (normalized to the
-// catalog's spelling when it only differs by casing), and placeholders stay
-// hidden.  Friendly names come from the administrator's TRAECN model mapping.
+// any more: a provider config is exposed under its own name, byte for byte.
+// Trae picks the backend by config_name and it is case-sensitive
+// (deepseek-v4-pro is rejected with 4001 while DeepSeek-V4-Pro works), so any
+// renaming here would break routing.  Friendly names come from the
+// administrator's TRAECN model mapping.
 func traeCNPublicIDsForConfig(configName string) []string {
 	configName = strings.TrimSpace(configName)
 	if configName == "" {
 		return nil
 	}
-	name := strings.ToLower(configName)
 	// Generic custom_model_* entries are implementation placeholders; leaking
 	// them makes them appear routable while their provider identity is
 	// account-specific. Map them explicitly if a deployment needs them.
-	if strings.HasPrefix(name, "custom_model_") {
+	if strings.HasPrefix(strings.ToLower(configName), "custom_model_") {
 		return nil
 	}
-	if configKey := traeCNModelTokenKey(configName); configKey != "" {
-		for _, publicID := range auth.TraeCNDefaultModelIDs() {
-			if strings.EqualFold(publicID, "auto") {
-				continue
-			}
-			if configKey == traeCNModelTokenKey(publicID) {
-				return []string{publicID}
-			}
+	return []string{configName}
+}
+
+// traeCNResolveConfigName 把请求里的模型名校正成账号目录里的上游 config_name。
+// provider 名字区分大小写（DeepSeek-V4-Pro / Doubao_1_6），而客户端和旧配置里常见
+// 归一化写法（deepseek-v4-pro / doubao-1-6），用宽松匹配找出真名后原样返回；
+// 目录里没有这个名字时返回空串。
+func traeCNResolveConfigName(model string, known []string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	for _, candidate := range known {
+		if strings.TrimSpace(candidate) == model {
+			return candidate
 		}
 	}
-	return []string{configName}
+	for _, candidate := range known {
+		if auth.TraeCNModelsEquivalent(candidate, model) {
+			return strings.TrimSpace(candidate)
+		}
+	}
+	return ""
 }
 
 // traeCNFunctionConfigInfoListRaw 把 batch_get_detail_param 的
@@ -1708,7 +1729,7 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 		!responsesBodyRequestsImageGeneration(inboundBody) {
 		canonical = stripResponsesImageGenerationCapabilities(canonical)
 	}
-	body, model, bridges, contracts, err := traeCNRequestBodyPlan(canonical)
+	body, model, bridges, contracts, err := traeCNRequestBodyPlan(canonical, account.TraeCNEffectiveModels())
 	if err != nil {
 		return nil, ErrBadRequest("Trae CN request conversion failed: " + err.Error())
 	}

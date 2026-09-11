@@ -23,7 +23,7 @@ func TestTraeCNSupportsModelUsesDefaultCatalogWhenModelsAreUnset(t *testing.T) {
 		AccessToken:  "at",
 		RefreshToken: "rt",
 	}
-	if !account.TraeCNSupportsModel("deepseek-v3") {
+	if !account.TraeCNSupportsModel("glm-5.3-flash") {
 		t.Fatal("unset Models should use the built-in Trae CN catalog")
 	}
 	if account.TraeCNSupportsModel("gpt-5.6-sol") {
@@ -37,21 +37,21 @@ func TestTraeCNSupportsModelHonorsExplicitModelsAllowlist(t *testing.T) {
 		UpstreamType: UpstreamTraeCN,
 		AccessToken:  "at",
 		RefreshToken: "rt",
-		Models:       []string{"deepseek-v3"},
+		Models:       []string{"glm-5.2"},
 	}
-	if !account.TraeCNSupportsModel("deepseek-v3") {
+	if !account.TraeCNSupportsModel("glm-5.2") {
 		t.Fatal("declared Trae model should be accepted")
 	}
-	if account.TraeCNSupportsModel("glm-5.2") {
+	if account.TraeCNSupportsModel("kimi-k3") {
 		t.Fatal("explicit Models list should narrow the Trae catalog")
 	}
-	if account.TraeCNSupportsModel("deepseek-v4-pro") {
-		t.Fatal("a distinct public alias must not bypass the explicit deepseek-v3 allowlist")
+	if account.TraeCNSupportsModel("glm-5.3-flash") {
+		t.Fatal("a distinct catalog model must not bypass the explicit glm-5.2 allowlist")
 	}
 }
 
-// 内置别名表删除后，只有大小写/分隔符差异仍算同一个模型；deepseek-v3 不再等于
-// deepseek-v4-pro，改名由管理员的 TRAECN 模型映射负责。
+// 内置别名表删除后，只有大小写/分隔符差异仍算同一个模型；glm-5.2 不再等于
+// glm-5.3，改名由管理员的 TRAECN 模型映射负责。
 func TestTraeCNSupportsModelMatchesCatalogNamesAcrossNamingStyles(t *testing.T) {
 	t.Parallel()
 	account := &Account{

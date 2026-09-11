@@ -78,7 +78,7 @@ func TestTraeCNResponsesContinuationPreservesConversation(t *testing.T) {
 				})
 				previousID := ""
 				for turn := 1; turn <= 3; turn++ {
-					request := map[string]any{"model": "deepseek-v3", "stream": stream, "input": fmt.Sprintf("question %d", turn)}
+					request := map[string]any{"model": "DeepSeek-V4-Pro", "stream": stream, "input": fmt.Sprintf("question %d", turn)}
 					if previousID != "" {
 						request["previous_response_id"] = previousID
 					}
@@ -115,7 +115,7 @@ func TestTraeCNResponsesMissingContextDoesNotSilentlyStartNewConversation(t *tes
 		io.WriteString(w, "event: output\ndata: {\"type\":\"text\",\"content\":\"lost context\"}\n\nevent: done\ndata: {\"finish_reason\":\"stop\"}\n\n")
 	})
 	recorder := invokeTraeCNContextTestRequest(t, handler, 91082, database.UpstreamChannelTraeCN, map[string]any{
-		"model": "deepseek-v3", "previous_response_id": "resp_unavailable", "input": "继续上面的方案", "stream": false,
+		"model": "DeepSeek-V4-Pro", "previous_response_id": "resp_unavailable", "input": "继续上面的方案", "stream": false,
 	})
 	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "response_context_unavailable") {
 		t.Fatalf("status = %d, want context error: %s", recorder.Code, recorder.Body.String())
@@ -280,9 +280,9 @@ func TestTraeCNProtocolsPreserveExplicitConversation(t *testing.T) {
 		body   string
 		invoke func(*Handler, *gin.Context)
 	}{
-		{"/v1/responses", `{"model":"deepseek-v3","instructions":"system rule","input":[{"role":"user","content":"same question"},{"role":"assistant","content":"earlier answer"},{"role":"user","content":"same question"}]}`, (*Handler).Responses},
-		{"/v1/chat/completions", `{"model":"deepseek-v3","messages":[{"role":"system","content":"system rule"},{"role":"user","content":"same question"},{"role":"assistant","content":"earlier answer"},{"role":"user","content":"same question"}]}`, (*Handler).ChatCompletions},
-		{"/v1/messages", `{"model":"deepseek-v3","max_tokens":64,"system":"system rule","messages":[{"role":"user","content":"same question"},{"role":"assistant","content":"earlier answer"},{"role":"user","content":"same question"}]}`, (*Handler).Messages},
+		{"/v1/responses", `{"model":"DeepSeek-V4-Pro","instructions":"system rule","input":[{"role":"user","content":"same question"},{"role":"assistant","content":"earlier answer"},{"role":"user","content":"same question"}]}`, (*Handler).Responses},
+		{"/v1/chat/completions", `{"model":"DeepSeek-V4-Pro","messages":[{"role":"system","content":"system rule"},{"role":"user","content":"same question"},{"role":"assistant","content":"earlier answer"},{"role":"user","content":"same question"}]}`, (*Handler).ChatCompletions},
+		{"/v1/messages", `{"model":"DeepSeek-V4-Pro","max_tokens":64,"system":"system rule","messages":[{"role":"user","content":"same question"},{"role":"assistant","content":"earlier answer"},{"role":"user","content":"same question"}]}`, (*Handler).Messages},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			resetResponseCacheStateForTest(testResponseCacheConfig())

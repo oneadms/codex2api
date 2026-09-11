@@ -112,7 +112,7 @@ func TestResponsesResolverSeparatesCodexAndTraeCNChannels(t *testing.T) {
 	if autoFilter(trae) {
 		t.Fatal("default/auto Responses routing admitted Trae CN for a Codex model")
 	}
-	traeModelFilter := (&Handler{}).applyUpstreamChannelFilter(autoCtx, "deepseek-v3", accountFilterForResponsesModel("deepseek-v3", false))
+	traeModelFilter := (&Handler{}).applyUpstreamChannelFilter(autoCtx, "DeepSeek-V4-Pro", accountFilterForResponsesModel("DeepSeek-V4-Pro", false))
 	if !traeModelFilter(trae) {
 		t.Fatal("default/auto Responses routing rejected a model in the Trae CN catalog")
 	}
@@ -132,7 +132,7 @@ func TestResponsesResolverSeparatesCodexAndTraeCNChannels(t *testing.T) {
 
 	traeCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	traeCtx.Set(contextAPIKeyRow, &database.APIKeyRow{ID: 91015, Limits: database.APIKeyLimits{UpstreamChannel: database.UpstreamChannelTraeCN}})
-	traeFilter := (&Handler{}).applyUpstreamChannelFilter(traeCtx, "deepseek-v3", accountFilterForResponsesModel("deepseek-v3", false))
+	traeFilter := (&Handler{}).applyUpstreamChannelFilter(traeCtx, "DeepSeek-V4-Pro", accountFilterForResponsesModel("DeepSeek-V4-Pro", false))
 	if !traeFilter(trae) {
 		t.Fatal("explicit Trae CN channel rejected a supported Trae model")
 	}
@@ -150,12 +150,12 @@ func TestScopedModelsIncludeTraeCNByDefaultAndRespectCatalog(t *testing.T) {
 		UpstreamType: auth.UpstreamTraeCN,
 		AccessToken:  "trae-at",
 		RefreshToken: "trae-rt",
-		Models:       []string{"deepseek-v3"},
+		Models:       []string{"DeepSeek-V4-Pro"},
 	})
 	handler := NewHandler(store, nil, nil, nil)
 
 	auto := listScopedModelsForTest(t, handler, &database.APIKeyRow{ID: 91017})
-	if owner, _, ok := scopedModelByID(auto, "deepseek-v3"); !ok || owner != "trae" {
+	if owner, _, ok := scopedModelByID(auto, "DeepSeek-V4-Pro"); !ok || owner != "trae" {
 		t.Fatalf("default-channel model catalog did not advertise the Trae model: %+v", auto)
 	}
 	if _, _, ok := scopedModelByID(auto, "gpt-5.6-sol"); ok {
@@ -166,7 +166,7 @@ func TestScopedModelsIncludeTraeCNByDefaultAndRespectCatalog(t *testing.T) {
 		ID:     91018,
 		Limits: database.APIKeyLimits{UpstreamChannel: database.UpstreamChannelTraeCN},
 	})
-	if owner, _, ok := scopedModelByID(trae, "deepseek-v3"); !ok || owner != "trae" {
-		t.Fatalf("explicit TRAECN catalog = %+v, want deepseek-v3 owned by trae", trae)
+	if owner, _, ok := scopedModelByID(trae, "DeepSeek-V4-Pro"); !ok || owner != "trae" {
+		t.Fatalf("explicit TRAECN catalog = %+v, want DeepSeek-V4-Pro owned by trae", trae)
 	}
 }

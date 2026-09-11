@@ -37,8 +37,8 @@ func TestExtractTraeCNModelIDsFromBatchFunctionConfigs(t *testing.T) {
 }`)
 	got := extractTraeCNModelIDs(body)
 	joined := strings.Join(got, ", ")
-	// Doubao 系 config 会按网关目录的拼写归一（Doubao-Seed-2.1-Pro -> doubao-seed-2-1-pro）。
-	for _, want := range []string{"glm-5.3-flash", "glm-5.3", "kimi-k3", "qwen3.8-max", "doubao-seed-2-1-turbo", "doubao-seed-2-1-pro", "auto"} {
+	// 目录逐字保留 provider 的 config_name（大小写敏感：Trae 用它选后端）。
+	for _, want := range []string{"glm-5.3-flash", "glm-5.3", "kimi-k3", "qwen3.8-max", "Doubao-Seed-2.1-Turbo", "Doubao-Seed-2.1-Pro", "auto"} {
 		if !containsFold(got, want) {
 			t.Errorf("批量目录缺少 %q: %s", want, joined)
 		}

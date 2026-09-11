@@ -649,12 +649,55 @@ func (h *Handler) modelValidator(supportedModels []string) api.ValidationRule {
 			return nil
 		}
 		model := value.String()
-		if validModels[model] || h.modelSupportedByAccountMapping(model) {
+		if validModels[model] || h.modelSupportedByAccountMapping(model) || h.traeCNModelNameAccepted(model) {
 			return nil
 		}
 		return &api.ValidationError{
 			Field:   path,
 			Message: fmt.Sprintf("Model '%s' is not supported", model),
+			Code:    "unsupported_model",
+		}
+	}
+}
+
+// traeCNModelNameAccepted 让任意渠道的 Key 都能用 Trae 的命名风格引用 Trae 模型。
+// 上游真名（config_name）区分大小写、大小写和分隔符写法在旧配置里满天飞
+// （doubao-seed-code / Doubao-Seed-Code、kimi-k2-7-code / kimi-k2.7-code），
+// 精确匹配会把这些请求直接 400 掉，而账号路由用的是宽松匹配，两边必须一致。
+func (h *Handler) traeCNModelNameAccepted(model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" || strings.HasPrefix(strings.ToLower(model), "claude-") {
+		return false
+	}
+	declared := auth.TraeCNDefaultModelIDs()
+	if h != nil && h.store != nil {
+		declared = h.traeCNChannelModels()
+	}
+	for _, candidate := range declared {
+		if auth.TraeCNModelsEquivalent(candidate, model) {
+			return true
+		}
+	}
+	return false
+}
+
+// traeCNChannelModelValidator 是 TRAECN 渠道 Key 的模型白名单：判定规则与
+// traeCNModelNameAccepted 相同（宽松匹配上游 config_name）。
+func (h *Handler) traeCNChannelModelValidator() api.ValidationRule {
+	models := h.traeCNChannelModels()
+	return func(value gjson.Result, path string) *api.ValidationError {
+		if !value.Exists() || value.Type != gjson.String {
+			return nil
+		}
+		model := strings.TrimSpace(value.String())
+		for _, candidate := range models {
+			if auth.TraeCNModelsEquivalent(candidate, model) {
+				return nil
+			}
+		}
+		return &api.ValidationError{
+			Field:   path,
+			Message: fmt.Sprintf("Model '%s' is not supported", value.String()),
 			Code:    "unsupported_model",
 		}
 	}
@@ -3768,7 +3811,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		// effort 别名；raw backing 与 account model_mapping 不是下游模型名。
 		rules["model"] = append(rules["model"], api.ModelValidator(h.antigravityAcceptedModels()))
 	case database.UpstreamChannelTraeCN:
-		rules["model"] = append(rules["model"], api.ModelValidator(h.traeCNChannelModels()))
+		rules["model"] = append(rules["model"], h.traeCNChannelModelValidator())
 	default:
 		rules["model"] = append(rules["model"], h.modelValidator(supportedModels))
 	}
@@ -5798,7 +5841,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	validator := api.NewValidator(rawBody)
 	rules := api.ResponsesAPIValidationRulesForModel(mappedModel)
 	if requestUpstreamChannel(c) == database.UpstreamChannelTraeCN {
-		rules["model"] = append(rules["model"], api.ModelValidator(h.traeCNChannelModels()))
+		rules["model"] = append(rules["model"], h.traeCNChannelModelValidator())
 	} else if requestUpstreamChannel(c) != database.UpstreamChannelGrok {
 		// grok 渠道 Key 的模型由 Grok 上游校验，跳过网关侧模型白名单
 		rules["model"] = append(rules["model"], h.modelValidator(supportedModels))
@@ -6647,7 +6690,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	validator := api.NewValidator(rawBody)
 	rules := api.ChatCompletionValidationRules()
 	if requestUpstreamChannel(c) == database.UpstreamChannelTraeCN {
-		rules["model"] = append(rules["model"], api.ModelValidator(h.traeCNChannelModels()))
+		rules["model"] = append(rules["model"], h.traeCNChannelModelValidator())
 	} else if requestUpstreamChannel(c) != database.UpstreamChannelGrok {
 		// grok 渠道 Key 的模型由 Grok 上游校验，跳过网关侧模型白名单
 		rules["model"] = append(rules["model"], h.modelValidator(supportedModels))
