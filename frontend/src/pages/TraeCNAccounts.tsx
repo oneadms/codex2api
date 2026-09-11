@@ -33,6 +33,12 @@ import type {
   TraeCNImportItem,
   TraeCNOAuthStatusResponse,
 } from "../types";
+import {
+  parseTraeCNImportJSON,
+  selectTraeCNImportEntries,
+  traeCNImportPreviewLabel,
+  type TraeCNImportPreviewItem,
+} from "../lib/traecnImport";
 import PageHeader from "../components/PageHeader";
 import StateShell from "../components/StateShell";
 import Pagination from "../components/Pagination";
@@ -687,6 +693,14 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const [addResult, setAddResult] = useState<AddTraeCNAccountsResponse | null>(null);
   const [adding, setAdding] = useState(false);
   const [exporting, setExporting] = useState(false);
+  // 勾选的账号：导出可以只导选中的那几个（导出接口支持 ids）。
+  const [selectedIDs, setSelectedIDs] = useState<Set<number>>(new Set());
+  // 独立的 JSON 导入弹窗（工具栏入口）；添加弹窗的 JSON 页签共用同一份状态。
+  const [showJSONImport, setShowJSONImport] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [batchDeleting, setBatchDeleting] = useState(false);
+  const [jsonPreview, setJsonPreview] = useState<{ items: TraeCNImportPreviewItem[]; error?: string }>({ items: [] });
+  const [jsonSelected, setJsonSelected] = useState<Set<number>>(new Set());
   // OAuth 授权会话：从 start 拿到授权链接，轮询到 ready 后自动建号。
   const [oauthSession, setOauthSession] = useState<TraeCNOAuthStatusResponse | null>(null);
   const [oauthBusy, setOauthBusy] = useState(false);
@@ -877,7 +891,8 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
         expires_in: session.expires_in,
         interval_seconds: session.interval_seconds,
       });
-      window.open(session.verification_uri, "_blank", "noopener,noreferrer");
+      // 故意不自动打开浏览器：管理员要在自己的指纹浏览器里登录，避免真实浏览器指纹
+      // 被记录。这里只把授权链接交给用户复制。
       void pollOAuthStatus(session.login_id);
     } catch (startError) {
       showToast(getErrorMessage(startError), "error");
@@ -896,12 +911,17 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
     } finally { setOauthBusy(false); }
   };
 
-  const submitJSONImport = async () => {
+  const submitJSONImport = async (indices?: number[]) => {
+    const picked = indices ?? Array.from(jsonSelected);
     if (!jsonText.trim()) { showToast(t("traecn.jsonRequired"), "error"); return; }
+    if (picked.length === 0) { showToast(t("traecn.jsonNothingSelected"), "error"); return; }
+    const accounts = selectTraeCNImportEntries(jsonText, picked);
+    if (accounts.length === 0) { showToast(t("traecn.jsonNothingSelected"), "error"); return; }
+    setImporting(true);
     setAdding(true);
     try {
       const result = await api.importTraeCNJSON({
-        json: jsonText.trim(),
+        accounts,
         name: addForm.name.trim() || undefined,
         host: addForm.host.trim() || DEFAULT_HOST,
         proxy_url: addForm.proxyURL.trim(),
@@ -910,22 +930,113 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
       });
       setAddResult(result);
       showToast(t("traecn.importFinished", { success: result.success, failed: result.failed }), result.failed ? "warning" : "success");
+      if (result.success > 0) {
+        setShowJSONImport(false);
+        setShowAdd(false);
+        setJsonText("");
+        setJsonPreview({ items: [] });
+        setJsonSelected(new Set());
+      }
       await reload(true);
     } catch (importError) {
       showToast(getErrorMessage(importError), "error");
-    } finally { setAdding(false); }
+    } finally {
+      setImporting(false);
+      setAdding(false);
+    }
   };
 
+  const pageIDs = useMemo(() => accounts.map((account) => account.id), [accounts]);
 
-  const exportAccounts = async () => {
+  const toggleSelect = (id: number, checked: boolean) => {
+    setSelectedIDs((current) => {
+      const next = new Set(current);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  const toggleSelectPage = (checked: boolean) => {
+    setSelectedIDs((current) => {
+      const next = new Set(current);
+      for (const id of pageIDs) {
+        if (checked) next.add(id);
+        else next.delete(id);
+      }
+      return next;
+    });
+  };
+
+  const downloadAccounts = async (ids?: number[]) => {
     setExporting(true);
     try {
-      const { blob, filename } = await api.exportTraeCNAccounts();
+      const { blob, filename } = await api.exportTraeCNAccounts(ids);
       downloadBlob(blob, filename || `traecn-accounts-${Date.now()}.json`);
-      showToast(t("traecn.exported"));
+      showToast(ids && ids.length > 0 ? t("traecn.exportedSelected", { count: ids.length }) : t("traecn.exported"));
     } catch (exportError) {
       showToast(getErrorMessage(exportError), "error");
     } finally { setExporting(false); }
+  };
+
+  // 导出全部；导出选中走 downloadAccounts(ids)（后端支持 ids 过滤）。
+  const exportAccounts = () => downloadAccounts();
+
+  const exportAccountsSelected = () => downloadAccounts(Array.from(selectedIDs));
+
+  /** 批量删除勾选的账号；走通用批量删除接口，删除前必须二次确认。 */
+  const deleteSelected = async () => {
+    const ids = Array.from(selectedIDs);
+    if (ids.length === 0) return;
+    const ok = await confirm({
+      title: t("traecn.batchDeleteTitle"),
+      description: t("traecn.batchDeleteDesc", { count: ids.length }),
+      tone: "destructive",
+      confirmVariant: "destructive",
+      confirmText: t("common.confirm"),
+    });
+    if (!ok) return;
+    setBatchDeleting(true);
+    try {
+      const result = await api.batchDeleteAccounts(ids);
+      const success = result.success ?? result.deleted ?? ids.length;
+      const failed = result.failed ?? 0;
+      showToast(t("traecn.batchDeleteDone", { success, failed }), failed > 0 ? "warning" : "success");
+      setSelectedIDs(new Set());
+      await reload(true);
+    } catch (deleteError) {
+      showToast(t("traecn.batchDeleteFailed", { error: getErrorMessage(deleteError) }), "error");
+    } finally {
+      setBatchDeleting(false);
+    }
+  };
+
+  /** 解析 JSON 并生成可勾选的导入预览（与后端同一套宽容规则）。 */
+  const refreshJSONPreview = useCallback((raw: string) => {
+    const parsed = parseTraeCNImportJSON(raw);
+    setJsonPreview(parsed);
+    setJsonSelected(new Set(parsed.items.filter((item) => !item.problem).map((item) => item.index)));
+  }, []);
+
+  const openJSONImport = () => {
+    setAddResult(null);
+    setJsonText("");
+    setJsonPreview({ items: [] });
+    setJsonSelected(new Set());
+    setShowJSONImport(true);
+  };
+
+  const toggleJSONItem = (index: number, checked: boolean) => {
+    setJsonSelected((current) => {
+      const next = new Set(current);
+      if (checked) next.add(index);
+      else next.delete(index);
+      return next;
+    });
+  };
+
+  const toggleAllJSONItems = (checked: boolean) => {
+    setJsonSelected(new Set(checked ? jsonPreview.items.filter((item) => !item.problem).map((item) => item.index) : []));
   };
 
   const handleCopy = async (value: string) => {
@@ -941,6 +1052,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
     try {
       const text = await file.text();
       setJsonText(text);
+      refreshJSONPreview(text);
       showToast(t("traecn.jsonFileLoaded", { name: file.name }));
     } catch (readError) {
       showToast(getErrorMessage(readError), "error");
@@ -997,6 +1109,88 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
     finally { setBusy(null); }
   };
 
+  /** JSON 导入面板：粘贴/选文件 -> 预览 -> 勾选要导入的条目。 */
+  const renderJSONImportPanel = () => (
+    <div className="space-y-3">
+      <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs leading-relaxed text-muted-foreground">{t("traecn.jsonHint")}</div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button variant="outline" size="sm" onClick={() => jsonFileRef.current?.click()}>
+          <Upload className="size-3.5" />
+          {t("traecn.jsonChooseFile")}
+        </Button>
+        <Button variant="ghost" size="sm" onClick={() => { setJsonText(""); setJsonPreview({ items: [] }); setJsonSelected(new Set()); }} disabled={!jsonText}>
+          <X className="size-3.5" />
+          {t("traecn.jsonClear")}
+        </Button>
+        <input
+          ref={jsonFileRef}
+          type="file"
+          accept="application/json,.json"
+          className="hidden"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            event.target.value = "";
+            if (file) void readJSONFile(file);
+          }}
+        />
+      </div>
+      <textarea
+        value={jsonText}
+        onChange={(event) => { setJsonText(event.target.value); refreshJSONPreview(event.target.value); }}
+        placeholder={t("traecn.jsonPlaceholder")}
+        className="min-h-32 w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+      />
+      {jsonPreview.error ? (
+        <p className="text-xs text-destructive">{t(`traecn.jsonError_${jsonPreview.error}`)}</p>
+      ) : null}
+      {jsonPreview.items.length > 0 ? (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <label className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+              <input
+                type="checkbox"
+                className="size-4 accent-primary"
+                checked={jsonSelected.size > 0 && jsonSelected.size === jsonPreview.items.filter((item) => !item.problem).length}
+                onChange={(event) => toggleAllJSONItems(event.target.checked)}
+              />
+              {t("traecn.jsonPreviewTitle", { total: jsonPreview.items.length })}
+            </label>
+            <span className="text-[11px] text-muted-foreground">{t("traecn.jsonSelectedCount", { count: jsonSelected.size })}</span>
+          </div>
+          <div className="max-h-56 overflow-y-auto rounded-lg border border-border">
+            {jsonPreview.items.map((item) => (
+              <label
+                key={item.index}
+                className={cn(
+                  "flex items-start gap-2 border-b border-border/60 px-3 py-2 last:border-0",
+                  item.problem ? "opacity-50" : "cursor-pointer hover:bg-muted/40",
+                )}
+              >
+                <input
+                  type="checkbox"
+                  className="mt-0.5 size-4 accent-primary"
+                  disabled={Boolean(item.problem)}
+                  checked={jsonSelected.has(item.index)}
+                  onChange={(event) => toggleJSONItem(item.index, event.target.checked)}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs font-medium">{traeCNImportPreviewLabel(item)}</span>
+                  <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground" title={item.refresh_token}>
+                    {item.name ? `${item.name} · ` : ""}RT {item.refresh_token ? `${item.refresh_token.slice(0, 8)}…` : "—"}
+                    {item.machine_id ? ` · 设备码 ${item.machine_id.slice(0, 8)}…` : ""}
+                  </span>
+                  {item.problem ? (
+                    <span className="mt-0.5 block text-[10px] text-destructive">{t(`traecn.jsonIssue_${item.problem}`)}</span>
+                  ) : null}
+                </span>
+              </label>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const activeCount = summary?.active ?? accounts.filter((account) => account.enabled !== false && account.status !== "error").length;
   const disabledCount = summary?.disabled ?? accounts.filter((account) => account.enabled === false).length;
@@ -1011,7 +1205,11 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
         onRefresh={() => void reload()}
         actions={
           <div className="flex items-center gap-2">
-            <Button variant="outline" onClick={() => void exportAccounts()} disabled={exporting}>
+            <Button variant="outline" onClick={openJSONImport} disabled={importing}>
+              <Upload className="size-4" />
+              {t("traecn.importJSONBtn")}
+            </Button>
+            <Button variant="outline" onClick={() => void exportAccounts()} disabled={exporting} title={t("traecn.exportAllHint")}>
               {exporting ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />}
               {t("traecn.exportAccounts")}
             </Button>
@@ -1040,6 +1238,25 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
         ]} className="sm:w-36" compact />
       </div>
 
+      {selectedIDs.size > 0 ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-muted/40 px-3 py-2">
+          <span className="text-sm font-medium">{t("traecn.selectedCount", { count: selectedIDs.size })}</span>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={() => void exportAccountsSelected()} disabled={exporting || batchDeleting}>
+              {exporting ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+              {t("traecn.exportSelected", { count: selectedIDs.size })}
+            </Button>
+            <Button variant="destructive" size="sm" onClick={() => void deleteSelected()} disabled={batchDeleting || exporting}>
+              {batchDeleting ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
+              {t("traecn.batchDelete")}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => setSelectedIDs(new Set())} disabled={batchDeleting}>
+              {t("traecn.cancelSelection")}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
       <StateShell
         variant="section"
         loading={loading}
@@ -1057,6 +1274,18 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
             <table className="w-full min-w-[860px] text-sm">
               <thead className="border-b border-border bg-muted/30">
                 <tr className="text-left text-xs font-semibold uppercase text-muted-foreground">
+                  <th className="w-10 px-3 py-3">
+                    <input
+                      type="checkbox"
+                      className="size-4 accent-primary"
+                      aria-label={t("traecn.selectAllOnPage")}
+                      checked={pageIDs.length > 0 && pageIDs.every((id) => selectedIDs.has(id))}
+                      ref={(node) => {
+                        if (node) node.indeterminate = pageIDs.some((id) => selectedIDs.has(id)) && !pageIDs.every((id) => selectedIDs.has(id));
+                      }}
+                      onChange={(event) => toggleSelectPage(event.target.checked)}
+                    />
+                  </th>
                   <th className="px-3 py-3">{t("traecn.columnAccount")}</th>
                   <th className="px-3 py-3">{t("traecn.columnModels")}</th>
                   <th className="px-3 py-3">{t("traecn.columnEndpoint")}</th>
@@ -1074,6 +1303,15 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
                       : null;
                   return (
                     <tr key={account.id} className={cn("border-b border-border/70 last:border-0", account.enabled === false && "opacity-60")}>
+                      <td className="px-3 py-3 align-top">
+                        <input
+                          type="checkbox"
+                          className="size-4 accent-primary"
+                          aria-label={t("traecn.selectAccount", { name: accountLabel(account) })}
+                          checked={selectedIDs.has(account.id)}
+                          onChange={(event) => toggleSelect(account.id, event.target.checked)}
+                        />
+                      </td>
                       <td className="max-w-[220px] px-3 py-3">
                         <div className="truncate font-semibold" title={accountLabel(account)}>{accountLabel(account)}</div>
                         <div
@@ -1120,6 +1358,34 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
       </StateShell>
 
       <Modal
+        show={showJSONImport}
+        title={t("traecn.importJSONTitle")}
+        contentClassName="sm:max-w-[680px]"
+        onClose={() => { if (!importing) setShowJSONImport(false); }}
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setShowJSONImport(false)} disabled={importing}>{t("common.cancel")}</Button>
+            <Button onClick={() => void submitJSONImport()} disabled={importing || jsonSelected.size === 0}>
+              {importing ? <Loader2 className="size-4 animate-spin" /> : <Upload className="size-4" />}
+              {importing ? t("traecn.adding") : t("traecn.jsonImportBtn", { count: jsonSelected.size })}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          {renderJSONImportPanel()}
+          <div className="grid gap-3 border-t border-border pt-4 sm:grid-cols-2">
+            <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("traecn.nameLabel")}</span><Input value={addForm.name} onChange={(event) => setAddForm((form) => ({ ...form, name: event.target.value }))} placeholder={t("traecn.namePlaceholder")} /></label>
+            <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("traecn.hostLabel")}</span><Input value={addForm.host} onChange={(event) => setAddForm((form) => ({ ...form, host: event.target.value }))} placeholder={DEFAULT_HOST} /></label>
+          </div>
+          <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("traecn.proxyLabel")}</span><Input value={addForm.proxyURL} onChange={(event) => setAddForm((form) => ({ ...form, proxyURL: event.target.value }))} placeholder="http://127.0.0.1:7890" /></label>
+          <div className="space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("accounts.importGroupsLabel")}</span><AccountGroupMultiSelect groups={traeGroups} value={addForm.groupIDs} onChange={(value) => setAddForm((form) => ({ ...form, groupIDs: value }))} placeholder={t("accounts.importGroupsPlaceholder")} emptyLabel={t("accounts.groupsNone")} selectedLabel={t("accounts.groupsSelected", { count: addForm.groupIDs.length })} /></div>
+          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={addForm.enabled} onChange={(event) => setAddForm((form) => ({ ...form, enabled: event.target.checked }))} className="size-4 accent-primary" />{t("traecn.enableOnImport")}</label>
+          {addResult ? <ImportResult result={addResult} /> : null}
+        </div>
+      </Modal>
+
+      <Modal
         show={showAdd}
         title={t("traecn.addTitle")}
         onClose={() => { if (!adding && !oauthBusy) setShowAdd(false); }}
@@ -1133,9 +1399,9 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
                 {adding ? t("traecn.adding") : t("traecn.submit")}
               </Button>
             ) : addMethod === "json" ? (
-              <Button onClick={() => void submitJSONImport()} disabled={adding || !jsonText.trim()}>
+              <Button onClick={() => void submitJSONImport()} disabled={adding || jsonSelected.size === 0}>
                 {adding ? <Loader2 className="size-4 animate-spin" /> : <Upload className="size-4" />}
-                {adding ? t("traecn.adding") : t("traecn.jsonImportBtn")}
+                {adding ? t("traecn.adding") : t("traecn.jsonImportBtn", { count: jsonSelected.size })}
               </Button>
             ) : oauthSession ? (
               <Button onClick={() => { resetOAuthSession(); setShowAdd(false); }} disabled={oauthClaiming}>
@@ -1196,11 +1462,9 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
                         value={oauthSession.verification_uri ?? ""}
                         className="min-w-0 flex-1 truncate rounded-md border border-input bg-muted/40 px-3 py-2 font-mono text-xs"
                       />
-                      <Button variant="outline" size="sm" onClick={() => void handleCopy(oauthSession.verification_uri ?? "")}>
+                      <Button variant="outline" size="sm" className="shrink-0" onClick={() => void handleCopy(oauthSession.verification_uri ?? "")}>
                         <Copy className="size-3.5" />
-                      </Button>
-                      <Button variant="outline" size="sm" onClick={() => window.open(oauthSession.verification_uri ?? "", "_blank", "noopener,noreferrer")}>
-                        <ExternalLink className="size-3.5" />
+                        {t("traecn.oauthCopyLink")}
                       </Button>
                     </div>
                   </div>
@@ -1251,38 +1515,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
             </div>
           ) : null}
 
-          {addMethod === "json" ? (
-            <div className="space-y-3">
-              <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs leading-relaxed text-muted-foreground">{t("traecn.jsonHint")}</div>
-              <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" onClick={() => jsonFileRef.current?.click()}>
-                  <Upload className="size-3.5" />
-                  {t("traecn.jsonChooseFile")}
-                </Button>
-                <Button variant="ghost" size="sm" onClick={() => setJsonText("")} disabled={!jsonText}>
-                  <X className="size-3.5" />
-                  {t("traecn.jsonClear")}
-                </Button>
-                <input
-                  ref={jsonFileRef}
-                  type="file"
-                  accept="application/json,.json"
-                  className="hidden"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    event.target.value = "";
-                    if (file) void readJSONFile(file);
-                  }}
-                />
-              </div>
-              <textarea
-                value={jsonText}
-                onChange={(event) => setJsonText(event.target.value)}
-                placeholder={t("traecn.jsonPlaceholder")}
-                className="min-h-44 w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-              />
-            </div>
-          ) : null}
+          {addMethod === "json" ? renderJSONImportPanel() : null}
 
           {/* 三种方式共用的账号元数据 */}
           <div className="grid gap-3 border-t border-border pt-4 sm:grid-cols-2">

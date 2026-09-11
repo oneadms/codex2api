@@ -51,9 +51,11 @@ test("Trae CN OAuth panel drives start -> poll -> claim", () => {
   // 自动回调不通时的兜底：粘贴回调链接。
   assert.match(source, /api\.completeTraeCNOAuth/);
   assert.match(source, /traecn\.oauthSubmitCallback/);
-  // 授权链接要可复制、可重新打开。
+  // 授权链接只提供复制：绝不自动打开浏览器（避免真实浏览器指纹被记录），
+  // 管理员要在自己的指纹浏览器里登录。
   assert.match(source, /traecn\.oauthLinkLabel/);
-  assert.match(source, /window\.open\(session\.verification_uri/);
+  assert.match(source, /traecn\.oauthCopyLink/);
+  assert.doesNotMatch(source, /window\.open/);
 });
 
 test("Trae CN page can export and import credentials as JSON", () => {
@@ -62,6 +64,33 @@ test("Trae CN page can export and import credentials as JSON", () => {
   assert.match(source, /downloadBlob\(blob/);
   assert.match(source, /traecn\.exportAccounts/);
   assert.match(source, /traecn\.jsonChooseFile/);
+});
+
+test("Trae CN list supports exporting only the selected accounts", () => {
+  // 勾选行 -> 导出选中；不勾选才导出全部（后端 ids 过滤）。
+  assert.match(source, /const \[selectedIDs, setSelectedIDs\] = useState<Set<number>>\(new Set\(\)\)/);
+  assert.match(source, /toggleSelectPage/);
+  assert.match(source, /const downloadAccounts = async \(ids\?: number\[\]\) => \{/);
+  assert.match(source, /api\.exportTraeCNAccounts\(ids\)/);
+  assert.match(source, /const exportAccountsSelected = \(\) => downloadAccounts\(Array\.from\(selectedIDs\)\)/);
+  assert.match(source, /traecn\.exportSelected/);
+});
+
+test("Trae CN selection bar offers batch delete with confirmation", () => {
+  assert.match(source, /api\.batchDeleteAccounts\(ids\)/);
+  assert.match(source, /traecn\.batchDeleteTitle/);
+  assert.match(source, /traecn\.batchDeleteDesc/);
+  assert.match(source, /traecn\.cancelSelection/);
+  // 删除必须先走确认弹窗，并且清空选择后刷新列表。
+  assert.match(source, /setSelectedIDs\(new Set\(\)\);\s*\n\s*await reload\(true\);/);
+});
+
+test("Trae CN JSON import previews parsed entries so specific ones can be picked", () => {
+  assert.match(source, /parseTraeCNImportJSON/);
+  assert.match(source, /selectTraeCNImportEntries\(jsonText, picked\)/);
+  assert.match(source, /traecn\.jsonPreviewTitle/);
+  assert.match(source, /traecn\.jsonSelectedCount/);
+  assert.match(source, /toast|showToast/);
 });
 
 test("Trae CN account row shows the per-account device code", () => {
