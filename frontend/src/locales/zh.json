@@ -195,6 +195,7 @@
     "refreshTokensLabel": "Refresh Token（支持多行）",
     "refreshTokensPlaceholder": "每行一个 RT，也支持逗号分隔",
     "refreshTokenHint": "网关会逐条兑换 Access Token；兑换失败的 RT 仍会保存，并在结果中标记警告。",
+    "deviceCode": "设备码 {{code}}",
     "addMethodOAuth": "OAuth 授权",
     "addMethodRT": "RT 导入",
     "addMethodJSON": "JSON 导入",

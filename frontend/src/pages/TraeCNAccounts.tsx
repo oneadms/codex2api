@@ -9,6 +9,7 @@ import {
   Edit3,
   ExternalLink,
   FileJson,
+  Fingerprint,
   KeyRound,
   Layers,
   CalendarCheck,
@@ -91,6 +92,14 @@ const DEFAULT_TRAE_MODELS = [
 async function copyText(value: string): Promise<void> {
   if (!value) return;
   await navigator.clipboard.writeText(value);
+}
+
+// shortDeviceCode 设备码较长，列表里只展示可辨识的前后片段。
+function shortDeviceCode(value?: string): string {
+  const code = (value ?? "").trim();
+  if (!code) return "—";
+  if (code.length <= 12) return code;
+  return `${code.slice(0, 6)}…${code.slice(-4)}`;
 }
 
 // downloadBlob 触发浏览器下载（与 Codex/Grok 账号页同款实现）。
@@ -1078,6 +1087,17 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
                             {t("traecn.checkinLast", { date: account.traecn_checkin_date, credits: account.traecn_checkin_credits ?? 0 })}
                           </div>
                         ) : null}
+                        {/* 设备码：一账号一份，Trae 风控按它识别设备，方便核对是否串号。 */}
+                        <button
+                          type="button"
+                          onClick={() => void handleCopy(account.traecn_machine_id || account.traecn_device_id || "")}
+                          disabled={!account.traecn_machine_id && !account.traecn_device_id}
+                          title={account.traecn_machine_id || account.traecn_device_id || ""}
+                          className="mt-0.5 flex items-center gap-1 truncate font-mono text-[10px] text-muted-foreground transition-colors hover:text-foreground disabled:cursor-default disabled:hover:text-muted-foreground"
+                        >
+                          <Fingerprint className="size-3 shrink-0" />
+                          {t("traecn.deviceCode", { code: shortDeviceCode(account.traecn_device_id || account.traecn_machine_id) })}
+                        </button>
                       </td>
                       <td className="px-3 py-3 align-top">
                         <TraeCNModelsCell account={account} catalog={models} onOpen={() => setModelsAccount(account)} />

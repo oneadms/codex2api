@@ -19,6 +19,7 @@
     "refreshTokensLabel": "Refresh Token（支援多行）",
     "refreshTokensPlaceholder": "每行一個 RT，也支援逗號分隔",
     "refreshTokenHint": "閘道會逐筆兌換 Access Token；兌換失敗的 RT 仍會儲存，並在結果中標示警告。",
+    "deviceCode": "裝置碼 {{code}}",
     "addMethodOAuth": "OAuth 授權",
     "addMethodRT": "RT 匯入",
     "addMethodJSON": "JSON 匯入",

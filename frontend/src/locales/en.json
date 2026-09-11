@@ -195,6 +195,7 @@
     "refreshTokensLabel": "Refresh Tokens (one per line)",
     "refreshTokensPlaceholder": "One RT per line; commas are also accepted",
     "refreshTokenHint": "The gateway exchanges each token for an Access Token. Failed exchanges are still stored and marked with a warning.",
+    "deviceCode": "Device {{code}}",
     "addMethodOAuth": "OAuth login",
     "addMethodRT": "Refresh Token",
     "addMethodJSON": "JSON import",

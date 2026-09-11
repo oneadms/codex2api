@@ -203,11 +203,17 @@ func (h *Handler) AddTraeCNAccounts(c *gin.Context) {
 			// Reserve the RT before contacting ExchangeToken. The reservation is
 			// atomic at the database level, so concurrent import requests cannot
 			// both consume and store the same rotating credential.
+			// 一账号一份设备码：Trae 有风控，同设备码下的多个账号会被判定为同机
+			// 批量登录。导入时就在这里绑定并落库，之后推理/签到一直用它。
+			device := auth.NewTraeCNDeviceIdentity()
 			credentials := map[string]interface{}{
 				"upstream_type": auth.UpstreamTraeCN,
 				"refresh_token": refreshToken,
 				"traecn_host":   host,
 				"plan_type":     "traecn",
+			}
+			for key, value := range device.CredentialUpdates() {
+				credentials[key] = value
 			}
 			if len(models) > 0 {
 				credentials["models"] = models

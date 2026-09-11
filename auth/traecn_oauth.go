@@ -112,6 +112,8 @@ type TraeCNOAuthAccount struct {
 	UserTag          string    `json:"user_tag,omitempty"`
 	LoginTraceID     string    `json:"login_trace_id,omitempty"`
 	Warning          string    `json:"warning,omitempty"`
+	// Device 是这次授权为该账号绑定的设备码（建号时落库，之后一直用它出站）。
+	Device TraeCNDeviceIdentity `json:"device,omitempty"`
 }
 
 // TraeCNOAuthStatus 是轮询结果。State 取值 pending / processing / ready / error / expired。
@@ -137,6 +139,7 @@ type traeCNOAuthSession struct {
 	codeChallenge   string
 	machineID       string
 	deviceID        string
+	deviceIdentity  TraeCNDeviceIdentity
 	proxyURL        string
 	expiresAt       time.Time
 	state           string
@@ -200,9 +203,10 @@ func traeCNOAuthDevicePublicKey() (string, error) {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})), nil
 }
 
-// TraeCNOAuthDeviceInfo 构造授权码兑换所需的 DeviceInfo。
-func TraeCNOAuthDeviceInfo(seed string, publicKey string) map[string]any {
-	profile := traeCNDeviceProfileForSeed(seed)
+// TraeCNOAuthDeviceInfo 构造授权码兑换所需的 DeviceInfo。设备码来自本次授权会话
+// 新生成的、只属于这个账号的那一份（Trae 有风控，设备码不能多账号共用）。
+func TraeCNOAuthDeviceInfo(identity TraeCNDeviceIdentity, publicKey string) map[string]any {
+	profile := traeCNFinalizeDeviceProfile(traeCNApplyDeviceIdentity(traeCNBaseDeviceProfile(), identity))
 	return map[string]any{
 		"DeviceID":        profile.DeviceID,
 		"MachineID":       profile.MachineID,
@@ -306,8 +310,10 @@ func StartTraeCNOAuth(ctx context.Context, callbackURL, proxyURL string) (*TraeC
 	}
 	loginID := uuid.NewString()
 	traceID := uuid.NewString()
-	seed := loginID
-	profile := traeCNDeviceProfileForSeed(seed)
+	// 授权链接和 DeviceInfo 都带上属于这个账号的设备码：登录一开始就把账号和设备绑定，
+	// 之后推理/签到继续用同一份。
+	identity := NewTraeCNDeviceIdentity()
+	profile := traeCNFinalizeDeviceProfile(traeCNApplyDeviceIdentity(traeCNBaseDeviceProfile(), identity))
 
 	loginHost, guidanceErr := RequestTraeCNLoginHost(ctx, traceID, proxyURL)
 	verificationURI, err := TraeCNOAuthAuthorizationURL(loginHost, traceID, normalizedCallback, challenge, profile.MachineID, profile.DeviceID)
@@ -325,6 +331,7 @@ func StartTraeCNOAuth(ctx context.Context, callbackURL, proxyURL string) (*TraeC
 		codeChallenge:   challenge,
 		machineID:       profile.MachineID,
 		deviceID:        profile.DeviceID,
+		deviceIdentity:  identity,
 		proxyURL:        strings.TrimSpace(proxyURL),
 		expiresAt:       time.Now().Add(TraeCNOAuthSessionTTL),
 		state:           "pending",
@@ -554,7 +561,12 @@ func CompleteTraeCNOAuth(ctx context.Context, loginID, rawCallback string) (*Tra
 		session.mu.Unlock()
 		return nil, err
 	}
+	deviceIdentity := session.deviceIdentity
 	account, err := traeCNOAuthExchange(ctx, payload, verifier, machineID, deviceID, loginHost, proxyURL)
+	if err == nil && account != nil {
+		// 授权成功即把这个账号与设备码绑定（建号时落库）。
+		account.Device = deviceIdentity
+	}
 	if err != nil {
 		session.mu.Lock()
 		session.state = "error"
@@ -643,17 +655,12 @@ func ExchangeTraeCNOAuthCode(ctx context.Context, authCode, codeVerifier, machin
 	if err != nil {
 		return TraeCNToken{}, fmt.Errorf("生成设备公钥失败: %w", err)
 	}
-	seed := strings.TrimSpace(machineID)
-	if seed == "" {
-		seed = authCode
+	identity := TraeCNDeviceIdentity{MachineID: strings.TrimSpace(machineID), DeviceID: strings.TrimSpace(deviceID)}
+	if identity.Empty() {
+		// 没有会话设备码时按授权码派生一份，保证请求里始终带一致的设备码。
+		identity = DeriveTraeCNDeviceIdentity("oauth:" + authCode)
 	}
-	deviceInfo := TraeCNOAuthDeviceInfo(seed, publicKey)
-	if machineID != "" {
-		deviceInfo["MachineID"] = machineID
-	}
-	if deviceID != "" {
-		deviceInfo["DeviceID"] = deviceID
-	}
+	deviceInfo := TraeCNOAuthDeviceInfo(identity, publicKey)
 	body, err := json.Marshal(map[string]any{
 		"ClientID":     TraeCNOAuthClientID,
 		"AuthCode":     authCode,

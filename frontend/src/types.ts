@@ -288,6 +288,10 @@ export interface AccountRow {
   traecn_upstream_models?: string[]
   traecn_model_allowlist?: string[]
   traecn_models_synced_at?: string
+  /** 账号绑定的设备码（一账号一份，Trae 风控按它识别设备）。 */
+  traecn_device_id?: string
+  traecn_machine_id?: string
+  traecn_device_bound_at?: string
   traecn_checkin_date?: string
   traecn_checkin_at?: string
   traecn_checkin_credits?: number
@@ -1067,6 +1071,9 @@ export interface TraeCNExportAccount {
   group_ids?: number[]
   enabled: boolean
   status?: string
+  /** 设备码随账号迁移，导入后不重新分配。 */
+  machine_id?: string
+  device_id?: string
 }
 
 export interface TraeCNExportPayload {

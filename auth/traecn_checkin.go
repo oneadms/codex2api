@@ -118,7 +118,9 @@ func TraeCNCheckinHeaders(account *Account, accessToken, requestID string) http.
 	headers.Set("package-type", "1")
 	headers.Set("app-version", headers.Get("x-ide-version"))
 	// 桌面端这里是 VS Code machineId（不是账号 uid）。
-	if machineID := traeCNDeviceProfileForSeed(seed).MachineID; machineID != "" {
+	// 签到也要用账号自己绑定的设备码：市场接口按它做风控，多账号共用一个设备码
+	// 会被判定为同机批量登录。
+	if machineID := traeCNDeviceProfileForAccount(account, seed).MachineID; machineID != "" {
 		headers.Set("x-market-user-id", machineID)
 	}
 	headers.Set("Accept", "application/json")

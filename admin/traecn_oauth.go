@@ -193,6 +193,7 @@ func traeCNOAuthPublicAccount(account *auth.TraeCNOAuthAccount) gin.H {
 		"user_tag":     account.UserTag,
 		"expires_at":   account.ExpiresAt,
 		"warning":      account.Warning,
+		"device":       account.Device,
 	}
 }
 
@@ -269,6 +270,12 @@ func (h *Handler) ClaimTraeCNOAuthAccount(c *gin.Context) {
 
 // insertTraeCNAccountFromCredentials 落库一个凭据已经齐备的 Trae CN 账号。
 func (h *Handler) insertTraeCNAccountFromCredentials(ctx context.Context, name, host, proxyURL string, account *auth.TraeCNOAuthAccount) (int64, bool, error) {
+	// 一账号一份设备码：Trae 有风控，同设备码下多个账号会被判定为同机批量登录。
+	// 导入时若数据自带设备码就沿用（迁移场景），否则新生成一份。
+	device := account.Device
+	if device.Empty() {
+		device = auth.NewTraeCNDeviceIdentity()
+	}
 	credentials := map[string]interface{}{
 		"upstream_type":                           auth.UpstreamTraeCN,
 		"refresh_token":                           account.RefreshToken,
@@ -276,6 +283,9 @@ func (h *Handler) insertTraeCNAccountFromCredentials(ctx context.Context, name, 
 		"plan_type":                               "traecn",
 		auth.TraeCNModelAllowlistCredentialKey:    []string{},
 		auth.TraeCNModelAllowlistSetCredentialKey: true,
+	}
+	for key, value := range device.CredentialUpdates() {
+		credentials[key] = value
 	}
 	if account.AccessToken != "" {
 		credentials["access_token"] = account.AccessToken
@@ -364,6 +374,9 @@ type TraeCNExportAccount struct {
 	GroupIDs     []int64  `json:"group_ids,omitempty"`
 	Enabled      bool     `json:"enabled"`
 	Status       string   `json:"status,omitempty"`
+	// 设备码随账号一起迁移，避免导入后重新分配导致换设备。
+	MachineID string `json:"machine_id,omitempty"`
+	DeviceID  string `json:"device_id,omitempty"`
 }
 
 // TraeCNExportPayload 是导出的文档结构；导入时同时接受裸数组与 accounts 包裹。
@@ -437,6 +450,10 @@ func traeCNExportAccountFromRow(row *database.AccountRow) TraeCNExportAccount {
 	account.UserTag = row.GetCredential("traecn_user_tag")
 	account.LoginRegion = row.GetCredential("traecn_login_region")
 	account.Models = row.GetCredentialStringSlice(auth.TraeCNModelAllowlistCredentialKey)
+	// 导出实际生效的设备码（老账号可能还没落库绑定值），迁移后才能不换设备。
+	deviceIdentity := auth.TraeCNEffectiveDeviceIdentity(row)
+	account.MachineID = deviceIdentity.MachineID
+	account.DeviceID = deviceIdentity.DeviceID
 	return account
 }
 
@@ -456,7 +473,8 @@ type traeCNImportJSONAccount struct {
 	Models       []string        `json:"models"`
 	GroupIDs     json.RawMessage `json:"group_ids"`
 	Enabled      *bool           `json:"enabled"`
-	Raw          json.RawMessage `json:"-"`
+	MachineID    string          `json:"machine_id"`
+	DeviceID     string          `json:"device_id"`
 }
 
 // TraeCNImportJSON 导入 Trae CN 账号 JSON。支持三种输入：
@@ -578,6 +596,10 @@ func (h *Handler) TraeCNImportJSON(c *gin.Context) {
 			UserID:       strings.TrimSpace(item.UserID),
 			UserTag:      strings.TrimSpace(item.UserTag),
 			LoginRegion:  strings.TrimSpace(item.LoginRegion),
+			Device: auth.TraeCNDeviceIdentity{
+				MachineID: strings.TrimSpace(item.MachineID),
+				DeviceID:  strings.TrimSpace(item.DeviceID),
+			},
 		}
 		if parsed, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(item.ExpiresAt)); parseErr == nil {
 			account.ExpiresAt = parsed
@@ -716,6 +738,26 @@ func decodeTraeCNImportAccount(raw []byte) (traeCNImportJSONAccount, error) {
 					if value, ok := generic[key]; ok {
 						if text := strings.TrimSpace(fmt.Sprintf("%v", value)); text != "" && text != "<nil>" {
 							item.AccessToken = text
+							break
+						}
+					}
+				}
+			}
+			if strings.TrimSpace(item.MachineID) == "" {
+				for _, key := range []string{"machineId", "machine_id", "x_machine_id"} {
+					if value, ok := generic[key]; ok {
+						if text := strings.TrimSpace(fmt.Sprintf("%v", value)); text != "" && text != "<nil>" {
+							item.MachineID = text
+							break
+						}
+					}
+				}
+			}
+			if strings.TrimSpace(item.DeviceID) == "" {
+				for _, key := range []string{"deviceId", "device_id", "x_device_id"} {
+					if value, ok := generic[key]; ok {
+						if text := strings.TrimSpace(fmt.Sprintf("%v", value)); text != "" && text != "<nil>" {
+							item.DeviceID = text
 							break
 						}
 					}

@@ -1020,11 +1020,54 @@ func traeCNDeviceIDForMachineID(machineID string) string {
 	return fmt.Sprintf("%019d", abs)
 }
 
-func traeCNDeviceProfileForSeed(seed string) traeCNDeviceProfile {
+// traeCNBaseDeviceProfile 是主机层面的画像：品牌/型号/CPU/系统/IDE 版本。这些字段
+// 不唯一标识一台设备，多账号共用没有风控问题；唯一标识设备的 machine_id / device_id
+// 由账号各自绑定（见 traecn_device.go），不从这里来。
+func traeCNBaseDeviceProfile() traeCNDeviceProfile {
 	traeCNDeviceProfileOnce.Do(func() {
 		traeCNDiscoveredProfile = discoverTraeCNDeviceProfile()
 	})
 	profile := traeCNDiscoveredProfile
+	// 主机探测到的 machine_id/device_id 是"运行网关这台机器"的标识，绝不能当成账号
+	// 设备码：一个网关跑多个账号时会变成同机批量登录。只保留它自己派生出的 IDE 版本
+	// 等信息，设备码由调用方绑定。
+	profile.MachineID = ""
+	profile.DeviceID = ""
+	return profile
+}
+
+// traeCNApplyDeviceIdentity 把一份设备码写进画像（DeviceID 缺失时按 machine_id 派生）。
+func traeCNApplyDeviceIdentity(profile traeCNDeviceProfile, identity TraeCNDeviceIdentity) traeCNDeviceProfile {
+	if machineID := strings.TrimSpace(identity.MachineID); machineID != "" {
+		profile.MachineID = machineID
+	}
+	if deviceID := strings.TrimSpace(identity.DeviceID); deviceID != "" {
+		profile.DeviceID = deviceID
+	}
+	if profile.DeviceID == "" && profile.MachineID != "" {
+		profile.DeviceID = traeCNDeviceIDForMachineID(profile.MachineID)
+	}
+	return profile
+}
+
+// traeCNDeviceProfileForAccount 组装某账号实际使用的设备画像：主机画像 + 账号绑定的
+// 设备码（未绑定时按账号稳定身份确定性派生）+ 环境变量覆盖。
+func traeCNDeviceProfileForAccount(account *Account, stableSeed string) traeCNDeviceProfile {
+	if account == nil {
+		return traeCNDeviceProfileForSeed(stableSeed)
+	}
+	identity, _ := account.traeCNBoundDeviceIdentity(stableSeed)
+	profile := traeCNApplyDeviceIdentity(traeCNBaseDeviceProfile(), identity)
+	return traeCNFinalizeDeviceProfile(profile)
+}
+
+func traeCNDeviceProfileForSeed(seed string) traeCNDeviceProfile {
+	profile := traeCNApplyDeviceIdentity(traeCNBaseDeviceProfile(), DeriveTraeCNDeviceIdentity(seed))
+	return traeCNFinalizeDeviceProfile(profile)
+}
+
+// traeCNFinalizeDeviceProfile 应用 TRAECN_*/TRAE_* 环境变量覆盖并补齐缺省字段。
+func traeCNFinalizeDeviceProfile(profile traeCNDeviceProfile) traeCNDeviceProfile {
 	if value := firstTraeCNEnv("TRAECN_MACHINE_ID", "TRAE_MACHINE_ID"); value != "" {
 		profile.MachineID = value
 	}
@@ -1050,13 +1093,6 @@ func traeCNDeviceProfileForSeed(seed string) traeCNDeviceProfile {
 	if value := firstTraeCNEnv("TRAECN_IDE_VERSION_CODE", "TRAE_IDE_VERSION_CODE"); value != "" {
 		profile.IDEVersionCode = value
 		explicitIDECode = true
-	}
-	if profile.MachineID == "" {
-		digest := sha256.Sum256([]byte(seed))
-		profile.MachineID = hex.EncodeToString(digest[:])
-	}
-	if profile.DeviceID == "" {
-		profile.DeviceID = traeCNDeviceIDForMachineID(profile.MachineID)
 	}
 	if profile.DeviceBrand == "" {
 		profile.DeviceBrand = "Mac"
@@ -1093,7 +1129,7 @@ func TraeCNRequestHeaders(account *Account, accessToken, requestID string) http.
 		requestID = uuid.NewString()
 	}
 	seed, userID := traeCNHeaderIdentity(account, requestID)
-	profile := traeCNDeviceProfileForSeed(seed)
+	profile := traeCNDeviceProfileForAccount(account, seed)
 	traceID := strings.ReplaceAll(uuid.NewString(), "-", "")
 	appID := firstTraeCNEnv("TRAECN_APP_ID", "TRAE_APP_ID")
 	if appID == "" {
@@ -1150,11 +1186,30 @@ func traeCNHeaderIdentity(account *Account, requestID string) (seed, userID stri
 	if stableIdentity != "" {
 		return "traecn:" + stableIdentity, userID
 	}
-	if refreshToken != "" {
-		digest := sha256.Sum256([]byte(refreshToken))
-		return hex.EncodeToString(digest[:]), userID
+	if stable := TraeCNStableDeviceSeed("", "", account.DBID, refreshToken); stable != "" {
+		return stable, userID
 	}
 	return seed, userID
+}
+
+// TraeCNStableDeviceSeed 是"账号稳定身份"的唯一定义：credential family -> 账号
+// 业务 ID -> DBID -> RT 摘要。出站请求指纹、未绑定账号的设备码、账号列表展示
+// 都必须用它，换算法就等于给账号换设备。
+func TraeCNStableDeviceSeed(familyID, accountID string, dbID int64, refreshToken string) string {
+	if value := strings.TrimSpace(familyID); value != "" {
+		return "traecn:" + value
+	}
+	if value := strings.TrimSpace(accountID); value != "" {
+		return "traecn:" + value
+	}
+	if dbID > 0 {
+		return "traecn:" + strconv.FormatInt(dbID, 10)
+	}
+	if value := strings.TrimSpace(refreshToken); value != "" {
+		digest := sha256.Sum256([]byte(value))
+		return hex.EncodeToString(digest[:])
+	}
+	return ""
 }
 
 // refreshTraeCNAccount exchanges the account RT under a per-account mutex and

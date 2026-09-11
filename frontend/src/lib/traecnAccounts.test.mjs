@@ -63,3 +63,10 @@ test("Trae CN page can export and import credentials as JSON", () => {
   assert.match(source, /traecn\.exportAccounts/);
   assert.match(source, /traecn\.jsonChooseFile/);
 });
+
+test("Trae CN account row shows the per-account device code", () => {
+  // 一个账号绑定一个设备码：列表里要能直接看到，便于核对有没有串号。
+  assert.match(source, /traecn\.deviceCode/);
+  assert.match(source, /account\.traecn_machine_id \|\| account\.traecn_device_id/);
+  assert.match(source, /function shortDeviceCode/);
+});

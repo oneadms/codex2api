@@ -163,6 +163,12 @@ type Account struct {
 	// Trae CN OAuth metadata (upstream_type=traecn).
 	TraeCNHost   string
 	TraeCNUserID string
+	// TraeCNDeviceMachineID / TraeCNDeviceID 是绑定到该账号的设备码（一账号一份，
+	// 见 traecn_device.go）。Trae 有风控：多账号共用设备码会被识别为同机批量登录，
+	// 所以这两个值只属于当前账号，出站请求不再使用主机探测到的设备码。
+	TraeCNDeviceMachineID string
+	TraeCNDeviceID        string
+	TraeCNDeviceBoundAt   time.Time
 	// TraeCNUpstreamModels is the last model catalog fetched from the Trae
 	// upstream. TraeCNModelAllowlist is an optional per-account narrowing list;
 	// Models is kept as the effective (routable) projection for legacy callers.
@@ -5216,6 +5222,8 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		AntigravityProjectID:         strings.TrimSpace(row.GetCredential("project_id")),
 		TraeCNHost:                   strings.TrimSpace(row.GetCredential("traecn_host")),
 		TraeCNUserID:                 strings.TrimSpace(row.GetCredential("traecn_user_id")),
+		TraeCNDeviceMachineID:        strings.TrimSpace(row.GetCredential(TraeCNMachineIDCredentialKey)),
+		TraeCNDeviceID:               strings.TrimSpace(row.GetCredential(TraeCNDeviceIDCredentialKey)),
 		BaseURL:                      strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		APIKey:                       strings.TrimSpace(apiKey),
 		Models:                       models,
@@ -5320,6 +5328,11 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		account.TraeCNUpstreamModelCatalog = normalizeModelList(row.GetCredentialStringSlice(TraeCNUpstreamModelsCredentialKey))
 		account.TraeCNModelAllowlist = normalizeModelList(row.GetCredentialStringSlice(TraeCNModelAllowlistCredentialKey))
 		account.traeCNCheckin = traeCNCheckinFromCredentials(row)
+		if bound := strings.TrimSpace(row.GetCredential(TraeCNDeviceBoundAtCredentialKey)); bound != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, bound); err == nil {
+				account.TraeCNDeviceBoundAt = parsed.UTC()
+			}
+		}
 		account.TraeCNModelAllowlistSet = row.GetCredentialBool(TraeCNModelAllowlistSetCredentialKey) || len(account.TraeCNModelAllowlist) > 0
 		if synced := strings.TrimSpace(row.GetCredential(TraeCNModelsSyncedAtCredentialKey)); synced != "" {
 			if parsed, err := time.Parse(time.RFC3339Nano, synced); err == nil {

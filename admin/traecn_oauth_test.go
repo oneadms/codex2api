@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -257,6 +258,10 @@ func TestTraeCNOAuthEndToEndCreatesAccount(t *testing.T) {
 	if !strings.EqualFold(row.GetCredential("upstream_type"), auth.UpstreamTraeCN) {
 		t.Fatalf("upstream type = %q", row.GetCredential("upstream_type"))
 	}
+	// OAuth 建号必须把授权会话里的设备码绑定下来。
+	if row.GetCredential(auth.TraeCNMachineIDCredentialKey) == "" || row.GetCredential(auth.TraeCNDeviceIDCredentialKey) == "" {
+		t.Fatalf("oauth account has no bound device code: %+v", row.Credentials)
+	}
 
 	// 二次 claim 不能建出第二个账号。
 	claimRecorder = httptest.NewRecorder()
@@ -327,4 +332,133 @@ func TestTraeCNOAuthRoutesRegister(t *testing.T) {
 			t.Errorf("route %s is not registered", key)
 		}
 	}
+}
+
+// 一账号一份设备码：批量导入的多个账号必须各拿到不同的设备码。
+func TestTraeCNImportBindsDistinctDeviceCodes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 1})
+	t.Cleanup(store.Stop)
+	handler := &Handler{db: db, store: store}
+
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/traecn/import-json",
+		strings.NewReader(`{"json":"[{\"refresh_token\":\"dev-rt-1\"},{\"refresh_token\":\"dev-rt-2\"},{\"refresh_token\":\"dev-rt-3\"}]"}`))
+	ginContext.Request.Header.Set("Content-Type", "application/json")
+	handler.TraeCNImportJSON(ginContext)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Items []struct {
+			ID int64 `json:"id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Items) != 3 {
+		t.Fatalf("items = %+v body=%s", response.Items, recorder.Body.String())
+	}
+	seen := map[string]bool{}
+	for _, item := range response.Items {
+		row, err := db.GetAccountByID(context.Background(), item.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		machineID := row.GetCredential(auth.TraeCNMachineIDCredentialKey)
+		deviceID := row.GetCredential(auth.TraeCNDeviceIDCredentialKey)
+		if len(machineID) != 64 || deviceID == "" {
+			t.Fatalf("account %d device code = %q/%q", item.ID, machineID, deviceID)
+		}
+		if row.GetCredential(auth.TraeCNDeviceBoundAtCredentialKey) == "" {
+			t.Fatalf("account %d has no device bound_at", item.ID)
+		}
+		if seen[machineID] {
+			t.Fatalf("duplicate device code %q across imported accounts", machineID)
+		}
+		seen[machineID] = true
+	}
+}
+
+// JSON 导出/导入必须带上设备码：迁移后不能换设备。
+func TestTraeCNExportImportPreservesDeviceCode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 1})
+	t.Cleanup(store.Stop)
+	handler := &Handler{db: db, store: store}
+	ctx := context.Background()
+
+	identity := auth.NewTraeCNDeviceIdentity()
+	if _, err := db.InsertAccountWithUpstream(ctx, "trae-device", "trae", auth.UpstreamTraeCN, map[string]any{
+		"upstream_type":                   auth.UpstreamTraeCN,
+		"refresh_token":                   "device-rt",
+		"access_token":                    "device-at",
+		"traecn_host":                     "https://trae-api-cn.mchost.guru",
+		auth.TraeCNMachineIDCredentialKey: identity.MachineID,
+		auth.TraeCNDeviceIDCredentialKey:  identity.DeviceID,
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	exportRecorder := httptest.NewRecorder()
+	exportContext, _ := gin.CreateTestContext(exportRecorder)
+	exportContext.Request = httptest.NewRequest(http.MethodGet, "/api/admin/accounts/traecn/export", nil)
+	handler.ExportTraeCNAccounts(exportContext)
+	if exportRecorder.Code != http.StatusOK {
+		t.Fatalf("export status = %d body=%s", exportRecorder.Code, exportRecorder.Body.String())
+	}
+	var payload TraeCNExportPayload
+	if err := json.Unmarshal(exportRecorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Accounts) != 1 || payload.Accounts[0].MachineID != identity.MachineID || payload.Accounts[0].DeviceID != identity.DeviceID {
+		t.Fatalf("exported device code = %+v", payload.Accounts)
+	}
+
+	// 回灌到另一个账号：设备码必须原样保留（不是重新生成）。
+	importRecorder := httptest.NewRecorder()
+	importContext, _ := gin.CreateTestContext(importRecorder)
+	restored := map[string]any{"accounts": []any{map[string]any{
+		"name":          "trae-device-restored",
+		"refresh_token": "device-rt-restored",
+		"machine_id":    identity.MachineID,
+		"device_id":     identity.DeviceID,
+	}}}
+	importPayload := traeCNMustJSON(t, map[string]any{"json": string(traeCNMustJSON(t, restored))})
+	importContext.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/traecn/import-json", bytes.NewReader(importPayload))
+	importContext.Request.Header.Set("Content-Type", "application/json")
+	handler.TraeCNImportJSON(importContext)
+	if importRecorder.Code != http.StatusOK {
+		t.Fatalf("import status = %d body=%s", importRecorder.Code, importRecorder.Body.String())
+	}
+	var importResponse struct {
+		Items []struct {
+			ID int64 `json:"id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(importRecorder.Body.Bytes(), &importResponse); err != nil {
+		t.Fatal(err)
+	}
+	row, err := db.GetAccountByID(context.Background(), importResponse.Items[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.GetCredential(auth.TraeCNMachineIDCredentialKey) != identity.MachineID || row.GetCredential(auth.TraeCNDeviceIDCredentialKey) != identity.DeviceID {
+		t.Fatalf("restored device code = %q/%q, want %q/%q",
+			row.GetCredential(auth.TraeCNMachineIDCredentialKey), row.GetCredential(auth.TraeCNDeviceIDCredentialKey),
+			identity.MachineID, identity.DeviceID)
+	}
+}
+
+func traeCNMustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
