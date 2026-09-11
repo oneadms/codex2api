@@ -25,6 +25,16 @@ func traeCNToolHistoryFromChat(calls gjson.Result) []any {
 			}
 			delete(call, "function")
 		}
+		if function, ok := call["function_call"].(map[string]any); ok {
+			name, _ := function["name"].(string)
+			namespace, _ := call["namespace"].(string)
+			if namespace == "" {
+				namespace, _ = function["namespace"].(string)
+			}
+			function["name"] = traeCNToolWireName(namespace, name)
+			delete(function, "namespace")
+			delete(call, "namespace")
+		}
 	}
 	return history
 }
@@ -50,7 +60,7 @@ func traeCNCarrierToolRaws(carrier gjson.Result, taken map[string]struct{}) []st
 		if !tool.IsObject() {
 			return true
 		}
-		if name := traeCNDeclarationName(tool); name != "" {
+		if name := traeCNDeclarationName(tool); name != "" && tool.Get("type").String() != "namespace" {
 			if _, exists := taken[name]; exists {
 				return true
 			}
@@ -71,7 +81,7 @@ func traeCNMergedToolSpecs(topLevel gjson.Result, carriers []string) gjson.Resul
 	declared := make(map[string]struct{}, len(carriers))
 	if topLevel.IsArray() {
 		topLevel.ForEach(func(_, tool gjson.Result) bool {
-			if name := traeCNDeclarationName(tool); name != "" {
+			if name := traeCNDeclarationName(tool); name != "" && tool.Get("type").String() != "namespace" {
 				declared[name] = struct{}{}
 			}
 			return true
@@ -91,7 +101,8 @@ func traeCNMergedToolSpecs(topLevel gjson.Result, carriers []string) gjson.Resul
 		topLevel.ForEach(func(_, tool gjson.Result) bool { write(tool.Raw); return true })
 	}
 	for _, raw := range carriers {
-		if name := traeCNDeclarationName(gjson.Parse(raw)); name != "" {
+		if tool := gjson.Parse(raw); traeCNDeclarationName(tool) != "" && tool.Get("type").String() != "namespace" {
+			name := traeCNDeclarationName(tool)
 			if _, duplicate := declared[name]; duplicate {
 				continue
 			}
@@ -107,16 +118,18 @@ func traeCNMergedToolSpecs(topLevel gjson.Result, carriers []string) gjson.Resul
 // 以及顶层必填/可选参数名（用于把模型多包一层的参数解回来，见
 // traeCNUnwrapArguments）。
 type traeCNToolContract struct {
-	Bridge   string
-	Required []string
-	Fields   []string
+	Name      string
+	Namespace string
+	Bridge    string
+	Required  []string
+	Fields    []string
 }
 
 type traeCNContracts map[string]traeCNToolContract
 
 // traeCNToolPlanFromResponses 把顶层 tools[] 与 Responses Lite 载体声明一起转换成
 // Trae 只接受的 function 声明，并回传每个工具的还原契约。
-func traeCNToolPlanFromResponses(topLevel gjson.Result, carriers []string) (gjson.Result, traeCNContracts) {
+func traeCNToolPlanFromResponses(topLevel gjson.Result, carriers []string) (gjson.Result, traeCNContracts, error) {
 	return traeCNConvertToolSpecs(traeCNMergedToolSpecs(topLevel, carriers))
 }
 
@@ -129,30 +142,35 @@ func traeCNToolPlanFromResponses(topLevel gjson.Result, carriers []string) (gjso
 //     的 function_call（表现为 "unsupported call"）；
 //   - 托管 shell（local_shell / shell）降级成 shell 函数，响应侧还原成
 //     local_shell_call / shell_call，命令才会真的被执行；
-//   - namespace 摊平成内部声明；
-//   - 其余托管/延迟工具（tool_search、web_search、image_generation、MCP、
+//   - namespace 展平为带命名空间前缀的函数，回程恢复原名；
+//   - tool_search 转成函数，回程恢复为客户端执行的工具搜索项；
+//   - 其余托管工具（web_search、image_generation、MCP、
 //     computer_use 等）在 Trae 没有对应形态，跳过声明而不是让整轮请求失败。
-func traeCNConvertToolSpecs(specs gjson.Result) (gjson.Result, traeCNContracts) {
+func traeCNConvertToolSpecs(specs gjson.Result) (gjson.Result, traeCNContracts, error) {
 	if !specs.IsArray() {
-		return specs, nil
+		return specs, nil, nil
 	}
 	var out strings.Builder
 	out.WriteByte('[')
 	first := true
-	seen := make(map[string]struct{})
 	contracts := traeCNContracts{}
-	emit := func(spec map[string]any, bridge string) {
+	var conversionErr error
+	emit := func(spec map[string]any, bridge, namespace string) {
 		name, _ := spec["name"].(string)
 		if name == "" {
 			return
 		}
-		if _, duplicate := seen[name]; duplicate {
+		wireName := traeCNToolWireName(namespace, name)
+		if previous, duplicate := contracts[wireName]; duplicate {
+			if previous.Name != name || previous.Namespace != namespace || previous.Bridge != bridge {
+				conversionErr = fmt.Errorf("Trae CN tool name collision for %q", wireName)
+			}
 			return
 		}
-		seen[name] = struct{}{}
-		if contract, ok := traeCNContractFromSpec(spec, bridge); ok {
-			contracts[name] = contract
-		}
+		spec["name"] = wireName
+		contract, _ := traeCNContractFromSpec(spec, bridge)
+		contract.Name, contract.Namespace = name, namespace
+		contracts[wireName] = contract
 		encoded, err := json.Marshal(spec)
 		if err != nil {
 			return
@@ -163,38 +181,44 @@ func traeCNConvertToolSpecs(specs gjson.Result) (gjson.Result, traeCNContracts) 
 		first = false
 		out.WriteString(string(encoded))
 	}
-	var walk func(tool gjson.Result)
-	walk = func(tool gjson.Result) {
+	var walk func(tool gjson.Result, namespace string)
+	walk = func(tool gjson.Result, namespace string) {
 		if !tool.IsObject() {
 			return
 		}
 		switch strings.TrimSpace(tool.Get("type").String()) {
 		case "namespace":
-			tool.Get("tools").ForEach(func(_, nested gjson.Result) bool { walk(nested); return true })
+			childNamespace := traeCNDeclarationName(tool)
+			if namespace != "" {
+				childNamespace = namespace + "." + childNamespace
+			}
+			traeCNNamespaceChildren(tool).ForEach(func(_, nested gjson.Result) bool { walk(nested, childNamespace); return true })
 		case "", "function":
 			if spec, ok := traeCNFunctionSpec(tool); ok {
-				emit(spec, "")
+				emit(spec, "", namespace)
 			}
 		case "custom", "apply_patch":
 			// 托管 apply_patch 与 freeform 同形：Trae 都用单参数 input 表达。
 			if spec, ok := traeCNCustomFunctionSpec(tool); ok {
-				emit(spec, traeCNBridgeCustomTool)
+				emit(spec, traeCNBridgeCustomTool, namespace)
 			}
 		case "local_shell", "shell":
 			name := "shell"
 			if strings.TrimSpace(tool.Get("type").String()) == "local_shell" {
 				name = "local_shell"
-				emit(traeCNShellFunctionSpec(tool, name), traeCNBridgeLocalShell)
+				emit(traeCNShellFunctionSpec(tool, name), traeCNBridgeLocalShell, namespace)
 			} else {
-				emit(traeCNShellFunctionSpec(tool, name), traeCNBridgeShellCall)
+				emit(traeCNShellFunctionSpec(tool, name), traeCNBridgeShellCall, namespace)
 			}
+		case "tool_search":
+			emit(traeCNToolSearchSpec(), traeCNBridgeToolSearch, namespace)
 		default:
 			// 上游无法表示的托管工具：跳过声明，保留这一轮请求。
 		}
 	}
-	specs.ForEach(func(_, tool gjson.Result) bool { walk(tool); return true })
+	specs.ForEach(func(_, tool gjson.Result) bool { walk(tool, ""); return conversionErr == nil })
 	out.WriteByte(']')
-	return gjson.Parse(out.String()), contracts
+	return gjson.Parse(out.String()), contracts, conversionErr
 }
 
 // traeCNShellFunctionSpec 把托管 shell 声明降级成 Trae 可调用的函数。
@@ -302,7 +326,7 @@ func traeCNAnyTool(tools gjson.Result, match func(name, typ string) bool) bool {
 			typ := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
 			name := strings.ToLower(traeCNDeclarationName(tool))
 			if typ == "namespace" {
-				scan(tool.Get("tools"))
+				scan(traeCNNamespaceChildren(tool))
 				return !found
 			}
 			if name != "" && match(name, typ) {

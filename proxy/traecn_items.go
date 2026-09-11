@@ -199,6 +199,7 @@ func traeCNBridgedCallFromItem(item gjson.Result, typ string) (traeCNBridgedCall
 		call.Arguments = traeCNJSON(map[string]any{"input": traeCNPatchText(item.Get("action"))})
 	case "tool_search_call":
 		call.Name = traeCNFirstNonEmpty(item.Get("name").String(), "tool_search")
+		call.Bridge = traeCNBridgeToolSearch
 		if call.Arguments = arguments(); call.Arguments == "" {
 			call.Arguments = traeCNJSON(map[string]any{"query": item.Get("query").String()})
 		}
@@ -224,6 +225,7 @@ func traeCNBridgedCallFromItem(item gjson.Result, typ string) (traeCNBridgedCall
 	if call.Arguments == "" {
 		call.Arguments = "{}"
 	}
+	call.Name = traeCNToolWireName(item.Get("namespace").String(), call.Name)
 	return call, true
 }
 

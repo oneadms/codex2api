@@ -78,7 +78,7 @@ func mergeTraeCNResponseInput(history, current []json.RawMessage) []json.RawMess
 func traeCNResponseItemKey(raw []byte) string {
 	item := gjson.ParseBytes(raw)
 	typ := item.Get("type").String()
-	if typ == "function_call" || typ == "function_call_output" {
+	if strings.HasSuffix(typ, "_call") || strings.HasSuffix(typ, "_call_output") || typ == "tool_search_output" {
 		if callID := item.Get("call_id").String(); callID != "" {
 			return typ + ":" + callID
 		}

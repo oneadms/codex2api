@@ -36,12 +36,12 @@ func TestTraeCNLiftsAdditionalToolsCarrier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildTraeCNRequestBody() error = %v", err)
 	}
-	if strings.Contains(string(body), "additional_tools") || strings.Contains(string(body), "tool_search") {
+	if strings.Contains(string(body), "additional_tools") || gjson.GetBytes(body, `tools.#(type=="tool_search")`).Exists() {
 		t.Fatalf("carrier leaked upstream: %s", body)
 	}
 	tools := gjson.GetBytes(body, "tools").Array()
-	if len(tools) != 3 {
-		t.Fatalf("lifted %d tools, want 3 (custom apply_patch + namespace function + function): %s", len(tools), body)
+	if len(tools) != 4 {
+		t.Fatalf("lifted %d tools, want tool search + custom apply_patch + namespace function + function: %s", len(tools), body)
 	}
 	for _, tool := range tools {
 		if tool.Get("type").String() != "function" || tool.Get("function_call").Exists() {
@@ -52,10 +52,10 @@ func TestTraeCNLiftsAdditionalToolsCarrier(t *testing.T) {
 			t.Fatalf("parameters must be a JSON string: %s", tool.Raw)
 		}
 	}
-	if got := gjson.GetBytes(body, `tools.#(function.name=="load_workspace_dependencies").function.parameters`).String(); gjson.Get(got, "type").String() != "object" {
+	if got := gjson.GetBytes(body, `tools.#(function.name=="codex_app__load_workspace_dependencies").function.parameters`).String(); gjson.Get(got, "type").String() != "object" {
 		t.Fatalf("namespace input_schema was not lifted: %s", body)
 	}
-	if gjson.GetBytes(body, `tools.#(function.name=="load_workspace_dependencies").deferLoading`).Exists() {
+	if gjson.GetBytes(body, `tools.#(function.name=="codex_app__load_workspace_dependencies").deferLoading`).Exists() {
 		t.Fatalf("deferLoading flag leaked into the Trae tool declaration: %s", body)
 	}
 	if got := gjson.GetBytes(body, `tools.#(function.name=="lookup").function.parameters`).String(); gjson.Get(got, "required.0").String() != "id" {
@@ -66,7 +66,7 @@ func TestTraeCNLiftsAdditionalToolsCarrier(t *testing.T) {
 		t.Fatalf("custom tool was not bridged to an input-parametered function: %s", body)
 	}
 	messages := gjson.GetBytes(body, "messages").Array()
-	if len(messages) != 1 || messages[0].Get("role").String() != "user" || messages[0].Get("content.0.text").String() != "hello" {
+	if len(messages) != 2 || messages[0].Get("role").String() != "system" || messages[1].Get("role").String() != "user" || messages[1].Get("content.0.text").String() != "hello" {
 		t.Fatalf("carrier produced a message: %s", body)
 	}
 }

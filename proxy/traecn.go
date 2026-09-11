@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -165,9 +166,18 @@ func traeCNMessagesFromResponses(body []byte) ([]map[string]any, []string, traeC
 	// 成客户端能执行的 item 形态。历史里的调用同样登记，续会话照旧可用。
 	bridges := traeCNBridges{}
 	appendToolCall := func(call traeCNBridgedCall) {
+		item := map[string]any{"id": call.CallID, "type": "function", "function_call": map[string]any{"name": call.Name, "arguments": call.Arguments}}
+		// 同一批并行调用属于同一条 assistant 消息，后面再跟各自的工具结果。
+		if len(messages) > 0 {
+			last := messages[len(messages)-1]
+			if calls, ok := last["tool_calls"].([]any); ok && last["role"] == "assistant" {
+				last["tool_calls"] = append(calls, item)
+				return
+			}
+		}
 		messages = append(messages, map[string]any{
 			"role": "assistant", "content": []any{},
-			"tool_calls": []any{map[string]any{"id": call.CallID, "type": "function", "function_call": map[string]any{"name": call.Name, "arguments": call.Arguments}}},
+			"tool_calls": []any{item},
 		})
 	}
 	appendToolOutput := func(callID, text string) {
@@ -213,10 +223,7 @@ func traeCNMessagesFromResponses(body []byte) ([]map[string]any, []string, traeC
 					arguments = "{}"
 				}
 				knownCalls[callID] = struct{}{}
-				messages = append(messages, map[string]any{
-					"role": "assistant", "content": []any{},
-					"tool_calls": []any{map[string]any{"id": callID, "type": "function", "function_call": map[string]any{"name": item.Get("name").String(), "arguments": arguments}}},
-				})
+				appendToolCall(traeCNBridgedCall{CallID: callID, Name: traeCNToolWireName(item.Get("namespace").String(), item.Get("name").String()), Arguments: arguments})
 			case "function_call_output":
 				callID := strings.TrimSpace(item.Get("call_id").String())
 				if callID == "" {
@@ -245,6 +252,10 @@ func traeCNMessagesFromResponses(body []byte) ([]map[string]any, []string, traeC
 				"apply_patch_call_output", "tool_search_output", "tool_search_call_output",
 				"mcp_tool_call_output", "mcp_call_output", "computer_call_output",
 				"code_interpreter_call_output", "file_search_call_output":
+				if typ == "tool_search_output" || typ == "tool_search_call_output" {
+					// 搜索结果携带本轮新加载的工具；只保留结果文字会让下一轮无工具可用。
+					carrierTools = append(carrierTools, traeCNCarrierToolRaws(item, carrierToolNames)...)
+				}
 				callID, text, placeholder := traeCNBridgedOutputFromItem(item, typ)
 				if callID == "" {
 					// 输出项没有 call_id：保持内容，作为一个用户可见的结果文本。
@@ -318,12 +329,16 @@ func traeCNRequestBodyPlan(canonical []byte) ([]byte, string, traeCNBridges, tra
 	if targetModel == "" || strings.EqualFold(targetModel, "auto") {
 		functionName = "inline_chat"
 	}
-	if hint := traeCNUltraDelegationHint(root.Get("reasoning.effort").String(), root.Get("tools")); hint != "" {
+	specs, contracts, err := traeCNToolPlanFromResponses(root.Get("tools"), carrierTools)
+	if err != nil {
+		return nil, model, nil, nil, err
+	}
+	if hint := traeCNUltraDelegationHint(root.Get("reasoning.effort").String(), traeCNMergedToolSpecs(root.Get("tools"), carrierTools)); hint != "" {
 		messages = traeCNAppendSystemInstruction(messages, hint)
 	}
 	// 反收尾规则：Trae 后端模型爱把"接下来要做什么"当最终答复，客户端就判定本轮
 	// 结束（不设 goal 时表现为任务自己停）。只在请求带了工具时注入。
-	if hint := traeCNContinueWorkingHint(root.Get("tools")); hint != "" && !traeCNMessagesContain(messages, traeContinueWorkingMarker) {
+	if hint := traeCNContinueWorkingHint(specs); hint != "" && !traeCNMessagesContain(messages, traeContinueWorkingMarker) {
 		messages = traeCNAppendSystemInstruction(messages, hint)
 	}
 	body := map[string]any{"messages": messages, "function": functionName, "stream": true}
@@ -331,7 +346,6 @@ func traeCNRequestBodyPlan(canonical []byte) ([]byte, string, traeCNBridges, tra
 		// 内置兼容别名表已删除：管理员在 TRAECN 设置里配置的映射目标就是上游模型名。
 		body["model"] = targetModel
 	}
-	specs, contracts := traeCNToolPlanFromResponses(root.Get("tools"), carrierTools)
 	for name, contract := range contracts {
 		bridges.add(name, contract.Bridge)
 	}
@@ -343,7 +357,7 @@ func traeCNRequestBodyPlan(canonical []byte) ([]byte, string, traeCNBridges, tra
 		body["tools"] = tools
 	}
 	if choice := root.Get("tool_choice"); choice.Exists() {
-		converted, choiceErr := responsesToolChoiceToChat(choice)
+		converted, choiceErr := traeCNToolChoiceToChat(choice)
 		if choiceErr != nil {
 			return nil, model, nil, nil, choiceErr
 		}
@@ -935,6 +949,7 @@ type traeCNCanonicalState struct {
 	responseID   string
 	model        string
 	terminal     bool
+	finishReason string
 	usage        map[string]any
 	output       []traeCNOutputRef
 	messageID    string
@@ -1159,8 +1174,6 @@ func (s *traeCNCanonicalState) mergeToolCall(writer io.Writer, raw gjson.Result,
 			tool.arguments.WriteString(argument)
 		case strings.HasPrefix(argument, current):
 			tool.arguments.WriteString(argument[len(current):])
-		case strings.HasPrefix(current, argument):
-			// Repeated complete tool call; nothing new to emit.
 		default:
 			// A few models stream argument fragments without an explicit delta
 			// marker. Preserve those fragments; terminal JSON validation fences a
@@ -1183,7 +1196,7 @@ func (s *traeCNCanonicalState) emitToolProgress(writer io.Writer, tool *traeCNTo
 	if !tool.itemAdded {
 		if err := writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent("response.output_item.added", map[string]any{
 			"response_id": s.responseID, "output_index": tool.outputIndex,
-			"item": map[string]any{"id": tool.id, "type": "function_call", "call_id": tool.callID, "name": tool.name, "arguments": "", "input": "", "status": "in_progress"},
+			"item": s.toolItem(tool, "function_call", "", "in_progress"),
 		})); err != nil {
 			return err
 		}
@@ -1281,6 +1294,8 @@ func traeIncompleteReason(finishReason string) string {
 	switch strings.ToLower(strings.TrimSpace(finishReason)) {
 	case "length", "max_tokens", "max_output_tokens", "token_limit":
 		return "max_output_tokens"
+	case "content_filter":
+		return "content_filter"
 	default:
 		return ""
 	}
@@ -1324,13 +1339,24 @@ func (s *traeCNCanonicalState) terminalOutput(writer io.Writer, status string) (
 				continue
 			}
 			if tool.name == "" {
+				if status == "incomplete" {
+					continue
+				}
 				return nil, fmt.Errorf("Trae CN returned a tool call without a name")
 			}
 			if tool.arguments.Len() == 0 {
 				tool.arguments.WriteString("{}")
 			}
-			if !tool.custom && !json.Valid([]byte(tool.arguments.String())) {
+			if status == "completed" && !tool.custom && !json.Valid([]byte(tool.arguments.String())) {
 				return nil, fmt.Errorf("Trae CN returned invalid JSON arguments for tool %q", tool.name)
+			}
+			if tool.bridge == traeCNBridgeToolSearch {
+				item, err := s.emitToolSearch(writer, tool, status)
+				if err != nil {
+					return nil, err
+				}
+				output = append(output, item)
+				continue
 			}
 			if tool.bridge == traeCNBridgeLocalShell || tool.bridge == traeCNBridgeShellCall {
 				// 托管 shell：还原成 local_shell_call / shell_call，客户端才会执行。
@@ -1357,7 +1383,7 @@ func (s *traeCNCanonicalState) terminalOutput(writer io.Writer, status string) (
 				// added 事件在终态补齐（降级工具的载荷要完整后才能脱壳）。
 				if err := writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent("response.output_item.added", map[string]any{
 					"response_id": s.responseID, "output_index": tool.outputIndex,
-					"item": map[string]any{"id": tool.id, "type": itemType, "call_id": tool.callID, "name": tool.name, "arguments": "", "input": "", "status": "in_progress"},
+					"item": s.toolItem(tool, itemType, "", "in_progress"),
 				})); err != nil {
 					return nil, err
 				}
@@ -1367,7 +1393,7 @@ func (s *traeCNCanonicalState) terminalOutput(writer io.Writer, status string) (
 					return nil, err
 				}
 			}
-			item := map[string]any{"id": tool.id, "type": itemType, "call_id": tool.callID, "name": tool.name, "arguments": arguments, "input": arguments, "status": status}
+			item := s.toolItem(tool, itemType, arguments, status)
 			output = append(output, item)
 			if status == "completed" {
 				if err := writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent(doneEvent, map[string]any{"response_id": s.responseID, "output_index": tool.outputIndex, "item_id": tool.id, "call_id": tool.callID, "arguments": arguments, "input": arguments})); err != nil {
@@ -1407,6 +1433,12 @@ func (s *traeCNCanonicalState) emitCompleted(writer io.Writer, finishReason stri
 	if s.terminal {
 		return nil
 	}
+	if finishReason == "" {
+		finishReason = traeCNFirstNonEmpty(s.finishReason, "stop")
+	}
+	if (finishReason == "tool_calls" || finishReason == "function_call") && len(s.tools) == 0 {
+		return s.emitFailure(writer, "missing_tool_calls", "Trae CN ended with a tool-call finish reason but returned no tool calls")
+	}
 	incompleteReason := traeIncompleteReason(finishReason)
 	status := "completed"
 	eventType := "response.completed"
@@ -1425,6 +1457,10 @@ func (s *traeCNCanonicalState) emitCompleted(writer io.Writer, finishReason stri
 	if finishReason != "" {
 		response["stop_reason"] = finishReason
 	}
+	// 记录带工具请求的纯文本终态，便于区分模型主动收尾和转换丢失调用；不记录正文。
+	if status == "completed" && len(s.tools) == 0 && len(s.contracts) > 0 {
+		log.Printf("[TRAECN] text-only completion: model=%q response_id=%s finish_reason=%q declared_tools=%d tool_calls=0 output_chars=%d", s.model, s.responseID, finishReason, len(s.contracts), len([]rune(s.text.String())))
+	}
 	s.terminal = true
 	return writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent(eventType, map[string]any{"response": response}))
 }
@@ -1442,9 +1478,12 @@ func (s *traeCNCanonicalState) consume(writer io.Writer, eventName string, data 
 		return nil
 	}
 	if strings.TrimSpace(string(data)) == "[DONE]" {
-		return s.emitCompleted(writer, "stop")
+		return s.emitCompleted(writer, "")
 	}
 	parsed, payloadEventName := parseTraePayload(data)
+	if reason := traeFirstText(parsed, "finish_reason", "stop_reason", "choices.0.finish_reason"); reason != "" {
+		s.finishReason = reason
+	}
 	name := strings.ToLower(strings.TrimSpace(eventName))
 	if name == "" || name == "data" {
 		name = strings.ToLower(payloadEventName)
@@ -1487,9 +1526,6 @@ func (s *traeCNCanonicalState) consume(writer io.Writer, eventName string, data 
 			}
 		}
 		finishReason := traeFirstText(parsed, "finish_reason", "stop_reason", "reason")
-		if finishReason == "" {
-			finishReason = "stop"
-		}
 		return s.emitCompleted(writer, finishReason)
 	case "metadata", "timing_cost", "extra_info", "progress_notice", "queue_begin", "request_wait_in_queue", "queue_end":
 		// Provider lifecycle/diagnostic events do not carry model output.
