@@ -12,8 +12,10 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -44,9 +46,22 @@ const (
 	TraeCNOAuthAppType       = "stable"
 	// TraeCNOAuthSessionTTL 是一次授权会话的有效期，与客户端保持一致（10 分钟）。
 	TraeCNOAuthSessionTTL = 10 * time.Minute
-	// TraeCNOAuthCallbackPath 是网关自己的回调路径（管理台默认用它拼回调地址）。
-	TraeCNOAuthCallbackPath = "/api/traecn/oauth/callback"
-	TraeCNOAuthTimeout      = 20 * time.Second
+	// TraeCNOAuthCallbackPath 是 Trae 授权页唯一接受的回调路径。
+	//
+	// 实测（无头 Chrome 逐个参数二分）：只有字面量 http://127.0.0.1:<port>/authorize
+	// 会被接受，其它任何形式都会让授权页直接渲染"登录失败 网络错误"——
+	// localhost、https、别的回环地址、带 query、带结尾斜杠、换成别的路径、
+	// 以及任何远端域名都不行。所以回调地址只能这样拼。
+	TraeCNOAuthCallbackPath = "/authorize"
+	// TraeCNOAuthCallbackHost 必须是字面量 127.0.0.1（localhost 会被拒）。
+	TraeCNOAuthCallbackHost = "127.0.0.1"
+	// TraeCNOAuthCallbackPortEnv 可覆盖默认回调端口。
+	TraeCNOAuthCallbackPortEnv = "TRAECN_OAUTH_CALLBACK_PORT"
+	// traeCNOAuthCallbackDefaultPort 是远端部署时的默认端口：浏览器跳过去必然连不上
+	// （本机没人监听），但地址栏里的链接带着授权码，用户复制粘贴回管理台即可。
+	traeCNOAuthCallbackDefaultPort = 53999
+	// TraeCNOAuthTimeout 单次上游请求超时。
+	TraeCNOAuthTimeout = 20 * time.Second
 )
 
 // traeCNOAuthGuidanceHosts 是登录引导域名，按顺序尝试；全部失败时回落到 www.trae.cn。
@@ -152,29 +167,46 @@ var (
 	traeCNOAuthSessions   = map[string]*traeCNOAuthSession{}
 )
 
-// TraeCNOAuthCallbackURL 把管理员填写的回调基地址规范化成网关自己的回调地址。
-// 只接受 http/https；不带路径时补默认路径。
-func TraeCNOAuthCallbackURL(base string) (string, error) {
-	base = strings.TrimSpace(base)
-	if base == "" {
-		return "", fmt.Errorf("回调地址不能为空")
+// TraeCNOAuthDefaultCallbackPort 返回默认回调端口（TRAECN_OAUTH_CALLBACK_PORT 可覆盖）。
+func TraeCNOAuthDefaultCallbackPort() int {
+	raw := strings.TrimSpace(firstTraeCNEnv(TraeCNOAuthCallbackPortEnv))
+	if raw != "" {
+		if port, err := strconv.Atoi(raw); err == nil && port > 0 && port <= 65535 {
+			return port
+		}
 	}
-	parsed, err := url.Parse(base)
+	return traeCNOAuthCallbackDefaultPort
+}
+
+// TraeCNOAuthCallbackPortForHost 从管理台来源推导回调端口：管理台本身跑在
+// 127.0.0.1 上（本机部署）时复用它的端口，这样本机网关能真正收到回调、自动完成；
+// 其它情况（远端管理台）用默认端口，靠用户把地址栏链接粘回来。
+func TraeCNOAuthCallbackPortForHost(host string) int {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return TraeCNOAuthDefaultCallbackPort()
+	}
+	if parsed, err := url.Parse(host); err == nil && parsed.Host != "" {
+		host = parsed.Host
+	}
+	name, portText, err := net.SplitHostPort(host)
 	if err != nil {
-		return "", fmt.Errorf("回调地址无效: %w", err)
+		name = host
+		portText = ""
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", fmt.Errorf("回调地址必须是 http/https")
+	name = strings.Trim(name, "[]")
+	if strings.EqualFold(name, TraeCNOAuthCallbackHost) && portText != "" {
+		if port, convErr := strconv.Atoi(portText); convErr == nil && port > 0 && port <= 65535 {
+			return port
+		}
 	}
-	if parsed.Host == "" {
-		return "", fmt.Errorf("回调地址缺少主机名")
-	}
-	if strings.TrimSpace(parsed.Path) == "" || parsed.Path == "/" {
-		parsed.Path = TraeCNOAuthCallbackPath
-	}
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	return parsed.String(), nil
+	return TraeCNOAuthDefaultCallbackPort()
+}
+
+// TraeCNOAuthCallbackURL 返回 Trae 授权页唯一接受的本地回调地址。
+// 端口来自 callbackBase（若它是 127.0.0.1 来源）或默认端口；路径固定 /authorize。
+func TraeCNOAuthCallbackURL(callbackBase string) (string, error) {
+	return fmt.Sprintf("http://%s:%d%s", TraeCNOAuthCallbackHost, TraeCNOAuthCallbackPortForHost(callbackBase), TraeCNOAuthCallbackPath), nil
 }
 
 // generateTraeCNOAuthPKCE 生成 S256 PKCE 对。

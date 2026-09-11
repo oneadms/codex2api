@@ -182,6 +182,8 @@
     "locked": "Locked"
   },
   "traecn": {
+    "oauthPasteTitle": "Paste the callback link to finish",
+    "oauthPasteHint": "Trae only accepts the local callback http://127.0.0.1:<port>/authorize, so after signing in the browser lands on an unreachable local address - that is expected. Copy the whole URL from the address bar and paste it below.",
     "pageTitle": "TRAECN Accounts",
     "pageDescription": "Manage the Trae CN Refresh Token pool, models, proxies, and groups.",
     "loadingTitle": "Loading TRAECN accounts",
@@ -199,11 +201,11 @@
     "addMethodOAuth": "OAuth login",
     "addMethodRT": "Refresh Token",
     "addMethodJSON": "JSON import",
-    "oauthHint": "Start authorization opens the official Trae login page in a new tab. When you finish, Trae redirects to this gateway's callback, which exchanges the code and creates the account.",
+    "oauthHint": "Start authorization opens the official Trae login page in a new tab. After signing in, paste the address-bar link into the box below (a local deployment on the same port completes automatically).",
     "oauthIdleHint": "No authorization session yet. Click “Start authorization”.",
     "oauthLinkLabel": "Authorization link",
     "oauthCallbackLabel": "Callback URL (Trae returns the auth code here)",
-    "oauthCallbackHint": "If the browser cannot reach the callback (for example an internal gateway), paste the full address-bar URL below instead — the result is identical.",
+    "oauthCallbackHint": "Trae only accepts the literal http://127.0.0.1:<port>/authorize; this is the address the gateway told Trae to return to.",
     "oauthCallbackPlaceholder": "Paste the callback URL, e.g. https://your-host/api/traecn/oauth/callback?...",
     "oauthSubmitCallback": "Submit callback",
     "oauthStartBtn": "Start authorization",

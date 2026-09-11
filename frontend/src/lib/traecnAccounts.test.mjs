@@ -70,3 +70,14 @@ test("Trae CN account row shows the per-account device code", () => {
   assert.match(source, /account\.traecn_machine_id \|\| account\.traecn_device_id/);
   assert.match(source, /function shortDeviceCode/);
 });
+
+test("Trae CN OAuth panel leads with the paste-back flow", () => {
+  // Trae 只接受 http://127.0.0.1:<port>/authorize，远端部署时回调不可达，
+  // 所以粘贴回调链接是主路径，必须排在回调地址说明前面。
+  assert.match(source, /traecn\.oauthPasteTitle/);
+  assert.match(source, /traecn\.oauthPasteHint/);
+  assert.ok(
+    source.indexOf("traecn.oauthPasteTitle") < source.indexOf("traecn.oauthCallbackLabel"),
+    "paste panel must come before the raw callback address block",
+  );
+});

@@ -1214,11 +1214,10 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
                     {oauthSession.state === "pending" ? <Loader2 className="size-3.5 animate-spin text-muted-foreground" /> : null}
                     {oauthSession.message ? <span className="text-muted-foreground">{oauthSession.message}</span> : null}
                   </div>
-                  <div className="space-y-1.5 rounded-lg border border-border bg-muted/25 px-3 py-2">
-                    <span className="text-xs font-semibold text-muted-foreground">{t("traecn.oauthCallbackLabel")}</span>
-                    <p className="break-all font-mono text-[11px] text-muted-foreground">{oauthSession.callback_url}</p>
-                    <p className="text-[11px] leading-relaxed text-muted-foreground">{t("traecn.oauthCallbackHint")}</p>
-                    <div className="flex items-center gap-2 pt-1">
+                  <div className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+                    <span className="text-xs font-semibold text-foreground">{t("traecn.oauthPasteTitle")}</span>
+                    <p className="text-[11px] leading-relaxed text-muted-foreground">{t("traecn.oauthPasteHint")}</p>
+                    <div className="flex items-center gap-2">
                       <Input
                         value={oauthCallbackInput}
                         onChange={(event) => setOauthCallbackInput(event.target.value)}
@@ -1230,6 +1229,11 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
                         {t("traecn.oauthSubmitCallback")}
                       </Button>
                     </div>
+                  </div>
+                  <div className="space-y-1 rounded-lg border border-border bg-muted/25 px-3 py-2">
+                    <span className="text-xs font-semibold text-muted-foreground">{t("traecn.oauthCallbackLabel")}</span>
+                    <p className="break-all font-mono text-[11px] text-muted-foreground">{oauthSession.callback_url}</p>
+                    <p className="text-[11px] leading-relaxed text-muted-foreground">{t("traecn.oauthCallbackHint")}</p>
                   </div>
                 </div>
               ) : (

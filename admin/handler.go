@@ -1058,6 +1058,12 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 
 	// Trae CN OAuth 回调：浏览器跳转回来时没有管理密钥，必须放在 admin 鉴权之外。
 	// 会话凭 login_trace_id 匹配，结果只交给持有 login_id 的管理台轮询。
+	//
+	// Trae 授权页只接受 http://127.0.0.1:<port>/authorize 这一种回调（实测），所以
+	// 本机部署（管理台跑在 127.0.0.1 且端口一致）会命中 /authorize 自动完成；远端
+	// 部署时 127.0.0.1 在用户自己机器上、没人监听，用户把地址栏链接粘回管理台即可。
+	// 旧的 /api/traecn/oauth/callback 保留，方便老链接直接粘贴。
+	r.GET("/authorize", h.TraeCNOAuthCallback)
 	r.GET("/api/traecn/oauth/callback", h.TraeCNOAuthCallback)
 
 	api := r.Group("/api/admin")

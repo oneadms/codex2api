@@ -6,6 +6,8 @@
     "disabled": "關閉"
   },
   "traecn": {
+    "oauthPasteTitle": "把回呼連結貼回來完成授權",
+    "oauthPasteHint": "Trae 授權頁只接受 http://127.0.0.1:連接埠/authorize 這種本機回呼位址，所以瀏覽器登入成功後會跳到一個打不開的本機位址——這是正常的。把網址列的整條連結複製，貼到下面提交即可。",
     "pageTitle": "TRAECN 帳號",
     "pageDescription": "管理 Trae CN Refresh Token 號池、模型、代理與群組。",
     "loadingTitle": "正在載入 TRAECN 帳號",
@@ -23,11 +25,11 @@
     "addMethodOAuth": "OAuth 授權",
     "addMethodRT": "RT 匯入",
     "addMethodJSON": "JSON 匯入",
-    "oauthHint": "點「開始授權」會在新分頁開啟 Trae 官方登入頁；登入完成後 Trae 會跳回閘道回呼位址，閘道自動兌換憑證並建立帳號。",
+    "oauthHint": "點「開始授權」會在新分頁開啟 Trae 官方登入頁；登入完成後把網址列的連結貼回下面的輸入框即可（本機部署且連接埠一致時會自動完成）。",
     "oauthIdleHint": "尚未發起授權。點右下角「開始授權」開啟 Trae 登入頁。",
     "oauthLinkLabel": "授權連結",
     "oauthCallbackLabel": "回呼位址（Trae 會把授權碼帶回這裡）",
-    "oauthCallbackHint": "如果瀏覽器打不開回呼位址（例如閘道在內網），把網址列的完整連結貼到下面提交，效果完全相同。",
+    "oauthCallbackHint": "Trae 授權頁只接受字面量 http://127.0.0.1:連接埠/authorize，這裡的位址是閘道依同一寫法產生的。",
     "oauthCallbackPlaceholder": "貼上回呼連結，例如 https://your-host/api/traecn/oauth/callback?...",
     "oauthSubmitCallback": "提交回呼",
     "oauthStartBtn": "開始授權",

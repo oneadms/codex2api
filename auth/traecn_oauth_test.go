@@ -11,12 +11,20 @@ import (
 )
 
 func TestTraeCNOAuthCallbackURLNormalizesBase(t *testing.T) {
-	t.Parallel()
+	// 会改环境变量，不能并行。
+	// Trae 授权页只接受 http://127.0.0.1:<port>/authorize（实测），这里只决定端口：
+	// 管理台来源是 127.0.0.1 时复用它的端口，其它来源落到默认端口。
 	cases := map[string]string{
-		"https://gw.example.com":             "https://gw.example.com" + TraeCNOAuthCallbackPath,
-		"https://gw.example.com/":            "https://gw.example.com" + TraeCNOAuthCallbackPath,
-		"https://gw.example.com/custom/path": "https://gw.example.com/custom/path",
-		"http://127.0.0.1:8080":              "http://127.0.0.1:8080" + TraeCNOAuthCallbackPath,
+		"":                                "http://127.0.0.1:53999/authorize",
+		"https://gw.example.com":          "http://127.0.0.1:53999/authorize",
+		"not-a-url":                       "http://127.0.0.1:53999/authorize",
+		"http://127.0.0.1:8080":           "http://127.0.0.1:8080/authorize",
+		"http://127.0.0.1:8080/":          "http://127.0.0.1:8080/authorize",
+		"http://127.0.0.1:8080/some/path": "http://127.0.0.1:8080/authorize",
+		"https://127.0.0.1:8443":          "http://127.0.0.1:8443/authorize",
+		"http://localhost:8080":           "http://127.0.0.1:53999/authorize",
+		"http://192.168.1.9:8080":         "http://127.0.0.1:53999/authorize",
+		"http://gw.example.com/api/traecn/oauth/callback": "http://127.0.0.1:53999/authorize",
 	}
 	for input, want := range cases {
 		got, err := TraeCNOAuthCallbackURL(input)
@@ -24,10 +32,12 @@ func TestTraeCNOAuthCallbackURLNormalizesBase(t *testing.T) {
 			t.Errorf("TraeCNOAuthCallbackURL(%q) = %q, %v; want %q", input, got, err, want)
 		}
 	}
-	for _, invalid := range []string{"", "ftp://x", "not-a-url", "https://"} {
-		if _, err := TraeCNOAuthCallbackURL(invalid); err == nil {
-			t.Errorf("TraeCNOAuthCallbackURL(%q) should fail", invalid)
-		}
+	t.Setenv(TraeCNOAuthCallbackPortEnv, "41234")
+	if got, _ := TraeCNOAuthCallbackURL("https://gw.example.com"); got != "http://127.0.0.1:41234/authorize" {
+		t.Fatalf("env port override = %q", got)
+	}
+	if got, _ := TraeCNOAuthCallbackURL("http://127.0.0.1:8080"); got != "http://127.0.0.1:8080/authorize" {
+		t.Fatalf("loopback base must win over the env port: %q", got)
 	}
 }
 
@@ -156,7 +166,7 @@ func TestTraeCNOAuthStartAndCompleteAgainstFixture(t *testing.T) {
 	if !strings.Contains(start.VerificationURI, "/authorization") || !strings.Contains(start.VerificationURI, "code_challenge=") {
 		t.Fatalf("verification uri = %q", start.VerificationURI)
 	}
-	if start.CallbackURL != "https://gw.example.com"+TraeCNOAuthCallbackPath {
+	if start.CallbackURL != "http://127.0.0.1:53999"+TraeCNOAuthCallbackPath {
 		t.Fatalf("callback = %q", start.CallbackURL)
 	}
 

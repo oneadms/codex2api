@@ -182,6 +182,8 @@
     "locked": "已锁定"
   },
   "traecn": {
+    "oauthPasteTitle": "把回调链接粘回来完成授权",
+    "oauthPasteHint": "Trae 授权页只接受 http://127.0.0.1:端口/authorize 这种本地回调地址，所以浏览器登录成功后会跳到一个打不开的本地地址——这是正常的。把地址栏里的整条链接复制，粘贴到下面提交即可。",
     "pageTitle": "TRAECN 账号",
     "pageDescription": "管理 Trae CN Refresh Token 号池、模型、代理与分组。",
     "loadingTitle": "正在加载 TRAECN 账号",
@@ -199,11 +201,11 @@
     "addMethodOAuth": "OAuth 授权",
     "addMethodRT": "RT 导入",
     "addMethodJSON": "JSON 导入",
-    "oauthHint": "点“开始授权”会在新标签页打开 Trae 官方登录页；登录完成后 Trae 跳回网关回调地址，网关自动兑换凭据并建号。",
+    "oauthHint": "点“开始授权”会在新标签页打开 Trae 官方登录页；登录完成后把地址栏的链接粘回下面的输入框即可（本机部署且端口一致时会自动完成）。",
     "oauthIdleHint": "尚未发起授权。点右下角“开始授权”打开 Trae 登录页。",
     "oauthLinkLabel": "授权链接",
     "oauthCallbackLabel": "回调地址（Trae 会把授权码带回这里）",
-    "oauthCallbackHint": "如果浏览器打不开回调地址（例如网关在内网），把地址栏里的完整链接粘贴到下面提交，效果完全一样。",
+    "oauthCallbackHint": "Trae 授权页只接受字面量 http://127.0.0.1:端口/authorize，这里的地址是网关按同一写法生成的。",
     "oauthCallbackPlaceholder": "粘贴回调链接，例如 https://your-host/api/traecn/oauth/callback?...",
     "oauthSubmitCallback": "提交回调",
     "oauthStartBtn": "开始授权",

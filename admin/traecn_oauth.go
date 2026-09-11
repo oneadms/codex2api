@@ -43,13 +43,15 @@ type traeCNOAuthClaimRequest struct {
 	Enabled  *bool           `json:"enabled"`
 }
 
-// traeCNCallbackBase 推导 Trae 授权回调地址：优先用调用方显式给的基地址，否则用管理台
-// 自己的来源（浏览器能访问到，回调才可能自动完成）。反向代理下按 X-Forwarded-* 还原。
+// traeCNCallbackBase 推导 Trae 授权回调地址。Trae 授权页只接受
+// http://127.0.0.1:<port>/authorize（实测其它写法一律"登录失败 网络错误"），
+// 因此这里只决定端口：
+//   - 调用方显式给了回调基地址 / 端口，就按它推导；
+//   - 否则用管理台自身的来源（反向代理下按 X-Forwarded-* 还原）：管理台跑在
+//     127.0.0.1 上时端口一致，本机网关能真正收到回调并自动完成；
+//   - 其余情况落到默认端口，靠用户把地址栏链接粘回来提交。
 func traeCNCallbackBase(c *gin.Context, explicit string) string {
 	if base := strings.TrimSpace(explicit); base != "" {
-		if normalized, err := auth.TraeCNOAuthCallbackURL(base); err == nil {
-			return normalized
-		}
 		return base
 	}
 	scheme := "http"
@@ -65,7 +67,7 @@ func traeCNCallbackBase(c *gin.Context, explicit string) string {
 	} else {
 		host = strings.TrimSpace(strings.Split(host, ",")[0])
 	}
-	return fmt.Sprintf("%s://%s%s", scheme, host, auth.TraeCNOAuthCallbackPath)
+	return fmt.Sprintf("%s://%s", scheme, host)
 }
 
 // StartTraeCNOAuth 创建一次授权会话，返回给前端打开的授权链接。
