@@ -44,8 +44,8 @@ func TestExecuteTraeCNRequestRoutesThroughResin(t *testing.T) {
 			method:       r.Method,
 			path:         r.URL.Path,
 			resinAccount: r.Header.Get("X-Resin-Account"),
-			authorize:    r.Header.Get("Authorization"),
-			cloudToken:   r.Header.Get("X-Cloudide-Token"),
+			authorize:    r.Header.Get("x-ide-token"),
+			cloudToken:   r.Header.Get("x-ide-token"),
 		}
 		traeCNResinTestResponse(w)
 	}))
@@ -99,8 +99,8 @@ func TestExecuteTraeCNRequestRoutesThroughResin(t *testing.T) {
 	if request.resinAccount != "91001" {
 		t.Fatalf("X-Resin-Account = %q, want 91001", request.resinAccount)
 	}
-	if request.authorize != "Cloud-IDE-JWT AT" || request.cloudToken != "AT" {
-		t.Fatalf("Trae auth headers were lost through Resin: Authorization=%q X-Cloudide-Token=%q", request.authorize, request.cloudToken)
+	if request.authorize != "AT" {
+		t.Fatalf("Trae auth header was lost through Resin: x-ide-token=%q", request.authorize)
 	}
 	if got := originCalls.Load(); got != 0 {
 		t.Fatalf("provider origin calls = %d, want 0 while Resin is enabled", got)

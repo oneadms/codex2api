@@ -314,3 +314,240 @@ func TestTraeCNCallbackBaseFallsBackToRequestOrigin(t *testing.T) {
 		t.Fatalf("remote callback = %q, err=%v", remote, err)
 	}
 }
+
+// 导出会把设备码一起带走（迁移到另一台网关时不能换设备）。导入时的判定维度是
+// Trae 账号：不同账号撞到同一个设备码要重新分配，同一个账号沿用原码是对的。
+func TestTraeCNImportReassignsDeviceCodeOwnedByAnotherAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 1})
+	t.Cleanup(store.Stop)
+	handler := &Handler{db: db, store: store}
+	ctx := context.Background()
+
+	existing := auth.NewTraeCNDeviceIdentity()
+	existingID, err := db.InsertAccountWithUpstream(ctx, "trae-existing", "trae", auth.UpstreamTraeCN, map[string]any{
+		"upstream_type":                   auth.UpstreamTraeCN,
+		"refresh_token":                   "existing-rt",
+		"traecn_user_id":                  "user-a",
+		auth.TraeCNMachineIDCredentialKey: existing.MachineID,
+		auth.TraeCNDeviceIDCredentialKey:  existing.DeviceID,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	payload := map[string]any{"accounts": []any{
+		// 不同 Trae 账号 + 已有设备码 -> 必须重新分配
+		map[string]any{
+			"name":          "other-account",
+			"refresh_token": "other-rt",
+			"user_id":       "user-b",
+			"machine_id":    existing.MachineID,
+			"device_id":     existing.DeviceID,
+		},
+		// 完全相同的 Trae 账号 + 已有设备码 -> 沿用原码，只提示重复添加
+		map[string]any{
+			"name":          "same-account",
+			"refresh_token": "same-rt",
+			"user_id":       "user-a",
+			"machine_id":    existing.MachineID,
+			"device_id":     existing.DeviceID,
+		},
+		// 没有 user id，判断不了是不是同一个账号 -> 按冲突处理
+		map[string]any{
+			"name":          "unknown-account",
+			"refresh_token": "unknown-rt",
+			"machine_id":    existing.MachineID,
+			"device_id":     existing.DeviceID,
+		},
+	}}
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/traecn/import-json",
+		strings.NewReader(string(traeCNMustJSON(t, map[string]any{"json": string(traeCNMustJSON(t, payload))}))))
+	ginContext.Request.Header.Set("Content-Type", "application/json")
+	handler.TraeCNImportJSON(ginContext)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Success int `json:"success"`
+		Items   []struct {
+			ID      int64  `json:"id"`
+			Warning string `json:"warning"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Success != 3 {
+		t.Fatalf("response = %+v body=%s", response, recorder.Body.String())
+	}
+	machineOf := func(id int64) string {
+		row, err := db.GetAccountByID(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return row.GetCredential(auth.TraeCNMachineIDCredentialKey)
+	}
+
+	if got := machineOf(response.Items[0].ID); got == existing.MachineID {
+		t.Fatalf("a different Trae account reused the device code of account #%d", existingID)
+	}
+	if !strings.Contains(response.Items[0].Warning, "另一个 Trae 账号") {
+		t.Fatalf("warning = %q, want a device-code conflict notice", response.Items[0].Warning)
+	}
+	if got := machineOf(response.Items[1].ID); got != existing.MachineID {
+		t.Fatalf("the same Trae account must keep its own device code, got %q", got)
+	}
+	if strings.Contains(response.Items[1].Warning, "另一个 Trae 账号") {
+		t.Fatalf("same account should not be reported as a conflict: %q", response.Items[1].Warning)
+	}
+	if !strings.Contains(response.Items[1].Warning, "已在号池中") {
+		t.Fatalf("warning = %q, want a duplicate Trae-account notice", response.Items[1].Warning)
+	}
+	if got := machineOf(response.Items[2].ID); got == existing.MachineID {
+		t.Fatalf("an entry without user id must not silently share the device code")
+	}
+}
+
+// 导出的设备码在空号池里必须原样保留：迁移后不能换设备。
+func TestTraeCNImportKeepsDeviceCodeWhenNotInUse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 1})
+	t.Cleanup(store.Stop)
+	handler := &Handler{db: db, store: store}
+
+	identity := auth.NewTraeCNDeviceIdentity()
+	payload := map[string]any{"accounts": []any{map[string]any{
+		"name":          "trae-moved",
+		"refresh_token": "moved-rt",
+		"machine_id":    identity.MachineID,
+		"device_id":     identity.DeviceID,
+	}}}
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/traecn/import-json",
+		strings.NewReader(string(traeCNMustJSON(t, map[string]any{"json": string(traeCNMustJSON(t, payload))}))))
+	ginContext.Request.Header.Set("Content-Type", "application/json")
+	handler.TraeCNImportJSON(ginContext)
+
+	var response struct {
+		Items []struct {
+			ID      int64  `json:"id"`
+			Warning string `json:"warning"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	row, err := db.GetAccountByID(context.Background(), response.Items[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.GetCredential(auth.TraeCNMachineIDCredentialKey) != identity.MachineID ||
+		row.GetCredential(auth.TraeCNDeviceIDCredentialKey) != identity.DeviceID {
+		t.Fatalf("migration changed the device code: %q/%q, want %q/%q",
+			row.GetCredential(auth.TraeCNMachineIDCredentialKey), row.GetCredential(auth.TraeCNDeviceIDCredentialKey),
+			identity.MachineID, identity.DeviceID)
+	}
+	if strings.Contains(response.Items[0].Warning, "设备码已被账号") {
+		t.Fatalf("unexpected conflict warning for a free device code: %q", response.Items[0].Warning)
+	}
+}
+
+func traeCNMustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// RT 粘贴导入也要给每个账号绑定各自的设备码（一账号一码）。
+func TestTraeCNAddAccountsBindsDistinctDeviceCodes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 1})
+	t.Cleanup(store.Stop)
+	handler := &Handler{db: db, store: store}
+
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	// 上游不可达：RT 会原样保存，这里只关心设备码绑定。
+	ginContext.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/traecn",
+		strings.NewReader(`{"name":"rt-bind","refresh_tokens":["rt-bind-1","rt-bind-2"],"host":"https://127.0.0.1:1"}`))
+	ginContext.Request.Header.Set("Content-Type", "application/json")
+	handler.AddTraeCNAccounts(ginContext)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Items []struct {
+			ID     int64 `json:"id"`
+			Stored bool  `json:"stored"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Items) != 2 {
+		t.Fatalf("items = %+v body=%s", response.Items, recorder.Body.String())
+	}
+	seen := map[string]bool{}
+	for _, item := range response.Items {
+		row, err := db.GetAccountByID(context.Background(), item.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		machineID := row.GetCredential(auth.TraeCNMachineIDCredentialKey)
+		deviceID := row.GetCredential(auth.TraeCNDeviceIDCredentialKey)
+		if len(machineID) != 64 || len(deviceID) != auth.TraeCNDeviceIDDigits {
+			t.Fatalf("account %d device code = %q/%q", item.ID, machineID, deviceID)
+		}
+		if seen[machineID] || seen[deviceID] {
+			t.Fatalf("account %d shares a device code with another import", item.ID)
+		}
+		seen[machineID] = true
+		seen[deviceID] = true
+		if row.GetCredential(auth.TraeCNDeviceBoundAtCredentialKey) == "" {
+			t.Fatalf("account %d has no device bound_at", item.ID)
+		}
+	}
+}
+
+// OAuth 新增路由必须注册成功，且公开回调与 /accounts/:id/... 同层不冲突。
+func TestTraeCNOAuthRoutesRegister(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 1})
+	t.Cleanup(store.Stop)
+	handler := &Handler{db: db, store: store}
+	router := gin.New()
+	handler.RegisterRoutes(router)
+
+	want := map[string]bool{
+		"POST /api/admin/accounts/traecn/oauth/start":    false,
+		"GET /api/admin/accounts/traecn/oauth/status":    false,
+		"POST /api/admin/accounts/traecn/oauth/complete": false,
+		"POST /api/admin/accounts/traecn/oauth/claim":    false,
+		"POST /api/admin/accounts/traecn/import-json":    false,
+		"GET /api/admin/accounts/traecn/export":          false,
+		"GET /authorize":                                 false,
+		"GET /api/traecn/oauth/callback":                 false,
+	}
+	for _, route := range router.Routes() {
+		key := route.Method + " " + route.Path
+		if _, ok := want[key]; ok {
+			want[key] = true
+		}
+	}
+	for key, found := range want {
+		if !found {
+			t.Errorf("route %s is not registered", key)
+		}
+	}
+}

@@ -10,7 +10,7 @@ import (
 
 func TestNewTraeCNDeviceIdentityIsUniquePerAccount(t *testing.T) {
 	t.Parallel()
-	seen := make(map[string]bool, 512)
+	seen := make(map[string]bool, 1024)
 	for i := 0; i < 512; i++ {
 		identity := NewTraeCNDeviceIdentity()
 		if identity.Empty() {
@@ -19,16 +19,26 @@ func TestNewTraeCNDeviceIdentityIsUniquePerAccount(t *testing.T) {
 		if len(identity.MachineID) != 64 {
 			t.Fatalf("machine id = %q, want 64 hex chars like the desktop client", identity.MachineID)
 		}
-		if _, err := strconv.ParseUint(identity.DeviceID, 10, 64); err != nil {
-			t.Fatalf("device id = %q, want a numeric id: %v", identity.DeviceID, err)
+		// 真实抓包里的 x-device-id 是 16 位十进制、无前导零（3996093699599548），
+		// 所以新账号也必须是这个形状，不能被补零成 19 位。
+		if len(identity.DeviceID) != TraeCNDeviceIDDigits || strings.HasPrefix(identity.DeviceID, "0") {
+			t.Fatalf("device id = %q, want %d digits without leading zeros", identity.DeviceID, TraeCNDeviceIDDigits)
+		}
+		if value, err := strconv.ParseUint(identity.DeviceID, 10, 64); err != nil || value >= 1<<53 {
+			t.Fatalf("device id = %q, want a JS-safe integer: %v", identity.DeviceID, err)
 		}
 		if seen[identity.MachineID] {
 			t.Fatalf("duplicated machine id %q", identity.MachineID)
 		}
 		seen[identity.MachineID] = true
-		if identity.DeviceID != traeCNDeviceIDForMachineID(identity.MachineID) {
-			t.Fatalf("device id %q is not derived from machine id %q", identity.DeviceID, identity.MachineID)
+		if seen[identity.DeviceID] {
+			t.Fatalf("duplicated device id %q", identity.DeviceID)
 		}
+		seen[identity.DeviceID] = true
+		if len(identity.MarketUserID) != 36 || seen[identity.MarketUserID] {
+			t.Fatalf("market user id = %q, want a unique UUID", identity.MarketUserID)
+		}
+		seen[identity.MarketUserID] = true
 	}
 }
 
@@ -103,13 +113,30 @@ func TestTraeCNCheckinHeadersUseAccountDeviceCode(t *testing.T) {
 	identity := NewTraeCNDeviceIdentity()
 	account := &Account{
 		DBID: 3, UpstreamType: UpstreamTraeCN, AccessToken: "AT", RefreshToken: "RT",
-		CredentialFamilyID:    "family-checkin",
-		TraeCNDeviceMachineID: identity.MachineID,
-		TraeCNDeviceID:        identity.DeviceID,
+		CredentialFamilyID: "family-checkin",
 	}
+	account.ApplyTraeCNDeviceIdentity(identity)
 	headers := TraeCNCheckinHeaders(account, "AT", "req-checkin")
-	if got := headers.Get("x-market-user-id"); got != identity.MachineID {
-		t.Fatalf("x-market-user-id = %q, want the account device code %q", got, identity.MachineID)
+	// 签到走市场客户端身份：UA/package-type 与抓包一致，x-market-user-id 是安装期
+	// UUID（不是 machine id），vscode-sessionid 才是 machine id。
+	if got := headers.Get("User-Agent"); got != TraeCNMarketUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", got, TraeCNMarketUserAgent)
+	}
+	if got := headers.Get("package-type"); got != TraeCNPackageType {
+		t.Fatalf("package-type = %q, want %q", got, TraeCNPackageType)
+	}
+	if got := headers.Get("vscode-sessionid"); got != identity.MachineID {
+		t.Fatalf("vscode-sessionid = %q, want the account machine id %q", got, identity.MachineID)
+	}
+	if got := headers.Get("x-market-user-id"); got != identity.MarketUserID {
+		t.Fatalf("x-market-user-id = %q, want the bound market user id %q", got, identity.MarketUserID)
+	}
+	if got := headers.Get("x-market-user-id"); len(got) != 36 {
+		t.Fatalf("x-market-user-id = %q, want a UUID like the real client", got)
+	}
+	// 推理请求走 TTNet 客户端身份。
+	if got := TraeCNRequestHeaders(account, "AT", "req").Get("User-Agent"); got != TraeCNDefaultUserAgent {
+		t.Fatalf("agent User-Agent = %q, want %q", got, TraeCNDefaultUserAgent)
 	}
 }
 
@@ -190,5 +217,74 @@ func TestTraeCNEffectiveDeviceIdentityCoversLegacyRows(t *testing.T) {
 	}
 	if TraeCNEffectiveDeviceIdentity(nil) != (TraeCNDeviceIdentity{}) {
 		t.Fatal("nil row must not produce an identity")
+	}
+}
+
+// x-tt-trace-id 是客户端 TTNet 生成的，格式必须与抓包同构：
+// 00-<trace(32hex)>-<span(16hex)>-01，trace 前半等于 span，span 后 8 位是安装级基线，
+// trace 末 4 位固定 ffff。
+func TestTraeCNTTTraceIDMatchesClientShape(t *testing.T) {
+	t.Parallel()
+	first := TraeCNTTTraceID("traecn:family-a")
+	second := TraeCNTTTraceID("traecn:family-a")
+	other := TraeCNTTTraceID("traecn:family-b")
+
+	for _, value := range []string{first, second, other} {
+		parts := strings.Split(value, "-")
+		if len(parts) != 4 || parts[0] != "00" || parts[3] != "01" {
+			t.Fatalf("trace id = %q, want 00-<32hex>-<16hex>-01", value)
+		}
+		if len(parts[1]) != 32 || len(parts[2]) != 16 {
+			t.Fatalf("trace id = %q, want 32/16 hex segments", value)
+		}
+		if parts[1][:16] != parts[2] {
+			t.Fatalf("trace id = %q, want trace[0:16] == span", value)
+		}
+		if parts[1][28:] != "ffff" {
+			t.Fatalf("trace id = %q, want the ffff sampling marker", value)
+		}
+		for _, segment := range parts[1:3] {
+			if _, err := strconv.ParseUint(segment, 16, 64); err != nil {
+				// trace 段是 32 位 hex，超过 uint64 时按 16 位一半分别校验。
+				if _, err := strconv.ParseUint(segment[:16], 16, 64); err != nil {
+					t.Fatalf("trace id %q segment %q is not hex: %v", value, segment, err)
+				}
+				if _, err := strconv.ParseUint(segment[16:], 16, 64); err != nil {
+					t.Fatalf("trace id %q segment %q is not hex: %v", value, segment, err)
+				}
+			}
+		}
+	}
+	// 安装基线（span 后 8 位）同账号恒定、不同账号不同；每请求前半不同。
+	// 字符串布局: "00-" + trace(32) + "-" + span(16) + "-01"，所以 span = [36:52]。
+	spanOf := func(value string) string { return value[36:52] }
+	if spanOf(first)[8:] != spanOf(second)[8:] {
+		t.Fatalf("install base changed between requests: %q vs %q", first, second)
+	}
+	if spanOf(first)[8:] == spanOf(other)[8:] {
+		t.Fatalf("two accounts share the install base: %q vs %q", first, other)
+	}
+	if spanOf(first)[:8] == spanOf(second)[:8] {
+		t.Fatalf("per-request span segment repeated: %q vs %q", first, second)
+	}
+}
+
+func TestTraeCNHeadersCarryClientTraceHeaders(t *testing.T) {
+	t.Parallel()
+	account := &Account{DBID: 7, UpstreamType: UpstreamTraeCN, AccessToken: "AT", RefreshToken: "RT", CredentialFamilyID: "family-trace"}
+	headers := TraeCNRequestHeaders(account, "AT", "req-1")
+	if got := headers.Get("x-tt-trace-id"); !strings.HasPrefix(got, "00-") || !strings.HasSuffix(got, "-01") {
+		t.Fatalf("x-tt-trace-id = %q", got)
+	}
+	if got := headers.Get("x-request-pin"); len(got) != 16 {
+		t.Fatalf("x-request-pin = %q, want 16 hex chars", got)
+	}
+	if got := headers.Get("x-requested-at"); got == "" {
+		t.Fatal("x-requested-at is missing")
+	} else if _, err := strconv.ParseInt(got, 10, 64); err != nil {
+		t.Fatalf("x-requested-at = %q, want unix seconds", got)
+	}
+	if got := TraeCNRequestID(); !strings.HasPrefix(got, "req_") {
+		t.Fatalf("request id = %q, want req_<uuid>", got)
 	}
 }

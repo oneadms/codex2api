@@ -317,8 +317,12 @@ func TestTraeCNRequestHeadersAreStablePerAccount(t *testing.T) {
 	first := TraeCNRequestHeaders(account, "AT", "request-1")
 	account.RefreshToken = "ROTATED"
 	second := TraeCNRequestHeaders(account, "AT", "request-2")
-	if first.Get("Authorization") != "Cloud-IDE-JWT AT" || first.Get("X-Cloudide-Token") != "AT" {
-		t.Fatalf("missing auth headers: %#v", first)
+	// 抓包实测 agent 接口只用 x-ide-token 鉴权，不发 Authorization/x-cloudide-token。
+	if first.Get("x-ide-token") != "AT" {
+		t.Fatalf("missing client auth header x-ide-token: %#v", first)
+	}
+	if first.Get("Authorization") != "" || first.Get("X-Cloudide-Token") != "" {
+		t.Fatalf("legacy auth headers must not be sent by default: %#v", first)
 	}
 	if first.Get("x-device-id") == "" || first.Get("x-device-id") != second.Get("x-device-id") {
 		t.Fatalf("device id is not stable: %q vs %q", first.Get("x-device-id"), second.Get("x-device-id"))
@@ -335,8 +339,8 @@ func TestTraeCNRequestHeadersAreStablePerAccount(t *testing.T) {
 	if first.Get("User-Agent") != TraeCNDefaultUserAgent {
 		t.Fatalf("User-Agent = %q, want Trae-compatible default", first.Get("User-Agent"))
 	}
-	if first.Get("x-uid") != "uid" || first.Get("X-Request-ID") != "request-1" {
-		t.Fatalf("unexpected identity headers: %#v", first)
+	if !strings.HasPrefix(first.Get("X-Request-ID"), "req_") || first.Get("X-Trae-Request-ID") != "request-1" {
+		t.Fatalf("unexpected request id headers: %#v", first)
 	}
 }
 

@@ -295,7 +295,7 @@ func TestExecuteTraeCNRequestAggregatesNonStreamingResponses(t *testing.T) {
 		if r.Method != http.MethodPost || r.URL.Path != auth.TraeCNChatPath {
 			t.Errorf("request = %s %s", r.Method, r.URL.Path)
 		}
-		if r.Header.Get("Authorization") != "Cloud-IDE-JWT AT" || r.Header.Get("X-Cloudide-Token") != "AT" {
+		if r.Header.Get("x-ide-token") != "AT" {
 			t.Errorf("unexpected auth headers: %#v", r.Header)
 		}
 		if got := r.Header.Get("User-Agent"); got != auth.TraeCNDefaultUserAgent {

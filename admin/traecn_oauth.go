@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -249,7 +250,7 @@ func (h *Handler) ClaimTraeCNOAuthAccount(c *gin.Context) {
 	if name == "" {
 		name = "traecn-oauth"
 	}
-	id, inserted, err := h.insertTraeCNAccountFromCredentials(ctx, name, host, proxyURL, account)
+	id, inserted, _, err := h.insertTraeCNAccountFromCredentials(ctx, name, host, proxyURL, account, h.loadTraeCNBindingIndex(ctx))
 	if err != nil {
 		writeInternalError(c, err)
 		return
@@ -270,13 +271,126 @@ func (h *Handler) ClaimTraeCNOAuthAccount(c *gin.Context) {
 	})
 }
 
+// traeCNBindingIndex 记录号池里已占用的设备码与 Trae 账号 ID。导入必须经过它，
+// 否则把别处用着的设备码原样搬进来就会造出"一个设备码挂多个账号"——Trae 的风控
+// 正是按这个判定同机批量登录。
+//
+// 注意判定维度是 **Trae 账号**（user id）而不是"设备码有没有被用过"：同一个账号
+// 在同一个设备码下本来就应该这样（重新导入、迁移都是同一个账号同一台设备）；
+// 只有不同 Trae 账号撞到同一个设备码才是要拆开的。
+type traeCNBindingIndex struct {
+	machine map[string]traeCNBindingHolder
+	device  map[string]traeCNBindingHolder
+	user    map[string]int64
+}
+
+type traeCNBindingHolder struct {
+	AccountID int64
+	UserID    string
+}
+
+func newTraeCNBindingIndex(bindings []database.TraeCNAccountBinding) *traeCNBindingIndex {
+	index := &traeCNBindingIndex{
+		machine: map[string]traeCNBindingHolder{},
+		device:  map[string]traeCNBindingHolder{},
+		user:    map[string]int64{},
+	}
+	for _, binding := range bindings {
+		index.record(binding.AccountID, binding.UserID, auth.TraeCNDeviceIdentity{MachineID: binding.MachineID, DeviceID: binding.DeviceID})
+	}
+	return index
+}
+
+func (idx *traeCNBindingIndex) record(accountID int64, userID string, identity auth.TraeCNDeviceIdentity) {
+	if idx == nil || accountID <= 0 {
+		return
+	}
+	holder := traeCNBindingHolder{AccountID: accountID, UserID: strings.TrimSpace(userID)}
+	if machineID := strings.TrimSpace(identity.MachineID); machineID != "" {
+		if _, taken := idx.machine[machineID]; !taken {
+			idx.machine[machineID] = holder
+		}
+	}
+	if deviceID := strings.TrimSpace(identity.DeviceID); deviceID != "" {
+		if _, taken := idx.device[deviceID]; !taken {
+			idx.device[deviceID] = holder
+		}
+	}
+	if value := strings.TrimSpace(userID); value != "" {
+		if _, taken := idx.user[value]; !taken {
+			idx.user[value] = accountID
+		}
+	}
+}
+
+// holderOf 返回设备码当前的占用者；没有占用返回零值。
+func (idx *traeCNBindingIndex) holderOf(identity auth.TraeCNDeviceIdentity) traeCNBindingHolder {
+	if idx == nil {
+		return traeCNBindingHolder{}
+	}
+	if machineID := strings.TrimSpace(identity.MachineID); machineID != "" {
+		if holder, taken := idx.machine[machineID]; taken {
+			return holder
+		}
+	}
+	if deviceID := strings.TrimSpace(identity.DeviceID); deviceID != "" {
+		return idx.device[deviceID]
+	}
+	return traeCNBindingHolder{}
+}
+
+// reserve 返回可以安全落库的设备码。只有当这份设备码被 **另一个 Trae 账号** 占用时
+// 才重新分配：占用者与来者是同一个 user id 时沿用原码（同一账号同一设备，正常）；
+// 来者没有 user id（无从判断）时按冲突处理，宁可分错也不共用。
+func (idx *traeCNBindingIndex) reserve(identity auth.TraeCNDeviceIdentity, incomingUserID string) (auth.TraeCNDeviceIdentity, int64, bool) {
+	if idx == nil || identity.Empty() {
+		return identity, 0, false
+	}
+	holder := idx.holderOf(identity)
+	if holder.AccountID <= 0 {
+		return identity, 0, false
+	}
+	incoming := strings.TrimSpace(incomingUserID)
+	if incoming != "" && holder.UserID != "" && strings.EqualFold(holder.UserID, incoming) {
+		// 同一个 Trae 账号：沿用同一设备码是正确行为，不做改动。
+		return identity, 0, false
+	}
+	return auth.NewTraeCNDeviceIdentity(), holder.AccountID, true
+}
+
+// userHolder 返回已经存在的同一个 Trae 账号（user id）所属账号 ID；没有则 0。
+func (idx *traeCNBindingIndex) userHolder(userID string) int64 {
+	if idx == nil {
+		return 0
+	}
+	return idx.user[strings.TrimSpace(userID)]
+}
+
+// loadTraeCNBindingIndex 读出当前号池绑定；读取失败时返回空索引（不阻断导入）。
+func (h *Handler) loadTraeCNBindingIndex(ctx context.Context) *traeCNBindingIndex {
+	if h == nil || h.db == nil {
+		return newTraeCNBindingIndex(nil)
+	}
+	bindings, err := h.db.ListTraeCNAccountBindings(ctx)
+	if err != nil {
+		log.Printf("[TRAECN] 读取设备码绑定失败，导入将不做占用检查: %v", err)
+		return newTraeCNBindingIndex(nil)
+	}
+	return newTraeCNBindingIndex(bindings)
+}
+
 // insertTraeCNAccountFromCredentials 落库一个凭据已经齐备的 Trae CN 账号。
-func (h *Handler) insertTraeCNAccountFromCredentials(ctx context.Context, name, host, proxyURL string, account *auth.TraeCNOAuthAccount) (int64, bool, error) {
-	// 一账号一份设备码：Trae 有风控，同设备码下多个账号会被判定为同机批量登录。
-	// 导入时若数据自带设备码就沿用（迁移场景），否则新生成一份。
+// 返回的 reassignedFrom 非 0 表示数据里带的设备码已被该账号占用、本次重新分配了。
+func (h *Handler) insertTraeCNAccountFromCredentials(ctx context.Context, name, host, proxyURL string, account *auth.TraeCNOAuthAccount, codes *traeCNBindingIndex) (id int64, inserted bool, reassignedFrom int64, err error) {
+	// 导入数据里带的设备码先去重：已在号池里的（迁移前那份账号还在用）就重新分配，
+	// 避免出现两个账号共用一个设备码——那正是风控判定"同机批量登录"的依据。
 	device := account.Device
 	if device.Empty() {
 		device = auth.NewTraeCNDeviceIdentity()
+	}
+	device, reassignedFrom, _ = codes.reserve(device, account.UserID)
+	if reassignedFrom > 0 {
+		log.Printf("[TRAECN] 设备码已被账号 #%d（不同 Trae 账号）占用，为 %q 重新分配一份", reassignedFrom, name)
 	}
 	credentials := map[string]interface{}{
 		"upstream_type":                           auth.UpstreamTraeCN,
@@ -311,7 +425,12 @@ func (h *Handler) insertTraeCNAccountFromCredentials(ctx context.Context, name, 
 	if account.LoginRegion != "" {
 		credentials["traecn_login_region"] = account.LoginRegion
 	}
-	return h.db.InsertAccountWithUpstreamIfRefreshTokenAbsent(ctx, name, "trae", auth.UpstreamTraeCN, account.RefreshToken, credentials, proxyURL)
+	id, inserted, err = h.db.InsertAccountWithUpstreamIfRefreshTokenAbsent(ctx, name, "trae", auth.UpstreamTraeCN, account.RefreshToken, credentials, proxyURL)
+	if inserted {
+		// 登记进索引：同一次导入里的后续条目不会再用到这份设备码。
+		codes.record(id, account.UserID, device)
+	}
+	return id, inserted, reassignedFrom, err
 }
 
 // finalizeTraeCNImportedAccounts 统一处理导入后的收尾动作（事件、内存态、分组）。
@@ -546,6 +665,7 @@ func (h *Handler) TraeCNImportJSON(c *gin.Context) {
 		writeInternalError(c, err)
 		return
 	}
+	codes := h.loadTraeCNBindingIndex(ctx)
 
 	results := make([]traeCNImportItem, 0, len(items))
 	createdIDs := make([]int64, 0, len(items))
@@ -606,7 +726,8 @@ func (h *Handler) TraeCNImportJSON(c *gin.Context) {
 		if parsed, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(item.ExpiresAt)); parseErr == nil {
 			account.ExpiresAt = parsed
 		}
-		id, inserted, insertErr := h.insertTraeCNAccountFromCredentials(ctx, name, host, proxyURL, account)
+		holder := codes.userHolder(item.UserID)
+		id, inserted, reassignedFrom, insertErr := h.insertTraeCNAccountFromCredentials(ctx, name, host, proxyURL, account, codes)
 		if insertErr != nil {
 			result.Error = insertErr.Error()
 			results = append(results, result)
@@ -616,6 +737,16 @@ func (h *Handler) TraeCNImportJSON(c *gin.Context) {
 			result.Error = "refresh_token 已存在"
 			results = append(results, result)
 			continue
+		}
+		warnings := make([]string, 0, 2)
+		if reassignedFrom > 0 {
+			warnings = append(warnings, fmt.Sprintf("设备码已被另一个 Trae 账号（账号 #%d）占用，已为该账号重新分配一份", reassignedFrom))
+		}
+		if holder > 0 {
+			warnings = append(warnings, fmt.Sprintf("该 Trae 账号已在号池中（账号 #%d），确认是否重复添加", holder))
+		}
+		if len(warnings) > 0 {
+			result.Warning = strings.Join(warnings, "；")
 		}
 		result.ID, result.Stored, result.OK = id, true, true
 		createdIDs = append(createdIDs, id)

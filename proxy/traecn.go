@@ -555,15 +555,18 @@ func fetchTraeCNModels(ctx context.Context, store *auth.Store, account *auth.Acc
 	doRequest := func(method, path string, body []byte, providerAuth bool) ([]byte, int, error) {
 		requestCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
-		req, requestErr := http.NewRequestWithContext(requestCtx, method, buildEndpoint(path), bytes.NewReader(body))
+		endpoint := buildEndpoint(path)
+		req, requestErr := http.NewRequestWithContext(requestCtx, method, endpoint, bytes.NewReader(body))
 		if requestErr != nil {
 			return nil, 0, requestErr
 		}
 		var headers http.Header
 		if providerAuth {
 			headers = auth.TraeCNRequestHeaders(account, accessToken, uuid.NewString())
+			headers.Set("Referer", endpoint)
 		} else {
 			headers = auth.TraeCNRequestHeaders(account, accessToken, uuid.NewString())
+			headers.Set("Referer", endpoint)
 			apiKey := strings.TrimSpace(accessToken)
 			account.Mu().RLock()
 			if strings.TrimSpace(account.APIKey) != "" {
@@ -1780,6 +1783,8 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 		return nil, ErrInternalError("创建 Trae CN 请求失败", err)
 	}
 	req.Header = auth.TraeCNRequestHeaders(account, accessToken, requestID)
+	// 真实客户端会带上同一条上游 URL 作为 Referer（抓包实测），补上以免少一个客户端特征。
+	req.Header.Set("Referer", endpoint)
 	// Do not forward the downstream client User-Agent. Trae includes it in its
 	// desktop-client fingerprint and returns application code 4011 for generic
 	// Go/Codex user agents even when the token and request body are valid.

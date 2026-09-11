@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -62,10 +63,25 @@ const (
 	// 个。它是客户端的发布标识、必须保持真实且恒定——不能按当天日期伪造，否则
 	// 每天变化的版本码本身就是异常指纹。客户端升级后用 TRAECN_IDE_VERSION_CODE
 	// 覆盖，或更新这里的常量。
-	TraeCNDefaultIDECode   = "20260901"
-	TraeCNDefaultUserAgent = "node-fetch/1.0 (+https://github.com/bitinn/node-fetch)"
-	TraeCNExchangeTimeout  = 30 * time.Second
-	TraeCNAccessTokenGrace = 5 * time.Minute
+	TraeCNDefaultIDECode = "20260901"
+	// TraeCNDefaultUserAgent 是 agent/推理/模型目录接口的真实客户端 UA（抓包实测
+	// api5-normal.mchost.guru、trae-api-cn.mchost.guru 上就是 TraeClient/TTNet）。
+	// 之前用的 node-fetch 是从未被验证过的值，服务端一眼能看出不是客户端。
+	TraeCNDefaultUserAgent = "TraeClient/TTNet"
+	// TraeCNMarketUserAgent 是 api.trae.cn 上 ug/pay（签到、额度）接口的 UA：
+	// 真实客户端在这里走 VS Code 市场客户端身份，不是 TTNet。
+	TraeCNMarketUserAgent = "VSCode 1.107.1 (Trae CN)"
+	// TraeCNPackageType 是真实客户端上报的 package-type（旧代码里的 "1" 是错的）。
+	TraeCNPackageType = "stable_cn"
+	// TraeCNMarketClientID 与真实客户端一致的市场客户端标识。
+	TraeCNMarketClientID = "VSCode 1.107.1"
+	// traeCNDefaultDeviceBrand / OSVersion 取自真实 Trae CN 桌面端抓包
+	// (x-device-brand: MacBookPro18,1、x-os-version: macOS 26.1)，用于服务器上没有
+	// 本机客户端时的兜底画像。
+	traeCNDefaultDeviceBrand = "MacBookPro18,1"
+	traeCNDefaultOSVersion   = "macOS 26.1"
+	TraeCNExchangeTimeout    = 30 * time.Second
+	TraeCNAccessTokenGrace   = 5 * time.Minute
 	// TraeCNRefreshCriticalTimeout bounds the RT-consumption critical section
 	// when the caller does not already hold a distributed OAuth lease.  The
 	// context deliberately outlives a cancelled HTTP request: ExchangeToken may
@@ -987,10 +1003,15 @@ func discoverTraeCNDeviceProfile() traeCNDeviceProfile {
 		profile.DeviceType = "windows"
 		profile.OSVersion = "Windows"
 	default:
-		profile.DeviceBrand = "Linux PC"
-		profile.DeviceCPU = runtime.GOARCH
-		profile.DeviceType = "linux"
-		profile.OSVersion = "Linux"
+		// Trae CN 客户端只有 macOS / Windows 版本，服务器（Docker/Linux）探测出来的
+		// Linux 画像在真实客户端里根本不存在，反而是明显的异常指纹。这里回落到与
+		// 真实抓包同形的 macOS 画像（x-device-brand=MacBookPro18,1、x-device-type=mac、
+		// x-os-version=macOS 26.1），需要别的取值用 TRAECN_DEVICE_BRAND /
+		// TRAECN_OS_NAME / TRAECN_OS_VERSION 覆盖。
+		profile.DeviceBrand = traeCNDefaultDeviceBrand
+		profile.DeviceCPU = "Apple"
+		profile.DeviceType = "mac"
+		profile.OSVersion = traeCNDefaultOSVersion
 	}
 	return profile
 }
@@ -1119,18 +1140,65 @@ func traeCNFinalizeDeviceProfile(profile traeCNDeviceProfile) traeCNDeviceProfil
 	return profile
 }
 
-// TraeCNRequestHeaders builds the provider-specific headers for one request.
-// It prefers the local Trae desktop telemetry profile (or TRAECN_*/TRAE_* env
-// overrides) because synthetic and internally inconsistent IDE/device values
-// are surfaced by Trae as SSE code 4011. If no desktop profile is available,
-// a stable per-credential fallback keeps retries on one coherent fingerprint.
+// traeCNRequestPin 生成客户端的 x-request-pin（抓包里是 16 位 hex）。
+func traeCNRequestPin() string {
+	raw := make([]byte, 8)
+	if _, err := rand.Read(raw); err != nil {
+		sum := sha256.Sum256([]byte(uuid.NewString()))
+		copy(raw, sum[:8])
+	}
+	return hex.EncodeToString(raw)
+}
+
+// TraeCNTTTraceID 生成与 TTNet 同构的 x-tt-trace-id。
+//
+// 结构来自真实抓包（21 个样本全部一致）：
+//
+//	00-<trace(32hex)>-<span(16hex)>-01
+//	trace[0:16] == span
+//	span[8:16]  每次安装固定（样本里是 0de326d1）
+//	span[0:8]   每个请求不同
+//	trace[24:32] 固定 ffff（采样标记），trace[16:24] 随时间递增
+//
+// 这个头由客户端 TTNet 生成、服务端只透传，所以我们自己造一份形状一致的即可；
+// spanBase 用账号的稳定身份派生，保证同一账号的安装基线恒定。
+func TraeCNTTTraceID(spanBase string) string {
+	seed := strings.TrimSpace(spanBase)
+	if seed == "" {
+		seed = "codex2api"
+	}
+	digest := sha256.Sum256([]byte("traecn-ttnet:" + seed))
+	installBase := hex.EncodeToString(digest[:4])
+	requestPart := make([]byte, 4)
+	if _, err := rand.Read(requestPart); err != nil {
+		sum := sha256.Sum256([]byte(uuid.NewString()))
+		copy(requestPart, sum[:4])
+	}
+	span := hex.EncodeToString(requestPart) + installBase
+
+	// 后 16 位：末 4 位固定 ffff，前 12 位随时间递增（抓包里就是随请求变大的）。
+	trailer := fmt.Sprintf("%012x%04x", (uint64(time.Now().UnixNano())>>16)&0xffffffffffff, 0xffff)
+	return "00-" + span + trailer + "-" + span + "-01"
+}
+
+// TraeCNRequestID 生成客户端风格的请求 ID：真实抓包里是 req_<uuid>。
+func TraeCNRequestID() string {
+	return "req_" + uuid.NewString()
+}
+
+// TraeCNRequestHeaders 构造 agent 家族请求（/api/agent/v3/*、/api/ide/v1/*）的请求头。
+// 逐项对齐真实客户端抓包：鉴权走 x-ide-token（客户端不发 Authorization / x-cloudide-token），
+// UA 是 TraeClient/TTNet，另带 ahanet/bridge/ss-dp 等客户端标识与 TTNet 追踪头。
+//
+// 设备字段优先用账号绑定的设备码（见 traecn_device.go），TRAECN_*/TRAE_* 环境变量可覆盖。
+// 显式设 TRAECN_LEGACY_AUTH_HEADERS=1 时额外补回旧的 Authorization / x-cloudide-token /
+// x-custom-trace-id / x-uid，作为上游行为变化时的逃生口。
 func TraeCNRequestHeaders(account *Account, accessToken, requestID string) http.Header {
 	if requestID == "" {
 		requestID = uuid.NewString()
 	}
 	seed, userID := traeCNHeaderIdentity(account, requestID)
 	profile := traeCNDeviceProfileForAccount(account, seed)
-	traceID := strings.ReplaceAll(uuid.NewString(), "-", "")
 	appID := firstTraeCNEnv("TRAECN_APP_ID", "TRAE_APP_ID")
 	if appID == "" {
 		appID = TraeCNAppID
@@ -1141,14 +1209,18 @@ func TraeCNRequestHeaders(account *Account, accessToken, requestID string) http.
 	}
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
-	headers.Set("Accept", "text/event-stream")
-	headers.Set("Authorization", "Cloud-IDE-JWT "+strings.TrimSpace(accessToken))
-	headers.Set("X-Cloudide-Token", strings.TrimSpace(accessToken))
+	// 真实客户端请求头是 */*，SSE 由接口决定，不靠 Accept 协商。
+	headers.Set("Accept", "*/*")
+	headers.Set("User-Agent", userAgent)
+	// 客户端鉴权头：抓包里 agent 接口只有这一个，没有 Authorization。
+	headers.Set("x-ide-token", strings.TrimSpace(accessToken))
 	headers.Set("x-app-id", appID)
 	headers.Set("x-app-version", "default")
+	headers.Set("app-version", profile.IDEVersion)
+	headers.Set("package-type", TraeCNPackageType)
+	headers.Set("x-lgw-req-sdk-type", "3")
 	headers.Set("x-ide-version-code", profile.IDEVersionCode)
 	headers.Set("x-app-version-code", profile.IDEVersionCode)
-	headers.Set("x-custom-trace-id", traceID)
 	headers.Set("x-device-brand", profile.DeviceBrand)
 	headers.Set("x-device-cpu", profile.DeviceCPU)
 	headers.Set("x-device-id", profile.DeviceID)
@@ -1158,11 +1230,40 @@ func TraeCNRequestHeaders(account *Account, accessToken, requestID string) http.
 	headers.Set("x-ide-version", profile.IDEVersion)
 	headers.Set("x-ide-version-type", "stable")
 	headers.Set("request-traffic-type", "prod")
-	headers.Set("User-Agent", userAgent)
-	headers.Set("x-uid", userID)
-	headers.Set("X-Request-ID", requestID)
+	headers.Set("x-ahanet-timeout", "86400")
+	headers.Set("x-bridge-transport", "aha")
+	headers.Set("x-ss-dp", traeCNSSDP)
+	// TTNet 的链路追踪头，真实客户端每个请求都带；服务端只是透传，所以按同构生成。
+	headers.Set("x-tt-trace-id", TraeCNTTTraceID(seed))
+	headers.Set("x-requested-at", strconv.FormatInt(time.Now().Unix(), 10))
+	headers.Set("x-request-pin", traeCNRequestPin())
+	// Electron/Chromium 网络栈会给每个请求带上这组 fetch 元数据，客户端抓包里也在。
+	headers.Set("sec-fetch-dest", "empty")
+	headers.Set("sec-fetch-mode", "no-cors")
+	headers.Set("sec-fetch-site", "none")
+	headers.Set("X-Request-ID", TraeCNRequestID())
 	headers.Set("X-Trae-Request-ID", requestID)
+	if traeCNLegacyAuthHeadersEnabled() {
+		headers.Set("Authorization", "Cloud-IDE-JWT "+strings.TrimSpace(accessToken))
+		headers.Set("X-Cloudide-Token", strings.TrimSpace(accessToken))
+		headers.Set("x-custom-trace-id", strings.ReplaceAll(uuid.NewString(), "-", ""))
+		if userID != "" {
+			headers.Set("x-uid", userID)
+		}
+	}
 	return headers
+}
+
+// traeCNSSDP 是抓包里的客户端标记（x-ss-dp）。
+const traeCNSSDP = "787976"
+
+// traeCNLegacyAuthHeadersEnabled 允许在客户端行为变化时补回旧的鉴权头。
+func traeCNLegacyAuthHeadersEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(firstTraeCNEnv("TRAECN_LEGACY_AUTH_HEADERS", "TRAE_LEGACY_AUTH_HEADERS"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // traeCNHeaderIdentity 派生每个账号稳定的设备种子与 user id。账号无 DB 身份时

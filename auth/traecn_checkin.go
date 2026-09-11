@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/codex2api/database"
 )
 
@@ -112,18 +114,41 @@ func (a *Account) ApplyTraeCNCheckinForTest(snapshot TraeCNCheckinSnapshot) {
 // TraeCNCheckinHeaders 在标准桌面指纹之上补市场客户端标识：积分签到接口
 // (api.trae.cn/trae/api/v2/ug/*) 要求 x-market-* 系列头，缺了就会被判定为非客户端。
 func TraeCNCheckinHeaders(account *Account, accessToken, requestID string) http.Header {
-	headers := TraeCNRequestHeaders(account, accessToken, requestID)
-	seed, _ := traeCNHeaderIdentity(account, requestID)
-	headers.Set("x-market-client-id", "VSCode 1.107.1")
-	headers.Set("package-type", "1")
-	headers.Set("app-version", headers.Get("x-ide-version"))
-	// 桌面端这里是 VS Code machineId（不是账号 uid）。
-	// 签到也要用账号自己绑定的设备码：市场接口按它做风控，多账号共用一个设备码
-	// 会被判定为同机批量登录。
-	if machineID := traeCNDeviceProfileForAccount(account, seed).MachineID; machineID != "" {
-		headers.Set("x-market-user-id", machineID)
+	// 市场接口（api.trae.cn/trae/api/v2/ug/*）是另一套客户端身份，逐项对齐抓包：
+	//   user-agent: VSCode 1.107.1 (Trae CN)、accept-language: zh-CN、
+	//   authorization: Cloud-IDE-JWT、vscode-sessionid=machine id、
+	//   x-market-client-id/x-market-user-id、package-type: stable_cn、x-request-id 为裸 uuid。
+	// 这套头里没有 x-app-id / x-ide-version / x-machine-id，所以不复用 agent 的头集。
+	if requestID == "" {
+		requestID = uuid.NewString()
 	}
-	headers.Set("Accept", "application/json")
+	seed, _ := traeCNHeaderIdentity(account, requestID)
+	profile := traeCNDeviceProfileForAccount(account, seed)
+	marketUserAgent := firstTraeCNEnv("TRAECN_MARKET_USER_AGENT", "TRAE_MARKET_USER_AGENT")
+	if marketUserAgent == "" {
+		marketUserAgent = TraeCNMarketUserAgent
+	}
+	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
+	headers.Set("Accept", "*/*")
+	headers.Set("Accept-Language", "zh-CN")
+	headers.Set("User-Agent", marketUserAgent)
+	headers.Set("Authorization", "Cloud-IDE-JWT "+strings.TrimSpace(accessToken))
+	headers.Set("app-version", profile.IDEVersion)
+	headers.Set("x-app-version", profile.IDEVersion)
+	headers.Set("package-type", TraeCNPackageType)
+	headers.Set("x-lgw-req-sdk-type", "3")
+	headers.Set("vscode-sessionid", profile.MachineID)
+	headers.Set("x-market-client-id", TraeCNMarketClientID)
+	headers.Set("x-market-user-id", account.TraeCNMarketUserID())
+	headers.Set("x-device-brand", profile.DeviceBrand)
+	headers.Set("x-device-id", profile.DeviceID)
+	headers.Set("x-device-type", profile.DeviceType)
+	headers.Set("x-os-version", profile.OSVersion)
+	headers.Set("x-tt-trace-id", TraeCNTTTraceID(seed))
+	headers.Set("sec-fetch-dest", "empty")
+	headers.Set("sec-fetch-mode", "no-cors")
+	headers.Set("sec-fetch-site", "none")
+	headers.Set("x-request-id", requestID)
 	return headers
 }

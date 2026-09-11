@@ -4,13 +4,17 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"github.com/codex2api/database"
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/codex2api/database"
+	"github.com/google/uuid"
 )
 
 // Trae 有风控：一个设备码下出现多个账号会被判定为"同机批量登录"。因此设备码
-// （machine_id + 由它派生的 19 位 device_id）必须与账号一一绑定：
+// （machine_id + 16 位十进制 device_id，形态与真实客户端抓包一致）必须与账号一一绑定：
 //
 //   - 新建账号（RT 导入 / JSON 导入 / OAuth 授权）时生成一份随机设备码并落库；
 //   - 老账号没有绑定时，按账号自身的稳定身份（credential family / DBID / RT 摘要）
@@ -28,6 +32,9 @@ const (
 	TraeCNDeviceIDCredentialKey = "traecn_device_id"
 	// TraeCNDeviceBoundAtCredentialKey 记录设备码的绑定时间。
 	TraeCNDeviceBoundAtCredentialKey = "traecn_device_bound_at"
+	// TraeCNMarketUserIDCredentialKey 是市场接口（x-market-user-id）用的客户端标识。
+	// 抓包实测是一个安装期 UUID（652d2c41-…），与 machine id 无关。
+	TraeCNMarketUserIDCredentialKey = "traecn_market_user_id"
 )
 
 // TraeCNDeviceIdentity 是绑定到某个账号的设备码。
@@ -35,6 +42,8 @@ type TraeCNDeviceIdentity struct {
 	MachineID string    `json:"machine_id"`
 	DeviceID  string    `json:"device_id"`
 	BoundAt   time.Time `json:"bound_at,omitempty"`
+	// MarketUserID 是市场客户端标识（x-market-user-id），真实客户端每次安装一个 UUID。
+	MarketUserID string `json:"market_user_id,omitempty"`
 }
 
 // Empty 表示没有可用的设备码。
@@ -51,6 +60,9 @@ func (id TraeCNDeviceIdentity) CredentialUpdates() map[string]any {
 	if deviceID := strings.TrimSpace(id.DeviceID); deviceID != "" {
 		updates[TraeCNDeviceIDCredentialKey] = deviceID
 	}
+	if value := strings.TrimSpace(id.MarketUserID); value != "" {
+		updates[TraeCNMarketUserIDCredentialKey] = value
+	}
 	if updates[TraeCNMachineIDCredentialKey] != nil {
 		boundAt := id.BoundAt
 		if boundAt.IsZero() {
@@ -61,7 +73,35 @@ func (id TraeCNDeviceIdentity) CredentialUpdates() map[string]any {
 	return updates
 }
 
-// NewTraeCNDeviceIdentity 生成一份全新的设备码（密码学随机，账号之间不会重复）。
+// TraeCNDeviceIDDigits 是真实客户端 x-device-id 的位数：抓包实测 3996093699599548
+// 是 16 位十进制、没有前导零，且与 x-machine-id 没有可推导关系（它是客户端自己
+// 生成的标识）。所以新账号直接生成同样形状的 16 位随机数，而不是拿 machine_id
+// 去"算"一个出来——用哈希派生会得到 0000000000249215914 这种 9 个前导零、19 位的
+// 值，和真实客户端一眼就能区分开。
+const TraeCNDeviceIDDigits = 16
+
+// NewTraeCNDeviceID 生成一个与真实客户端同形的 x-device-id：16 位十进制、首位非 0，
+// 落在 JavaScript 安全整数范围内（< 2^53）。
+func NewTraeCNDeviceID() string {
+	// 16 位十进制，且上界不超过 2^53（JavaScript 安全整数）：真实抓包值
+	// 3996093699599548 就在这个区间里。
+	const (
+		low  = 1_000_000_000_000_000       // 16 位下界
+		span = 9_007_199_254_740_992 - low // 到 2^53 为止
+	)
+	random := make([]byte, 8)
+	if _, err := rand.Read(random); err != nil {
+		digest := sha256.Sum256([]byte(time.Now().UTC().Format(time.RFC3339Nano)))
+		copy(random, digest[:8])
+	}
+	value := uint64(0)
+	for _, b := range random {
+		value = value<<8 | uint64(b)
+	}
+	return strconv.FormatUint(low+value%span, 10)
+}
+
+// NewTraeCNDeviceIdentity 生成一份全新的设备码（随机，账号之间不会重复）。
 func NewTraeCNDeviceIdentity() TraeCNDeviceIdentity {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -71,9 +111,10 @@ func NewTraeCNDeviceIdentity() TraeCNDeviceIdentity {
 	}
 	machineID := hex.EncodeToString(raw)
 	return TraeCNDeviceIdentity{
-		MachineID: machineID,
-		DeviceID:  traeCNDeviceIDForMachineID(machineID),
-		BoundAt:   time.Now().UTC(),
+		MachineID:    machineID,
+		DeviceID:     NewTraeCNDeviceID(),
+		MarketUserID: uuid.NewString(),
+		BoundAt:      time.Now().UTC(),
 	}
 }
 
@@ -89,6 +130,29 @@ func DeriveTraeCNDeviceIdentity(seed string) TraeCNDeviceIdentity {
 	return TraeCNDeviceIdentity{MachineID: machineID, DeviceID: traeCNDeviceIDForMachineID(machineID)}
 }
 
+// TraeCNMarketUserID 返回市场接口用的客户端标识（x-market-user-id）。账号没绑定过
+// 时按稳定身份确定性生成——同一账号每次请求必须是同一个值，否则市场接口会当成新客户端。
+func (a *Account) TraeCNMarketUserID() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.RLock()
+	bound := strings.TrimSpace(a.TraeCNDeviceMarketUserID)
+	seed := TraeCNStableDeviceSeed(a.CredentialFamilyID, a.AccountID, a.DBID, a.RefreshToken)
+	a.mu.RUnlock()
+	if bound != "" {
+		return bound
+	}
+	if seed == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte("traecn-market:" + seed))
+	// UUID v4 形状（版本位与变体位按规范置位），与真实客户端一致。
+	digest[6] = (digest[6] & 0x0f) | 0x40
+	digest[8] = (digest[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", digest[0:4], digest[4:6], digest[6:8], digest[8:10], digest[10:16])
+}
+
 // TraeCNDeviceIdentity 返回账号绑定的设备码；未绑定时返回零值。
 func (a *Account) TraeCNDeviceIdentity() TraeCNDeviceIdentity {
 	if a == nil {
@@ -101,9 +165,10 @@ func (a *Account) TraeCNDeviceIdentity() TraeCNDeviceIdentity {
 
 func (a *Account) traeCNDeviceIdentityLocked() TraeCNDeviceIdentity {
 	identity := TraeCNDeviceIdentity{
-		MachineID: strings.TrimSpace(a.TraeCNDeviceMachineID),
-		DeviceID:  strings.TrimSpace(a.TraeCNDeviceID),
-		BoundAt:   a.TraeCNDeviceBoundAt,
+		MachineID:    strings.TrimSpace(a.TraeCNDeviceMachineID),
+		DeviceID:     strings.TrimSpace(a.TraeCNDeviceID),
+		MarketUserID: strings.TrimSpace(a.TraeCNDeviceMarketUserID),
+		BoundAt:      a.TraeCNDeviceBoundAt,
 	}
 	if identity.MachineID == "" && identity.DeviceID == "" {
 		return TraeCNDeviceIdentity{}
@@ -123,6 +188,7 @@ func (a *Account) ApplyTraeCNDeviceIdentity(identity TraeCNDeviceIdentity) {
 	defer a.mu.Unlock()
 	a.TraeCNDeviceMachineID = strings.TrimSpace(identity.MachineID)
 	a.TraeCNDeviceID = strings.TrimSpace(identity.DeviceID)
+	a.TraeCNDeviceMarketUserID = strings.TrimSpace(identity.MarketUserID)
 	a.TraeCNDeviceBoundAt = identity.BoundAt
 	if a.TraeCNDeviceID == "" {
 		a.TraeCNDeviceID = traeCNDeviceIDForMachineID(a.TraeCNDeviceMachineID)

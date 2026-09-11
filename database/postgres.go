@@ -8077,6 +8077,43 @@ func (db *DB) GetAllRefreshTokens(ctx context.Context) (map[string]bool, error) 
 	return result, rows.Err()
 }
 
+// TraeCNAccountBinding 是号池里一个 Trae CN 账号已占用的设备码与 Trae 账号 ID。
+type TraeCNAccountBinding struct {
+	AccountID int64
+	UserID    string
+	MachineID string
+	DeviceID  string
+}
+
+// ListTraeCNAccountBindings 列出未删除 Trae CN 账号的设备码绑定。导入时用它保证
+// 一个设备码只属于一个账号：Trae 有风控，同设备码下的多个账号会被判定为同机批量登录。
+func (db *DB) ListTraeCNAccountBindings(ctx context.Context) ([]TraeCNAccountBinding, error) {
+	rows, err := db.conn.QueryContext(ctx, `SELECT id, credentials FROM accounts WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	bindings := make([]TraeCNAccountBinding, 0)
+	for rows.Next() {
+		var id int64
+		var raw interface{}
+		if err := rows.Scan(&id, &raw); err != nil {
+			return nil, err
+		}
+		if !strings.EqualFold(credentialString(raw, "upstream_type"), "traecn") {
+			continue
+		}
+		bindings = append(bindings, TraeCNAccountBinding{
+			AccountID: id,
+			UserID:    credentialString(raw, "traecn_user_id"),
+			MachineID: credentialString(raw, "traecn_machine_id"),
+			DeviceID:  credentialString(raw, "traecn_device_id"),
+		})
+	}
+	return bindings, rows.Err()
+}
+
 // InsertATAccount 插入 AT-only 账号（无 refresh_token）
 func (db *DB) InsertATAccount(ctx context.Context, name string, accessToken string, proxyURL string) (int64, error) {
 	credentials := map[string]interface{}{

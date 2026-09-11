@@ -169,6 +169,8 @@ type Account struct {
 	TraeCNDeviceMachineID string
 	TraeCNDeviceID        string
 	TraeCNDeviceBoundAt   time.Time
+	// TraeCNDeviceMarketUserID 是市场接口的客户端标识（x-market-user-id）。
+	TraeCNDeviceMarketUserID string
 	// TraeCNUpstreamModels is the last model catalog fetched from the Trae
 	// upstream. TraeCNModelAllowlist is an optional per-account narrowing list;
 	// Models is kept as the effective (routable) projection for legacy callers.
@@ -5224,6 +5226,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		TraeCNUserID:                 strings.TrimSpace(row.GetCredential("traecn_user_id")),
 		TraeCNDeviceMachineID:        strings.TrimSpace(row.GetCredential(TraeCNMachineIDCredentialKey)),
 		TraeCNDeviceID:               strings.TrimSpace(row.GetCredential(TraeCNDeviceIDCredentialKey)),
+		TraeCNDeviceMarketUserID:     strings.TrimSpace(row.GetCredential(TraeCNMarketUserIDCredentialKey)),
 		BaseURL:                      strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		APIKey:                       strings.TrimSpace(apiKey),
 		Models:                       models,
