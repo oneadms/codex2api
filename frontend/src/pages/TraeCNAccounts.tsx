@@ -5,7 +5,11 @@ import {
   ChevronDown,
   CircleAlert,
   Copy,
+  Download,
   Edit3,
+  ExternalLink,
+  FileJson,
+  KeyRound,
   Layers,
   CalendarCheck,
   ListRestart,
@@ -14,6 +18,7 @@ import {
   RefreshCw,
   Search,
   Trash2,
+  Upload,
   Power,
   PowerOff,
   Zap,
@@ -25,6 +30,7 @@ import type {
   AccountRow,
   AddTraeCNAccountsResponse,
   TraeCNImportItem,
+  TraeCNOAuthStatusResponse,
 } from "../types";
 import PageHeader from "../components/PageHeader";
 import StateShell from "../components/StateShell";
@@ -80,6 +86,24 @@ const DEFAULT_TRAE_MODELS = [
   "qwen-3.5",
   "qwen3-coder",
 ];
+
+// copyText 复制文本到剪贴板；失败抛错由调用方提示。
+async function copyText(value: string): Promise<void> {
+  if (!value) return;
+  await navigator.clipboard.writeText(value);
+}
+
+// downloadBlob 触发浏览器下载（与 Codex/Grok 账号页同款实现）。
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 type StatusFilter = "all" | "active" | "disabled" | "error";
 
@@ -649,9 +673,23 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null);
   const [modelsAccount, setModelsAccount] = useState<AccountRow | null>(null);
   const [showAdd, setShowAdd] = useState(false);
+  const [addMethod, setAddMethod] = useState<"oauth" | "rt" | "json">("oauth");
   const [addForm, setAddForm] = useState({ name: "", refreshTokens: "", host: DEFAULT_HOST, proxyURL: "", groupIDs: [] as number[], enabled: true });
   const [addResult, setAddResult] = useState<AddTraeCNAccountsResponse | null>(null);
   const [adding, setAdding] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  // OAuth 授权会话：从 start 拿到授权链接，轮询到 ready 后自动建号。
+  const [oauthSession, setOauthSession] = useState<TraeCNOAuthStatusResponse | null>(null);
+  const [oauthBusy, setOauthBusy] = useState(false);
+  const [oauthClaiming, setOauthClaiming] = useState(false);
+  const [oauthCallbackInput, setOauthCallbackInput] = useState("");
+  const oauthPollRef = useRef<AbortController | null>(null);
+  const oauthClaimingRef = useRef(false);
+  // 轮询回调里读到的必须是最新的表单值（名称/代理/分组）。
+  const addFormRef = useRef(addForm);
+  addFormRef.current = addForm;
+  const [jsonText, setJsonText] = useState("");
+  const jsonFileRef = useRef<HTMLInputElement | null>(null);
   const [editing, setEditing] = useState<AccountRow | null>(null);
   const [editForm, setEditForm] = useState({ name: "", host: DEFAULT_HOST, proxyURL: "", groupIDs: [] as number[] });
   const [saving, setSaving] = useState(false);
@@ -703,6 +741,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
   useEffect(() => { void reloadGroups(); }, [reloadGroups]);
   useEffect(() => { void reload(); }, [reload]);
   useEffect(() => () => requestAbortRef.current?.abort(), []);
+  useEffect(() => () => oauthPollRef.current?.abort(), []);
   useEffect(() => {
     const timer = window.setTimeout(() => { setDebouncedSearch(search.trim()); setPage(1); }, 250);
     return () => window.clearTimeout(timer);
@@ -723,7 +762,18 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const openAdd = () => {
     setAddResult(null);
     setAddForm({ name: "", refreshTokens: "", host: DEFAULT_HOST, proxyURL: "", groupIDs: [], enabled: true });
+    setJsonText("");
+    resetOAuthSession();
+    setAddMethod("oauth");
     setShowAdd(true);
+  };
+
+  const resetOAuthSession = () => {
+    oauthPollRef.current?.abort();
+    oauthPollRef.current = null;
+    setOauthSession(null);
+    setOauthCallbackInput("");
+    setOauthClaiming(false);
   };
 
   const submitAdd = async () => {
@@ -745,6 +795,147 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
     } catch (submitError) {
       showToast(getErrorMessage(submitError), "error");
     } finally { setAdding(false); }
+  };
+
+  /** 用已就绪的授权会话建号（OAuth 面板唯一会落库的动作）。 */
+  const claimOAuthSession = useCallback(async (status: TraeCNOAuthStatusResponse) => {
+    if (oauthClaimingRef.current) return;
+    oauthClaimingRef.current = true;
+    setOauthClaiming(true);
+    try {
+      const result = await api.claimTraeCNOAuthAccount({
+        login_id: status.login_id,
+        name: addFormRef.current.name.trim() || undefined,
+        host: addFormRef.current.host.trim() || DEFAULT_HOST,
+        proxy_url: addFormRef.current.proxyURL.trim(),
+        group_ids: addFormRef.current.groupIDs,
+        enabled: addFormRef.current.enabled,
+      });
+      showToast(t("traecn.oauthClaimed", { id: result.id }), "success");
+      resetOAuthSession();
+      setShowAdd(false);
+      await reload(true);
+    } catch (claimError) {
+      showToast(getErrorMessage(claimError), "error");
+    } finally {
+      oauthClaimingRef.current = false;
+      setOauthClaiming(false);
+    }
+  }, [addFormRef, reload, showToast, t]);
+
+  /** 轮询授权状态：ready 自动建号，error/expired 停在面板上显示原因。 */
+  const pollOAuthStatus = useCallback(async (loginId: string) => {
+    const controller = new AbortController();
+    oauthPollRef.current?.abort();
+    oauthPollRef.current = controller;
+    for (;;) {
+      if (controller.signal.aborted) return;
+      let status: TraeCNOAuthStatusResponse;
+      try {
+        status = await api.getTraeCNOAuthStatus(loginId);
+      } catch (pollError) {
+        if (!controller.signal.aborted) showToast(getErrorMessage(pollError), "error");
+        return;
+      }
+      if (controller.signal.aborted) return;
+      setOauthSession((current) => (current ? { ...current, ...status } : current));
+      if (status.state === "ready") {
+        if (status.account?.warning) showToast(status.account.warning, "warning");
+        await claimOAuthSession(status);
+        return;
+      }
+      if (status.state === "error" || status.state === "expired") return;
+      const wait = Math.max(1, status.interval_seconds || 2) * 1000;
+      await new Promise((resolve) => window.setTimeout(resolve, wait));
+    }
+  }, [claimOAuthSession, showToast]);
+
+  const startOAuth = async () => {
+    setOauthBusy(true);
+    setAddResult(null);
+    try {
+      const session = await api.startTraeCNOAuth({
+        name: addForm.name.trim() || undefined,
+        host: addForm.host.trim() || DEFAULT_HOST,
+        proxy_url: addForm.proxyURL.trim(),
+        callback_base: typeof window !== "undefined" ? window.location.origin : undefined,
+      });
+      setOauthSession({
+        login_id: session.login_id,
+        state: "pending",
+        verification_uri: session.verification_uri,
+        callback_url: session.callback_url,
+        expires_in: session.expires_in,
+        interval_seconds: session.interval_seconds,
+      });
+      window.open(session.verification_uri, "_blank", "noopener,noreferrer");
+      void pollOAuthStatus(session.login_id);
+    } catch (startError) {
+      showToast(getErrorMessage(startError), "error");
+    } finally { setOauthBusy(false); }
+  };
+
+  const completeOAuthManually = async () => {
+    if (!oauthSession || !oauthCallbackInput.trim()) return;
+    setOauthBusy(true);
+    try {
+      await api.completeTraeCNOAuth({ login_id: oauthSession.login_id, callback: oauthCallbackInput.trim() });
+      setOauthCallbackInput("");
+      void pollOAuthStatus(oauthSession.login_id);
+    } catch (completeError) {
+      showToast(getErrorMessage(completeError), "error");
+    } finally { setOauthBusy(false); }
+  };
+
+  const submitJSONImport = async () => {
+    if (!jsonText.trim()) { showToast(t("traecn.jsonRequired"), "error"); return; }
+    setAdding(true);
+    try {
+      const result = await api.importTraeCNJSON({
+        json: jsonText.trim(),
+        name: addForm.name.trim() || undefined,
+        host: addForm.host.trim() || DEFAULT_HOST,
+        proxy_url: addForm.proxyURL.trim(),
+        group_ids: addForm.groupIDs,
+        enabled: addForm.enabled,
+      });
+      setAddResult(result);
+      showToast(t("traecn.importFinished", { success: result.success, failed: result.failed }), result.failed ? "warning" : "success");
+      await reload(true);
+    } catch (importError) {
+      showToast(getErrorMessage(importError), "error");
+    } finally { setAdding(false); }
+  };
+
+
+  const exportAccounts = async () => {
+    setExporting(true);
+    try {
+      const { blob, filename } = await api.exportTraeCNAccounts();
+      downloadBlob(blob, filename || `traecn-accounts-${Date.now()}.json`);
+      showToast(t("traecn.exported"));
+    } catch (exportError) {
+      showToast(getErrorMessage(exportError), "error");
+    } finally { setExporting(false); }
+  };
+
+  const handleCopy = async (value: string) => {
+    try {
+      await copyText(value);
+      showToast(t("common.copied"), "success");
+    } catch {
+      showToast(t("common.copyFailed"), "error");
+    }
+  };
+
+  const readJSONFile = async (file: File) => {
+    try {
+      const text = await file.text();
+      setJsonText(text);
+      showToast(t("traecn.jsonFileLoaded", { name: file.name }));
+    } catch (readError) {
+      showToast(getErrorMessage(readError), "error");
+    }
   };
 
   const openEdit = (account: AccountRow) => {
@@ -809,7 +1000,15 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
         description={t("traecn.pageDescription")}
         titleAdornment={headerSlot}
         onRefresh={() => void reload()}
-        actions={<Button onClick={openAdd}><Plus className="size-4" />{t("traecn.addAccount")}</Button>}
+        actions={
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={() => void exportAccounts()} disabled={exporting}>
+              {exporting ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />}
+              {t("traecn.exportAccounts")}
+            </Button>
+            <Button onClick={openAdd}><Plus className="size-4" />{t("traecn.addAccount")}</Button>
+          </div>
+        }
       />
 
       <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
@@ -900,11 +1099,169 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
         </div>
       </StateShell>
 
-      <Modal show={showAdd} title={t("traecn.addTitle")} onClose={() => { if (!adding) setShowAdd(false); }} contentClassName="sm:max-w-[640px]" footer={<><Button variant="outline" onClick={() => setShowAdd(false)} disabled={adding}>{t("common.cancel")}</Button><Button onClick={() => void submitAdd()} disabled={adding}>{adding ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}{adding ? t("traecn.adding") : t("traecn.submit")}</Button></>}>
+      <Modal
+        show={showAdd}
+        title={t("traecn.addTitle")}
+        onClose={() => { if (!adding && !oauthBusy) setShowAdd(false); }}
+        contentClassName="sm:max-w-[680px]"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => { resetOAuthSession(); setShowAdd(false); }} disabled={adding}>{t("common.cancel")}</Button>
+            {addMethod === "rt" ? (
+              <Button onClick={() => void submitAdd()} disabled={adding}>
+                {adding ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                {adding ? t("traecn.adding") : t("traecn.submit")}
+              </Button>
+            ) : addMethod === "json" ? (
+              <Button onClick={() => void submitJSONImport()} disabled={adding || !jsonText.trim()}>
+                {adding ? <Loader2 className="size-4 animate-spin" /> : <Upload className="size-4" />}
+                {adding ? t("traecn.adding") : t("traecn.jsonImportBtn")}
+              </Button>
+            ) : oauthSession ? (
+              <Button onClick={() => { resetOAuthSession(); setShowAdd(false); }} disabled={oauthClaiming}>
+                {oauthClaiming ? <Loader2 className="size-4 animate-spin" /> : null}
+                {oauthClaiming ? t("traecn.oauthClaiming") : t("common.close")}
+              </Button>
+            ) : (
+              <Button onClick={() => void startOAuth()} disabled={oauthBusy}>
+                {oauthBusy ? <Loader2 className="size-4 animate-spin" /> : <KeyRound className="size-4" />}
+                {oauthBusy ? t("traecn.oauthStarting") : t("traecn.oauthStartBtn")}
+              </Button>
+            )}
+          </>
+        }
+      >
         <div className="space-y-4">
-          <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs leading-relaxed text-muted-foreground">{t("traecn.refreshTokenHint")}</div>
-          <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("traecn.refreshTokensLabel")} *</span><textarea value={addForm.refreshTokens} onChange={(event) => setAddForm((form) => ({ ...form, refreshTokens: event.target.value }))} placeholder={t("traecn.refreshTokensPlaceholder")} className="min-h-36 w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50" /></label>
-          <div className="grid gap-3 sm:grid-cols-2">
+          {/* 添加方式切换：OAuth 授权 / RT 导入 / JSON 导入 */}
+          <div className="grid grid-cols-3 gap-1 rounded-xl border border-border bg-muted/50 p-1">
+            <button
+              onClick={() => { setAddMethod("oauth"); setAddResult(null); }}
+              className={`min-w-0 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-sm font-semibold whitespace-nowrap transition-all ${
+                addMethod === "oauth" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <KeyRound className="size-3.5" />
+              {t("traecn.addMethodOAuth")}
+            </button>
+            <button
+              onClick={() => { setAddMethod("rt"); setAddResult(null); }}
+              className={`min-w-0 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-sm font-semibold whitespace-nowrap transition-all ${
+                addMethod === "rt" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <RefreshCw className="size-3.5" />
+              {t("traecn.addMethodRT")}
+            </button>
+            <button
+              onClick={() => { setAddMethod("json"); setAddResult(null); }}
+              className={`min-w-0 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-sm font-semibold whitespace-nowrap transition-all ${
+                addMethod === "json" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <FileJson className="size-3.5" />
+              {t("traecn.addMethodJSON")}
+            </button>
+          </div>
+
+          {addMethod === "oauth" ? (
+            <div className="space-y-3">
+              <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs leading-relaxed text-muted-foreground">{t("traecn.oauthHint")}</div>
+              {oauthSession ? (
+                <div className="space-y-3">
+                  <div className="space-y-1.5">
+                    <span className="text-xs font-semibold text-muted-foreground">{t("traecn.oauthLinkLabel")}</span>
+                    <div className="flex items-center gap-2">
+                      <input
+                        readOnly
+                        value={oauthSession.verification_uri ?? ""}
+                        className="min-w-0 flex-1 truncate rounded-md border border-input bg-muted/40 px-3 py-2 font-mono text-xs"
+                      />
+                      <Button variant="outline" size="sm" onClick={() => void handleCopy(oauthSession.verification_uri ?? "")}>
+                        <Copy className="size-3.5" />
+                      </Button>
+                      <Button variant="outline" size="sm" onClick={() => window.open(oauthSession.verification_uri ?? "", "_blank", "noopener,noreferrer")}>
+                        <ExternalLink className="size-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <Badge variant={oauthSession.state === "ready" ? "default" : oauthSession.state === "error" || oauthSession.state === "expired" ? "destructive" : "secondary"}>
+                      {t(`traecn.oauthState_${oauthSession.state}`)}
+                    </Badge>
+                    {oauthSession.state === "pending" && oauthSession.expires_in > 0 ? (
+                      <span className="text-muted-foreground">{t("traecn.oauthExpiresIn", { seconds: oauthSession.expires_in })}</span>
+                    ) : null}
+                    {oauthSession.state === "pending" ? <Loader2 className="size-3.5 animate-spin text-muted-foreground" /> : null}
+                    {oauthSession.message ? <span className="text-muted-foreground">{oauthSession.message}</span> : null}
+                  </div>
+                  <div className="space-y-1.5 rounded-lg border border-border bg-muted/25 px-3 py-2">
+                    <span className="text-xs font-semibold text-muted-foreground">{t("traecn.oauthCallbackLabel")}</span>
+                    <p className="break-all font-mono text-[11px] text-muted-foreground">{oauthSession.callback_url}</p>
+                    <p className="text-[11px] leading-relaxed text-muted-foreground">{t("traecn.oauthCallbackHint")}</p>
+                    <div className="flex items-center gap-2 pt-1">
+                      <Input
+                        value={oauthCallbackInput}
+                        onChange={(event) => setOauthCallbackInput(event.target.value)}
+                        placeholder={t("traecn.oauthCallbackPlaceholder")}
+                        className="font-mono text-xs"
+                      />
+                      <Button variant="outline" size="sm" onClick={() => void completeOAuthManually()} disabled={oauthBusy || !oauthCallbackInput.trim()}>
+                        {oauthBusy ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                        {t("traecn.oauthSubmitCallback")}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-border bg-muted/25 px-3 py-6 text-center text-xs text-muted-foreground">
+                  {t("traecn.oauthIdleHint")}
+                </div>
+              )}
+            </div>
+          ) : null}
+
+          {addMethod === "rt" ? (
+            <div className="space-y-4">
+              <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs leading-relaxed text-muted-foreground">{t("traecn.refreshTokenHint")}</div>
+              <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("traecn.refreshTokensLabel")} *</span><textarea value={addForm.refreshTokens} onChange={(event) => setAddForm((form) => ({ ...form, refreshTokens: event.target.value }))} placeholder={t("traecn.refreshTokensPlaceholder")} className="min-h-36 w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50" /></label>
+            </div>
+          ) : null}
+
+          {addMethod === "json" ? (
+            <div className="space-y-3">
+              <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs leading-relaxed text-muted-foreground">{t("traecn.jsonHint")}</div>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={() => jsonFileRef.current?.click()}>
+                  <Upload className="size-3.5" />
+                  {t("traecn.jsonChooseFile")}
+                </Button>
+                <Button variant="ghost" size="sm" onClick={() => setJsonText("")} disabled={!jsonText}>
+                  <X className="size-3.5" />
+                  {t("traecn.jsonClear")}
+                </Button>
+                <input
+                  ref={jsonFileRef}
+                  type="file"
+                  accept="application/json,.json"
+                  className="hidden"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    event.target.value = "";
+                    if (file) void readJSONFile(file);
+                  }}
+                />
+              </div>
+              <textarea
+                value={jsonText}
+                onChange={(event) => setJsonText(event.target.value)}
+                placeholder={t("traecn.jsonPlaceholder")}
+                className="min-h-44 w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              />
+            </div>
+          ) : null}
+
+          {/* 三种方式共用的账号元数据 */}
+          <div className="grid gap-3 border-t border-border pt-4 sm:grid-cols-2">
             <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("traecn.nameLabel")}</span><Input value={addForm.name} onChange={(event) => setAddForm((form) => ({ ...form, name: event.target.value }))} placeholder={t("traecn.namePlaceholder")} /></label>
             <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("traecn.hostLabel")}</span><Input value={addForm.host} onChange={(event) => setAddForm((form) => ({ ...form, host: event.target.value }))} placeholder={DEFAULT_HOST} /></label>
           </div>

@@ -1056,6 +1056,10 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	r.GET("/api/admin/bootstrap-status", h.GetBootstrapStatus)
 	r.POST("/api/admin/bootstrap", h.PostBootstrap)
 
+	// Trae CN OAuth 回调：浏览器跳转回来时没有管理密钥，必须放在 admin 鉴权之外。
+	// 会话凭 login_trace_id 匹配，结果只交给持有 login_id 的管理台轮询。
+	r.GET("/api/traecn/oauth/callback", h.TraeCNOAuthCallback)
+
 	api := r.Group("/api/admin")
 	api.Use(h.adminAuthMiddleware())
 	api.Use(func(c *gin.Context) {
@@ -1115,6 +1119,13 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/:id/antigravity/sync", h.SyncAntigravityAccountState)
 	api.POST("/accounts/:id/antigravity/capabilities/probe", h.ProbeAntigravityAccountCapabilities)
 	api.POST("/accounts/traecn", h.AddTraeCNAccounts)
+	// Trae CN 三种添加方式：OAuth 授权、RT 导入、JSON 导入/导出。
+	api.POST("/accounts/traecn/oauth/start", h.StartTraeCNOAuth)
+	api.GET("/accounts/traecn/oauth/status", h.GetTraeCNOAuthStatus)
+	api.POST("/accounts/traecn/oauth/complete", h.CompleteTraeCNOAuth)
+	api.POST("/accounts/traecn/oauth/claim", h.ClaimTraeCNOAuthAccount)
+	api.POST("/accounts/traecn/import-json", h.TraeCNImportJSON)
+	api.GET("/accounts/traecn/export", h.ExportTraeCNAccounts)
 	api.POST("/accounts/:id/traecn/refresh", h.RefreshTraeCNAccount)
 	api.POST("/accounts/:id/traecn/checkin", h.TriggerTraeCNCheckin)
 	api.PATCH("/accounts/:id/traecn", h.UpdateTraeCNAccount)

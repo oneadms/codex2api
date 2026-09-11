@@ -984,6 +984,98 @@ export interface TraeCNModelSyncResponse {
   synced_at?: string
 }
 
+/** Trae CN OAuth（PKCE 授权码）会话启动响应。 */
+export interface TraeCNOAuthStartResponse {
+  login_id: string
+  login_trace_id: string
+  /** 用户在浏览器打开的授权链接。 */
+  verification_uri: string
+  /** 网关回调地址，Trae 授权完成后会跳到这里。 */
+  callback_url: string
+  login_host: string
+  expires_in: number
+  interval_seconds: number
+}
+
+/**
+ * 授权完成后的账号信息。凭据明文只留在服务端会话里，claim 建号时由后端读取，
+ * 状态接口不返回 refresh_token/access_token。
+ */
+export interface TraeCNOAuthAccountPayload {
+  refresh_token?: string
+  access_token?: string
+  expires_at?: string
+  refresh_expires_at?: string
+  user_id?: string
+  email?: string
+  plan_type?: string
+  login_host?: string
+  login_region?: string
+  user_tag?: string
+  login_trace_id?: string
+  warning?: string
+}
+
+export type TraeCNOAuthState = 'pending' | 'processing' | 'ready' | 'error' | 'expired'
+
+export interface TraeCNOAuthStatusResponse {
+  login_id: string
+  state: TraeCNOAuthState
+  verification_uri?: string
+  callback_url?: string
+  expires_in: number
+  interval_seconds: number
+  message?: string
+  account?: TraeCNOAuthAccountPayload
+}
+
+export interface TraeCNOAuthCompleteResponse extends MessageResponse {
+  account?: TraeCNOAuthAccountPayload
+}
+
+export interface TraeCNOAuthClaimResponse extends MessageResponse {
+  id: number
+  email?: string
+  user_id?: string
+}
+
+export interface TraeCNJSONImportRequest {
+  json?: string
+  accounts?: unknown
+  name?: string
+  host?: string
+  proxy_url?: string
+  group_ids?: number[]
+  enabled?: boolean
+  allow_duplicate?: boolean
+}
+
+/** 导出的单个 Trae CN 账号（含明文 refresh_token）。 */
+export interface TraeCNExportAccount {
+  name?: string
+  email?: string
+  user_id?: string
+  host?: string
+  proxy_url?: string
+  access_token?: string
+  refresh_token?: string
+  expires_at?: string
+  plan_type?: string
+  user_tag?: string
+  login_region?: string
+  models?: string[]
+  group_ids?: number[]
+  enabled: boolean
+  status?: string
+}
+
+export interface TraeCNExportPayload {
+  version: number
+  exported_at: string
+  channel: string
+  accounts: TraeCNExportAccount[]
+}
+
 export interface AntigravityModelQuota {
   model?: string
   model_id?: string

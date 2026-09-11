@@ -33,3 +33,33 @@ test("Trae CN model modal offers search and copy affordances", () => {
   assert.match(source, /modelsInherited/);
   assert.match(source, /modelsOwn/);
 });
+
+test("Trae CN add dialog offers OAuth, RT and JSON import paths", () => {
+  // 三种添加方式必须同屏可切换（与 Codex 账号页一致的 Tab 结构）。
+  assert.match(source, /addMethod === "oauth"/);
+  assert.match(source, /addMethod === "rt"/);
+  assert.match(source, /addMethod === "json"/);
+  assert.match(source, /traecn\.addMethodOAuth/);
+  assert.match(source, /traecn\.addMethodRT/);
+  assert.match(source, /traecn\.addMethodJSON/);
+});
+
+test("Trae CN OAuth panel drives start -> poll -> claim", () => {
+  assert.match(source, /api\.startTraeCNOAuth/);
+  assert.match(source, /api\.getTraeCNOAuthStatus/);
+  assert.match(source, /api\.claimTraeCNOAuthAccount/);
+  // 自动回调不通时的兜底：粘贴回调链接。
+  assert.match(source, /api\.completeTraeCNOAuth/);
+  assert.match(source, /traecn\.oauthSubmitCallback/);
+  // 授权链接要可复制、可重新打开。
+  assert.match(source, /traecn\.oauthLinkLabel/);
+  assert.match(source, /window\.open\(session\.verification_uri/);
+});
+
+test("Trae CN page can export and import credentials as JSON", () => {
+  assert.match(source, /api\.exportTraeCNAccounts/);
+  assert.match(source, /api\.importTraeCNJSON/);
+  assert.match(source, /downloadBlob\(blob/);
+  assert.match(source, /traecn\.exportAccounts/);
+  assert.match(source, /traecn\.jsonChooseFile/);
+});

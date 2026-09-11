@@ -18,6 +18,11 @@ import type {
   AddTraeCNAccountsResponse,
   UpdateTraeCNAccountRequest,
   TraeCNModelSyncResponse,
+  TraeCNOAuthStartResponse,
+  TraeCNOAuthStatusResponse,
+  TraeCNOAuthCompleteResponse,
+  TraeCNOAuthClaimResponse,
+  TraeCNJSONImportRequest,
   AddAntigravityAccountRequest,
   AntigravityCreateResponse,
   UpdateAntigravityAccountRequest,
@@ -682,6 +687,46 @@ export const api = {
       body: JSON.stringify(data),
       timeoutMs: 180_000,
     }),
+  /** Trae CN OAuth：发起一次授权会话，返回给用户打开的授权链接。 */
+  startTraeCNOAuth: (data: { name?: string; host?: string; proxy_url?: string; callback_base?: string; group_ids?: number[]; enabled?: boolean }) =>
+    request<TraeCNOAuthStartResponse>('/accounts/traecn/oauth/start', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: 60_000,
+    }),
+  /** 轮询授权状态；state=ready 时 account 里带着可建号的凭据。 */
+  getTraeCNOAuthStatus: (loginId: string) =>
+    request<TraeCNOAuthStatusResponse>(`/accounts/traecn/oauth/status?login_id=${encodeURIComponent(loginId)}`, {
+      timeoutMs: 20_000,
+    }),
+  /** 手动提交回调链接（自动回调不可达时的兜底）。 */
+  completeTraeCNOAuth: (data: { login_id: string; callback: string }) =>
+    request<TraeCNOAuthCompleteResponse>('/accounts/traecn/oauth/complete', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: 60_000,
+    }),
+  /** 把已完成的授权会话落成账号。 */
+  claimTraeCNOAuthAccount: (data: { login_id: string; name?: string; host?: string; proxy_url?: string; group_ids?: number[]; enabled?: boolean }) =>
+    request<TraeCNOAuthClaimResponse>('/accounts/traecn/oauth/claim', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: 90_000,
+    }),
+  /** JSON 导入 Trae CN 账号（可粘贴导出文件或 cockpit-tools 风格对象）。 */
+  importTraeCNJSON: (data: TraeCNJSONImportRequest) =>
+    request<AddTraeCNAccountsResponse>('/accounts/traecn/import-json', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: 300_000,
+    }),
+  /** 导出 Trae CN 账号 JSON（含明文 refresh_token）。 */
+  exportTraeCNAccounts: (ids?: number[]) => {
+    const sp = new URLSearchParams()
+    if (ids && ids.length > 0) sp.set('ids', ids.join(','))
+    const query = sp.toString()
+    return requestNamedBlob(`/accounts/traecn/export${query ? `?${query}` : ''}`)
+  },
   updateTraeCNAccount: (id: number, data: UpdateTraeCNAccountRequest) =>
     request<MessageResponse>(`/accounts/${id}/traecn`, {
       method: 'PATCH',
