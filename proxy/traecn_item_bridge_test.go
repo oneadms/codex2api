@@ -259,3 +259,59 @@ func TestTraeCNRepairsArgsWrappedFunctionArguments(t *testing.T) {
 		})
 	}
 }
+
+// 推理条目不回灌上游：此前把 reasoning.summary 拼成 assistant 消息再发给 Trae，
+// 模型会把自己上一轮的思维链当成已说过的话继续想，表现就是 Codex 里像死循环一样
+// 一直思考。
+func TestTraeCNRequestBodyDropsReasoningItems(t *testing.T) {
+	t.Parallel()
+	canonical := []byte(`{"model":"DeepSeek-V4-Pro","input":[
+		{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"用户想让我列出文件，我先想想要不要用 exec_command。"}]},
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"列出当前目录"}]}
+	]}`)
+	body, _, _, _, err := traeCNRequestBodyPlan(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := string(body)
+	if strings.Contains(raw, "我先想想要不要用 exec_command") {
+		t.Fatalf("reasoning summary leaked back to the provider: %s", raw)
+	}
+	messages := gjson.GetBytes(body, "messages").Array()
+	if len(messages) != 1 || messages[0].Get("role").String() != "user" {
+		t.Fatalf("messages = %s, want only the user message", raw)
+	}
+}
+
+// TRAECN_REASONING_DISABLED=1 时推理摘要不再下发给客户端。
+func TestTraeCNReasoningEmissionCanBeDisabled(t *testing.T) {
+	provider := strings.Join([]string{
+		"event: output\ndata: {\"response\":\"\",\"reasoning_content\":\"先想一下\",\"tool_calls\":null}\n",
+		"event: output\ndata: {\"response\":\"完成\",\"tool_calls\":null}\n",
+		"event: done\ndata: {\"finish_reason\":\"stop\"}\n",
+	}, "\n")
+
+	read := func(t *testing.T) string {
+		t.Helper()
+		raw, err := io.ReadAll(traeCNCanonicalStream(io.NopCloser(strings.NewReader(provider)), "DeepSeek-V4-Pro"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+
+	t.Setenv("TRAECN_REASONING_DISABLED", "")
+	defaultOutput := read(t)
+	if !strings.Contains(defaultOutput, "response.reasoning_summary_text.delta") {
+		t.Fatalf("reasoning delta missing by default: %s", defaultOutput)
+	}
+
+	t.Setenv("TRAECN_REASONING_DISABLED", "1")
+	disabledOutput := read(t)
+	if strings.Contains(disabledOutput, "response.reasoning_summary_text.delta") {
+		t.Fatalf("reasoning delta must be suppressed when disabled: %s", disabledOutput)
+	}
+	if !strings.Contains(disabledOutput, "完成") {
+		t.Fatalf("text output must survive: %s", disabledOutput)
+	}
+}

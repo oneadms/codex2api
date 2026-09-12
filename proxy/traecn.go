@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -195,19 +196,12 @@ func traeCNMessagesFromResponses(body []byte) ([]map[string]any, []string, traeC
 			case "message":
 				appendMessage(item)
 			case "reasoning":
-				var summary strings.Builder
-				item.Get("summary").ForEach(func(_, part gjson.Result) bool {
-					if text := traeFirstText(part, "text", "content"); text != "" {
-						if summary.Len() > 0 {
-							summary.WriteByte('\n')
-						}
-						summary.WriteString(text)
-					}
-					return true
-				})
-				if summary.Len() > 0 {
-					messages = append(messages, map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": summary.String()}}})
-				}
+				// 推理条目不回灌给上游。此前把 reasoning.summary 拼成 assistant 消息再发给
+				// Trae，模型会把自己上一轮的思维链当成"已经说过的话"接着往下想，表现就是
+				// Codex 里一直显示在思考、像死循环（同样的推理内容被来回喂）。
+				// 客户端要的上下文由最终的 message（正文）与工具调用/结果承载，推理本身
+				// 只是过程，丢回上游只会加重重复。
+				_ = item
 			case "function_call":
 				callID := strings.TrimSpace(item.Get("call_id").String())
 				if callID == "" {
@@ -1080,6 +1074,11 @@ func (s *traeCNCanonicalState) emitReasoning(writer io.Writer, text string) erro
 	if text == "" {
 		return nil
 	}
+	// TRAECN_REASONING_DISABLED=1 时不把推理摘要发给客户端：Trae 模型思维链很长，
+	// 客户端会一直显示"思考中"；关掉后客户端只看到正文与工具调用。
+	if traeCNReasoningDisabled() {
+		return nil
+	}
 	if err := s.ensureReasoning(writer); err != nil {
 		return err
 	}
@@ -1087,6 +1086,15 @@ func (s *traeCNCanonicalState) emitReasoning(writer io.Writer, text string) erro
 	return writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent("response.reasoning_summary_text.delta", map[string]any{
 		"response_id": s.responseID, "item_id": s.reasoningID, "output_index": s.reasoningIdx, "summary_index": 0, "delta": text,
 	}))
+}
+
+// traeCNReasoningDisabled 判断是否关闭推理摘要下发（TRAECN_REASONING_DISABLED=1）。
+func traeCNReasoningDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TRAECN_REASONING_DISABLED"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 func traeToolCalls(root gjson.Result, eventName string) []gjson.Result {
