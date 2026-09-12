@@ -1140,16 +1140,6 @@ func traeCNFinalizeDeviceProfile(profile traeCNDeviceProfile) traeCNDeviceProfil
 	return profile
 }
 
-// traeCNRequestPin 生成客户端的 x-request-pin（抓包里是 16 位 hex）。
-func traeCNRequestPin() string {
-	raw := make([]byte, 8)
-	if _, err := rand.Read(raw); err != nil {
-		sum := sha256.Sum256([]byte(uuid.NewString()))
-		copy(raw, sum[:8])
-	}
-	return hex.EncodeToString(raw)
-}
-
 // TraeCNTTTraceID 生成与 TTNet 同构的 x-tt-trace-id。
 //
 // 结构来自真实抓包（21 个样本全部一致）：
@@ -1235,8 +1225,19 @@ func TraeCNRequestHeaders(account *Account, accessToken, requestID string) http.
 	headers.Set("x-ss-dp", traeCNSSDP)
 	// TTNet 的链路追踪头，真实客户端每个请求都带；服务端只是透传，所以按同构生成。
 	headers.Set("x-tt-trace-id", TraeCNTTTraceID(seed))
-	headers.Set("x-requested-at", strconv.FormatInt(time.Now().Unix(), 10))
-	headers.Set("x-request-pin", traeCNRequestPin())
+	// x-request-pin / x-requested-at 故意不发：实测它们是服务端签发的、带时效的一对令牌
+	// （抓包里的 pin 解出来是 12 字节签名值，把原 pin + 原时间戳重放也会被拒），客户端
+	// 自己造不出来；而 llm_utils_chat 只要收到这对头就会校验，值不对直接
+	// 400 {"error":"base64 decode failed"} / {"error":"invalid x-request-pin"}，
+	// 完全不发则正常。需要手工注入抓包值时用 TRAECN_REQUEST_PIN / TRAECN_REQUESTED_AT。
+	if pin := strings.TrimSpace(firstTraeCNEnv("TRAECN_REQUEST_PIN", "TRAE_REQUEST_PIN")); pin != "" {
+		requestedAt := strings.TrimSpace(firstTraeCNEnv("TRAECN_REQUESTED_AT", "TRAE_REQUESTED_AT"))
+		if requestedAt == "" {
+			requestedAt = strconv.FormatInt(time.Now().Unix(), 10)
+		}
+		headers.Set("x-request-pin", pin)
+		headers.Set("x-requested-at", requestedAt)
+	}
 	// Electron/Chromium 网络栈会给每个请求带上这组 fetch 元数据，客户端抓包里也在。
 	headers.Set("sec-fetch-dest", "empty")
 	headers.Set("sec-fetch-mode", "no-cors")

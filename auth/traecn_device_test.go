@@ -270,19 +270,26 @@ func TestTraeCNTTTraceIDMatchesClientShape(t *testing.T) {
 }
 
 func TestTraeCNHeadersCarryClientTraceHeaders(t *testing.T) {
-	t.Parallel()
+	// 会改环境变量，不能并行。
 	account := &Account{DBID: 7, UpstreamType: UpstreamTraeCN, AccessToken: "AT", RefreshToken: "RT", CredentialFamilyID: "family-trace"}
 	headers := TraeCNRequestHeaders(account, "AT", "req-1")
 	if got := headers.Get("x-tt-trace-id"); !strings.HasPrefix(got, "00-") || !strings.HasSuffix(got, "-01") {
 		t.Fatalf("x-tt-trace-id = %q", got)
 	}
-	if got := headers.Get("x-request-pin"); len(got) != 16 {
-		t.Fatalf("x-request-pin = %q, want 16 hex chars", got)
+	// x-request-pin / x-requested-at 是服务端签发的带时效令牌，客户端造不出来；
+	// llm_utils_chat 收到无效值会 400，所以默认不发。
+	if got := headers.Get("x-request-pin"); got != "" {
+		t.Fatalf("x-request-pin must not be sent by default, got %q", got)
 	}
-	if got := headers.Get("x-requested-at"); got == "" {
-		t.Fatal("x-requested-at is missing")
-	} else if _, err := strconv.ParseInt(got, 10, 64); err != nil {
-		t.Fatalf("x-requested-at = %q, want unix seconds", got)
+	if got := headers.Get("x-requested-at"); got != "" {
+		t.Fatalf("x-requested-at must not be sent by default, got %q", got)
+	}
+	// 手工注入通道仍然可用（成对下发）。
+	t.Setenv("TRAECN_REQUEST_PIN", "4d9ab754f68a11f3")
+	t.Setenv("TRAECN_REQUESTED_AT", "1789061186")
+	injected := TraeCNRequestHeaders(account, "AT", "req-1")
+	if injected.Get("x-request-pin") != "4d9ab754f68a11f3" || injected.Get("x-requested-at") != "1789061186" {
+		t.Fatalf("pin injection failed: %q / %q", injected.Get("x-request-pin"), injected.Get("x-requested-at"))
 	}
 	if got := TraeCNRequestID(); !strings.HasPrefix(got, "req_") {
 		t.Fatalf("request id = %q, want req_<uuid>", got)
