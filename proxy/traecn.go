@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/codex2api/auth"
@@ -1595,13 +1596,85 @@ func traeCNCanonicalStream(source io.ReadCloser, model string) io.ReadCloser {
 
 // traeCNCanonicalStreamForTools 额外接收客户端声明为 custom 的工具名，把这些工具的
 // 上游 function 调用还原成 custom_tool_call。
+// traeCNKeepaliveInterval 是下游保活间隔。Trae 侧模型长思考时上游可能几十秒不发
+// 任何帧（我们还会丢弃 progress_notice/metadata 这类生命周期帧），而链路上的反代
+// （Cloudflare / New API 等）空闲读超时通常 60~125s，会把连接拦腰掐断——客户端表现
+// 就是"正在重新连接 N/5"并整轮重试，任务永远跑不完。SSE 注释行是协议内容，客户端
+// 解析器一律忽略，但能刷新每一跳的空闲计时器。
+const traeCNKeepaliveInterval = 15 * time.Second
+
+const traeCNKeepaliveComment = ": keepalive\n\n"
+
+// traeCNKeepaliveWriter 串行化"保活注释 + 正常事件"的写入，避免交错。
+type traeCNKeepaliveWriter struct {
+	mu     sync.Mutex
+	target io.Writer
+	stop   chan struct{}
+	once   sync.Once
+}
+
+func startTraeCNKeepalive(target io.Writer) *traeCNKeepaliveWriter {
+	writer := &traeCNKeepaliveWriter{target: target, stop: make(chan struct{})}
+	if target == nil {
+		return writer
+	}
+	interval := traeCNKeepaliveInterval
+	if raw := strings.TrimSpace(os.Getenv("TRAECN_KEEPALIVE_SECONDS")); raw != "" {
+		if seconds, err := strconv.Atoi(raw); err == nil && seconds <= 0 {
+			return writer
+		} else if err == nil {
+			interval = time.Duration(seconds) * time.Second
+		}
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-writer.stop:
+				return
+			case <-ticker.C:
+				writer.mu.Lock()
+				_, err := io.WriteString(writer.target, traeCNKeepaliveComment)
+				writer.mu.Unlock()
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
+	return writer
+}
+
+func (w *traeCNKeepaliveWriter) Write(p []byte) (int, error) {
+	if w == nil {
+		return len(p), nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.target.Write(p)
+}
+
+func (w *traeCNKeepaliveWriter) Close() error {
+	if w == nil {
+		return nil
+	}
+	w.once.Do(func() { close(w.stop) })
+	return nil
+}
+
 func traeCNCanonicalStreamForTools(source io.ReadCloser, model string, bridges traeCNBridges, contracts traeCNContracts) io.ReadCloser {
 	reader, writer := io.Pipe()
 	go func() {
 		defer source.Close()
 		defer writer.Close()
+		// 保活写入器包住 pipe writer：长思考期间持续发 SSE 注释，避免反代按空闲
+		// 超时掐断连接（客户端会显示"正在重新连接 N/5"并整轮重试）。
+		pipeWriter := writer
+		keepalive := startTraeCNKeepalive(pipeWriter)
+		defer keepalive.Close()
 		state := newTraeCNCanonicalStateWithBridges(model, bridges, contracts)
-		if err := state.emitCreated(writer); err != nil {
+		if err := state.emitCreated(keepalive); err != nil {
 			return
 		}
 		br := bufio.NewReader(source)
@@ -1616,7 +1689,7 @@ func traeCNCanonicalStreamForTools(source io.ReadCloser, model string, bridges t
 			data.Reset()
 			name := eventName
 			eventName = ""
-			return state.consume(writer, name, payload)
+			return state.consume(keepalive, name, payload)
 		}
 		for {
 			line, readErr := br.ReadString('\n')
