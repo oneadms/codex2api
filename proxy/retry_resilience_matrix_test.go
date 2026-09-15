@@ -424,7 +424,7 @@ func TestResponsesContinuousRetryCyclesSingleAccountAfter503(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{
 		MaxConcurrency:      1,
 		TestConcurrency:     1,
-		TestModel:           "gpt-5.4",
+		TestModel:           "gpt-5.5",
 		MaxRetries:          0,
 		MaxRateLimitRetries: 0,
 	})
@@ -434,7 +434,7 @@ func TestResponsesContinuousRetryCyclesSingleAccountAfter503(t *testing.T) {
 		UpstreamType: auth.UpstreamOpenAIResponses,
 		BaseURL:      upstream.URL,
 		APIKey:       "test-relay-key",
-		Models:       []string{"gpt-5.4"},
+		Models:       []string{"gpt-5.5"},
 		PlanType:     "api",
 	})
 	handler := NewHandler(store, nil, nil, nil)
@@ -443,7 +443,7 @@ func TestResponsesContinuousRetryCyclesSingleAccountAfter503(t *testing.T) {
 	ctx, _ := gin.CreateTestContext(recorder)
 	requestCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"gpt-5.4","input":"hello","stream":true}`)).WithContext(requestCtx)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"gpt-5.5","input":"hello","stream":true}`)).WithContext(requestCtx)
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	handler.Responses(ctx)
 
@@ -502,7 +502,7 @@ func TestResponsesContinuousRetryCatchAllRotatesAndRepeatsPool(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{
 		MaxConcurrency:      1,
 		TestConcurrency:     1,
-		TestModel:           "gpt-5.4",
+		TestModel:           "gpt-5.5",
 		MaxRetries:          0,
 		MaxRateLimitRetries: 0,
 	})
@@ -519,7 +519,7 @@ func TestResponsesContinuousRetryCatchAllRotatesAndRepeatsPool(t *testing.T) {
 			UpstreamType: auth.UpstreamOpenAIResponses,
 			BaseURL:      upstream.URL,
 			APIKey:       account.key,
-			Models:       []string{"gpt-5.4"},
+			Models:       []string{"gpt-5.5"},
 			PlanType:     "api",
 		})
 	}
@@ -529,7 +529,7 @@ func TestResponsesContinuousRetryCatchAllRotatesAndRepeatsPool(t *testing.T) {
 	ctx, _ := gin.CreateTestContext(recorder)
 	requestCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"gpt-5.4","input":"hello","stream":true}`)).WithContext(requestCtx)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"gpt-5.5","input":"hello","stream":true}`)).WithContext(requestCtx)
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	handler.Responses(ctx)
 
@@ -779,7 +779,7 @@ func TestResponsesContinuousRetrySelectedDeterministicStatuses(t *testing.T) {
 			store := auth.NewStore(nil, nil, &database.SystemSettings{
 				MaxConcurrency:      1,
 				TestConcurrency:     1,
-				TestModel:           "gpt-5.4",
+				TestModel:           "gpt-5.5",
 				MaxRetries:          0,
 				MaxRateLimitRetries: 0,
 			})
@@ -790,7 +790,7 @@ func TestResponsesContinuousRetrySelectedDeterministicStatuses(t *testing.T) {
 					UpstreamType: auth.UpstreamOpenAIResponses,
 					BaseURL:      upstream.URL,
 					APIKey:       fmt.Sprintf("test-relay-key-%d", id),
-					Models:       []string{"gpt-5.4"},
+					Models:       []string{"gpt-5.5"},
 					PlanType:     "api",
 				})
 			}
@@ -800,7 +800,7 @@ func TestResponsesContinuousRetrySelectedDeterministicStatuses(t *testing.T) {
 			ctx, _ := gin.CreateTestContext(recorder)
 			requestCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"gpt-5.4","input":"hello","stream":true}`)).WithContext(requestCtx)
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"gpt-5.5","input":"hello","stream":true}`)).WithContext(requestCtx)
 			ctx.Request.Header.Set("Content-Type", "application/json")
 			handler.Responses(ctx)
 
@@ -848,7 +848,7 @@ func TestResponsesCompactContinuousRetryCyclesSingleAccountAfter503(t *testing.T
 	store := auth.NewStore(nil, nil, &database.SystemSettings{
 		MaxConcurrency:      1,
 		TestConcurrency:     1,
-		TestModel:           "gpt-5.4",
+		TestModel:           "gpt-5.5",
 		MaxRetries:          0,
 		MaxRateLimitRetries: 0,
 	})
@@ -858,7 +858,7 @@ func TestResponsesCompactContinuousRetryCyclesSingleAccountAfter503(t *testing.T
 		UpstreamType: auth.UpstreamOpenAIResponses,
 		BaseURL:      upstream.URL,
 		APIKey:       "test-relay-key",
-		Models:       []string{"gpt-5.4"},
+		Models:       []string{"gpt-5.5"},
 		PlanType:     "api",
 	})
 	handler := NewHandler(store, nil, nil, nil)
@@ -867,7 +867,7 @@ func TestResponsesCompactContinuousRetryCyclesSingleAccountAfter503(t *testing.T
 	ctx, _ := gin.CreateTestContext(recorder)
 	requestCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewBufferString(`{"model":"gpt-5.4","input":"hello"}`)).WithContext(requestCtx)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewBufferString(`{"model":"gpt-5.5","input":"hello"}`)).WithContext(requestCtx)
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	handler.ResponsesCompact(ctx)
 
@@ -918,7 +918,7 @@ func TestResponsesCompactContinuousRetrySelectsResponseFailedEvent(t *testing.T)
 	store := auth.NewStore(nil, nil, &database.SystemSettings{
 		MaxConcurrency:      1,
 		TestConcurrency:     1,
-		TestModel:           "gpt-5.4",
+		TestModel:           "gpt-5.5",
 		MaxRetries:          0,
 		MaxRateLimitRetries: 0,
 	})
@@ -927,7 +927,7 @@ func TestResponsesCompactContinuousRetrySelectsResponseFailedEvent(t *testing.T)
 		DBID:        1,
 		AccessToken: "test-token",
 		AccountID:   "test-account",
-		Models:      []string{"gpt-5.4"},
+		Models:      []string{"gpt-5.5"},
 		PlanType:    "pro",
 	})
 	handler := NewHandler(store, nil, nil, nil)
@@ -936,7 +936,7 @@ func TestResponsesCompactContinuousRetrySelectsResponseFailedEvent(t *testing.T)
 	ctx, _ := gin.CreateTestContext(recorder)
 	requestCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewBufferString(`{"model":"gpt-5.4","input":"hello"}`)).WithContext(requestCtx)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewBufferString(`{"model":"gpt-5.5","input":"hello"}`)).WithContext(requestCtx)
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	handler.ResponsesCompact(ctx)
 

@@ -5,6 +5,10 @@ import "strings"
 const longContextThreshold = 272000
 
 type ModelPricing struct {
+	UserBillingMode                 string
+	ImageUnitPrice                  float64
+	ImageInputPricePerMToken        float64
+	CacheReadImagePricePerMToken    float64
 	InputPricePerMToken             float64
 	InputPricePerMTokenPriority     float64
 	OutputPricePerMToken            float64
@@ -36,20 +40,24 @@ type modelPricingRule struct {
 }
 
 type CostBreakdown struct {
-	InputCost                  float64 `json:"input_cost"`
-	OutputCost                 float64 `json:"output_cost"`
-	CacheReadCost              float64 `json:"cache_read_cost"`
-	TotalCost                  float64 `json:"total_cost"`
-	InputPricePerMToken        float64 `json:"input_price_per_mtoken"`
-	OutputPricePerMToken       float64 `json:"output_price_per_mtoken"`
-	CacheReadPricePerMToken    float64 `json:"cache_read_price_per_mtoken"`
-	CacheWrite5mCost           float64 `json:"cache_write_5m_cost"`
-	CacheWrite1hCost           float64 `json:"cache_write_1h_cost"`
-	CacheWrite5mPricePerMToken float64 `json:"cache_write_5m_price_per_mtoken"`
-	CacheWrite1hPricePerMToken float64 `json:"cache_write_1h_price_per_mtoken"`
-	ServiceTierCostMultiplier  float64 `json:"service_tier_cost_multiplier"`
-	LongContext                bool    `json:"long_context"`
-	LongContextThreshold       int     `json:"long_context_threshold"`
+	ImageInputCost               float64 `json:"image_input_cost"`
+	ImageCacheReadCost           float64 `json:"image_cache_read_cost"`
+	ImageInputPricePerMToken     float64 `json:"image_input_price_per_mtoken"`
+	CacheReadImagePricePerMToken float64 `json:"cached_image_input_price_per_mtoken"`
+	InputCost                    float64 `json:"input_cost"`
+	OutputCost                   float64 `json:"output_cost"`
+	CacheReadCost                float64 `json:"cache_read_cost"`
+	TotalCost                    float64 `json:"total_cost"`
+	InputPricePerMToken          float64 `json:"input_price_per_mtoken"`
+	OutputPricePerMToken         float64 `json:"output_price_per_mtoken"`
+	CacheReadPricePerMToken      float64 `json:"cache_read_price_per_mtoken"`
+	CacheWrite5mCost             float64 `json:"cache_write_5m_cost"`
+	CacheWrite1hCost             float64 `json:"cache_write_1h_cost"`
+	CacheWrite5mPricePerMToken   float64 `json:"cache_write_5m_price_per_mtoken"`
+	CacheWrite1hPricePerMToken   float64 `json:"cache_write_1h_price_per_mtoken"`
+	ServiceTierCostMultiplier    float64 `json:"service_tier_cost_multiplier"`
+	LongContext                  bool    `json:"long_context"`
+	LongContextThreshold         int     `json:"long_context_threshold"`
 }
 
 var (
@@ -240,6 +248,9 @@ var (
 func GetModelPricing(model string) *ModelPricing {
 	normalized := normalizeBillingModelName(model)
 	canonical := normalized
+	if imageModel := GPTImage25BillingModel(normalized); imageModel != "" {
+		canonical = imageModel
+	}
 	if codexModel, ok := normalizeCodexBillingModel(normalized); ok {
 		canonical = codexModel
 	}
@@ -283,6 +294,9 @@ func GetModelPricing(model string) *ModelPricing {
 // baseModelPricing 返回代码内置的模型定价（不含覆盖）。normalized 为归一化后的模型名，
 // canonical 为 codex 归一后的规范名（用于规则表查找）。
 func baseModelPricing(normalized, canonical string) *ModelPricing {
+	if GPTImage25BillingModel(canonical) != "" {
+		return &gptImage25Pricing
+	}
 	if pricing := claudeFamilyPricing(normalized); pricing != nil {
 		return pricing
 	}
@@ -314,19 +328,16 @@ func usageLogBillingServiceTier(log *UsageLogInput) string {
 	return log.ServiceTier
 }
 
-// UsageLogBilledCost 返回一条待写入用量事件的计费金额(美元),与 InsertUsageLog 落库时
-// 写进 account_billed / user_billed 的口径完全一致。热路径上需要在日志落库前就拿到
-// 这笔消耗时(如 scope 维度限额的本地增量修正)调用它,避免两处计费逻辑漂移。
+// UsageLogBilledCost returns upstream token cost. User quotas and scope budgets
+// must use UsageLogUserBilledCost, which also supports per-image fees.
 func UsageLogBilledCost(log *UsageLogInput) float64 {
 	if log == nil {
 		return 0
 	}
-	// 使用 EffectiveModel 作为计费模型（如果有映射则使用映射后的模型）
-	billingModel := log.EffectiveModel
-	if billingModel == "" {
-		billingModel = log.Model
+	if log.billingSnapshot != nil {
+		return log.billingSnapshot.accountCost
 	}
-	return CalculateCostBreakdownWithCacheWrites(log.InputTokens, log.OutputTokens, log.CachedTokens, log.CacheWrite5mTokens, log.CacheWrite1hTokens, billingModel, usageLogBillingServiceTier(log)).TotalCost
+	return UsageLogCostBreakdown(log).TotalCost
 }
 
 func CalculateCostBreakdown(inputTokens, outputTokens, cachedTokens int, model string, serviceTier string) CostBreakdown {
@@ -338,6 +349,9 @@ func CalculateCostBreakdown(inputTokens, outputTokens, cachedTokens int, model s
 // 写入价缺省按输入价的 1.25 倍 / 2 倍。
 func CalculateCostBreakdownWithCacheWrites(inputTokens, outputTokens, cachedTokens, cacheWrite5mTokens, cacheWrite1hTokens int, model string, serviceTier string) CostBreakdown {
 	pricing := GetModelPricing(model)
+	if GPTImage25BillingModel(model) != "" {
+		return imageTokenCostBreakdown(inputTokens, outputTokens, cachedTokens, 0, 0, 0, pricing)
+	}
 	threshold := longContextThreshold
 	if pricing.LongContextThresholdTokens > 0 {
 		threshold = pricing.LongContextThresholdTokens

@@ -18,10 +18,12 @@ import (
 	"github.com/codex2api/auth"
 	"github.com/codex2api/config"
 	"github.com/codex2api/database"
+	"github.com/codex2api/internal/imageproc"
 	"github.com/codex2api/internal/imagestore"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const tinyPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
@@ -454,6 +456,13 @@ func TestNormalizeImageToolModelAliases(t *testing.T) {
 		{name: "2k alias", model: "gpt-image-2-2k", want: "gpt-image-2", wantSize: defaultImages2KSize},
 		{name: "4k alias", model: "gpt-image-2-4k", want: "gpt-image-2", wantSize: defaultImages4KSize},
 		{name: "other image model", model: "gpt-image-1.5", want: "gpt-image-1.5", wantSize: ""},
+		{name: "2.5 flare", model: "gpt-image-2.5-flare", want: "gpt-image-2.5-flare", wantSize: defaultImages1KSize},
+		{name: "2.5 flare 2k", model: "gpt-image-2.5-flare-2k", want: "gpt-image-2.5-flare", wantSize: defaultImages2KSize},
+		{name: "2.5 sunburst 4k", model: "gpt-image-2.5-sunburst-4k", want: "gpt-image-2.5-sunburst", wantSize: defaultImages4KSize},
+		{name: "2.5 dated snapshot passthrough", model: "gpt-image-2.5-flare-2026-09-08", want: "gpt-image-2.5-flare-2026-09-08", wantSize: defaultImages1KSize},
+		{name: "2.5 dated snapshot 4k", model: "gpt-image-2.5-sunburst-2026-09-08-4k", want: "gpt-image-2.5-sunburst-2026-09-08", wantSize: defaultImages4KSize},
+		{name: "uppercase alias", model: "GPT-Image-2-4K", want: "gpt-image-2", wantSize: defaultImages4KSize},
+		{name: "empty defaults", model: "", want: "gpt-image-2", wantSize: defaultImages1KSize},
 	}
 
 	for _, test := range tests {
@@ -1002,6 +1011,7 @@ func TestForwardImagesExplicitToolMissingCoolsModel(t *testing.T) {
 	}
 }
 
+// TestForwardImagesEmptyTerminalRetriesSameAccountOnce 验证空终态会在同一账号上重试一次。
 func TestForwardImagesEmptyTerminalRetriesSameAccountOnce(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previousRuntime := CurrentRuntimeSettings()
@@ -1056,7 +1066,9 @@ func TestForwardImagesEmptyTerminalRetriesSameAccountOnce(t *testing.T) {
 	}
 }
 
-func TestForwardImagesCommittedKeepaliveEndsWithSSEFailure(t *testing.T) {
+// TestForwardImagesInitialKeepaliveCommitsSSEFailure 验证 Images 首个保活提交 SSE 后，
+// 本地失败会转换为协议错误事件。
+func TestForwardImagesInitialKeepaliveCommitsSSEFailure(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previousRuntime := CurrentRuntimeSettings()
 	previousResin := resinCfg.Load()
@@ -1097,11 +1109,8 @@ func TestForwardImagesCommittedKeepaliveEndsWithSSEFailure(t *testing.T) {
 	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", true)
 
 	body := recorder.Body.String()
-	if recorder.Code != http.StatusOK || !strings.HasPrefix(body, continuousRetryKeepaliveComment) {
-		t.Fatalf("heartbeat did not commit SSE response: status=%d body=%q", recorder.Code, body)
-	}
-	if !strings.Contains(body, `"type":"response.failed"`) || !strings.Contains(body, "stop now") {
-		t.Fatalf("committed stream missing terminal response.failed: %q", body)
+	if recorder.Code != http.StatusOK || !strings.Contains(body, downstreamSSEKeepaliveComment) || !strings.Contains(body, `"type":"response.failed"`) || !strings.Contains(body, "stop now") {
+		t.Fatalf("committed SSE error = status %d body %q", recorder.Code, body)
 	}
 }
 
@@ -1346,72 +1355,6 @@ func TestBuildImageErrorUsageLogRecordsFailure(t *testing.T) {
 	}
 }
 
-func TestStartImageStreamKeepaliveStopsWhenWriterFails(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var mu sync.Mutex
-	writes := 0
-	wrote := make(chan struct{}, 1)
-	stop := startImageStreamKeepalive(ctx, time.Millisecond, func() bool {
-		mu.Lock()
-		writes++
-		mu.Unlock()
-		select {
-		case wrote <- struct{}{}:
-		default:
-		}
-		return false
-	})
-	defer stop()
-
-	select {
-	case <-wrote:
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("keepalive did not write")
-	}
-	time.Sleep(10 * time.Millisecond)
-	mu.Lock()
-	finalWrites := writes
-	mu.Unlock()
-	if finalWrites != 1 {
-		t.Fatalf("keepalive kept writing after writer failure: got %d writes, want 1", finalWrites)
-	}
-}
-
-func TestStartImageStreamKeepaliveStopWaitsForWriter(t *testing.T) {
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var enteredOnce sync.Once
-	stop := startImageStreamKeepalive(context.Background(), time.Millisecond, func() bool {
-		enteredOnce.Do(func() { close(entered) })
-		<-release
-		return false
-	})
-
-	select {
-	case <-entered:
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("keepalive writer did not start")
-	}
-	stopped := make(chan struct{})
-	go func() {
-		stop()
-		close(stopped)
-	}()
-	select {
-	case <-stopped:
-		t.Fatal("stop returned while keepalive writer was still running")
-	case <-time.After(10 * time.Millisecond):
-	}
-	close(release)
-	select {
-	case <-stopped:
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("stop did not join keepalive goroutine")
-	}
-}
-
 func TestStreamImagesResponseSendsConnectedComment(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	upstream := `data: {"type":"response.completed","response":{"created_at":1710000000,"usage":{"input_tokens":5,"output_tokens":9},"tool_usage":{"image_gen":{"images":1,"input_tokens":34,"output_tokens":1756}},"tools":[{"type":"image_generation","model":"gpt-image-2","output_format":"png","quality":"high","size":"1024x1024"}],"output":[{"type":"image_generation_call","result":"` + tinyPNGBase64 + `","revised_prompt":"draw a cat","output_format":"png"}]}}` + "\n\n"
@@ -1559,5 +1502,98 @@ func TestNextImageAccountHonorsNoAffinitySplit(t *testing.T) {
 	defer store.Release(fingerprinted)
 	if fingerprinted.DBID != 1 {
 		t.Fatalf("fingerprinted request picked account %d, want the non-split account 1", fingerprinted.DBID)
+	}
+}
+
+func TestImageUpscalePlanForRequestHonorsSuffixOnAnyImageModel(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"image_generation","size":"2560x1440"}]}`)
+	tests := []struct {
+		model string
+		scale string
+	}{
+		{model: "gpt-image-2-2k", scale: imageproc.Upscale2K},
+		{model: "gpt-image-2.5-flare-4k", scale: imageproc.Upscale4K},
+		{model: "gpt-image-2.5-sunburst-2k", scale: imageproc.Upscale2K},
+		{model: "gpt-image-2.5-flare", scale: ""},
+		{model: "gpt-image-2", scale: ""},
+	}
+	for _, test := range tests {
+		plan := imageUpscalePlanForRequest(test.model, body)
+		if plan.Scale != test.scale {
+			t.Fatalf("imageUpscalePlanForRequest(%q).Scale = %q, want %q", test.model, plan.Scale, test.scale)
+		}
+		if test.scale != "" && plan.RequestedSize != "2560x1440" {
+			t.Fatalf("imageUpscalePlanForRequest(%q).RequestedSize = %q, want 2560x1440", test.model, plan.RequestedSize)
+		}
+	}
+}
+
+func TestImagesMainModelEnvOverride(t *testing.T) {
+	t.Setenv(imagesMainModelEnv, "")
+	if got := imagesMainModel(); got != defaultImagesMainModel {
+		t.Fatalf("imagesMainModel() = %q, want default %q", got, defaultImagesMainModel)
+	}
+	t.Setenv(imagesMainModelEnv, " gpt-5.5 ")
+	if got := imagesMainModel(); got != "gpt-5.5" {
+		t.Fatalf("imagesMainModel() with env = %q, want gpt-5.5", got)
+	}
+	body := buildImagesResponsesRequest("a cat", nil, []byte(`{"type":"image_generation","model":"gpt-image-2.5-flare"}`))
+	if got := gjson.GetBytes(body, "model").String(); got != "gpt-5.5" {
+		t.Fatalf("responses model = %q, want env override gpt-5.5", got)
+	}
+	candidates := imagesMainModelCandidates()
+	if len(candidates) == 0 || candidates[0] != "gpt-5.5" {
+		t.Fatalf("candidates = %v, want env override first", candidates)
+	}
+	for i := 1; i < len(candidates); i++ {
+		if strings.EqualFold(candidates[i], "gpt-5.5") {
+			t.Fatalf("candidates = %v, want env override deduplicated", candidates)
+		}
+	}
+}
+
+func TestNextImagesMainModelAfterUnsupported(t *testing.T) {
+	t.Setenv(imagesMainModelEnv, "")
+	body := buildImagesResponsesRequest("a cat", nil, []byte(`{"type":"image_generation","model":"gpt-image-2.5-flare"}`))
+	unsupported := func(model string) []byte {
+		return []byte(`{"detail":"The '` + model + `' model is not supported when using Codex with a ChatGPT account."}`)
+	}
+
+	// 拒绝的是驱动主模型:换下一个候选。
+	tried := make(map[string]bool)
+	next, ok := nextImagesMainModelAfterUnsupported(body, unsupported(defaultImagesMainModel), tried)
+	if !ok || next != imagesMainModelFallbacks[0] {
+		t.Fatalf("next = (%q, %v), want (%q, true)", next, ok, imagesMainModelFallbacks[0])
+	}
+	if !tried[strings.ToLower(defaultImagesMainModel)] {
+		t.Fatalf("tried = %v, want rejected driver recorded", tried)
+	}
+
+	// 已试过的候选不再返回;候选耗尽后返回 false。
+	rewritten, _ := sjson.SetBytes(body, "model", next)
+	for range imagesMainModelFallbacks {
+		var more bool
+		next, more = nextImagesMainModelAfterUnsupported(rewritten, unsupported(next), tried)
+		if !more {
+			break
+		}
+		if tried[strings.ToLower(next)] {
+			t.Fatalf("candidate %q returned twice", next)
+		}
+		rewritten, _ = sjson.SetBytes(rewritten, "model", next)
+	}
+	if _, more := nextImagesMainModelAfterUnsupported(rewritten, unsupported(gjson.GetBytes(rewritten, "model").String()), tried); more {
+		t.Fatalf("expected candidates to be exhausted, tried=%v", tried)
+	}
+
+	// 拒绝的是生图模型或别的模型:不换驱动(交给既有的模型冷却逻辑)。
+	if _, ok := nextImagesMainModelAfterUnsupported(body, unsupported("gpt-image-2.5-flare"), make(map[string]bool)); ok {
+		t.Fatal("image model rejection must not trigger main-model fallback")
+	}
+	if _, ok := nextImagesMainModelAfterUnsupported(body, unsupported("gpt-5.4-mini"), make(map[string]bool)); ok {
+		t.Fatal("rejection of a model that is not the current driver must not trigger fallback")
+	}
+	if _, ok := nextImagesMainModelAfterUnsupported(body, []byte(`{"detail":"Invalid size"}`), make(map[string]bool)); ok {
+		t.Fatal("unrelated 400 must not trigger fallback")
 	}
 }

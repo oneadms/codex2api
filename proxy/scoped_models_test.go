@@ -112,15 +112,15 @@ func TestScopedModelsPlanMissingFailsClosedAndEmptyIs200(t *testing.T) {
 func TestScopedModelsAliasesOwnersFirstSeenAndDeterministicOrder(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2})
 	firstSeen := time.Unix(1_765_432_100, 0).UTC()
-	grok := &auth.Account{DBID: 2, UpstreamType: auth.UpstreamGrok, APIKey: "xai", Models: []string{"gpt-5.4", "grok-only"}, ModelMapping: `{"grok-alias":"grok-only","bad-alias":"missing"}`}
+	grok := &auth.Account{DBID: 2, UpstreamType: auth.UpstreamGrok, APIKey: "xai", Models: []string{"gpt-5.5", "grok-only"}, ModelMapping: `{"grok-alias":"grok-only","bad-alias":"missing"}`}
 	grok.SetGrokRoutingState(auth.GrokRoutingState{Models: []auth.GrokModelRoute{
-		{ModelID: "gpt-5.4", APIBackend: auth.GrokProtocolResponses, FirstSeenAt: firstSeen},
+		{ModelID: "gpt-5.5", APIBackend: auth.GrokProtocolResponses, FirstSeenAt: firstSeen},
 		{ModelID: "grok-only", APIBackend: auth.GrokProtocolResponses, FirstSeenAt: firstSeen},
 	}})
-	codex := &auth.Account{DBID: 1, AccessToken: "codex", Models: []string{"gpt-5.4"}}
+	codex := &auth.Account{DBID: 1, AccessToken: "codex", Models: []string{"gpt-5.5"}}
 	store.AddAccount(grok)
 	store.AddAccount(codex)
-	store.SetCodexModelMapping(`{"global-alias":"gpt-5.4","dead-global":"missing"}`)
+	store.SetCodexModelMapping(`{"global-alias":"gpt-5.5","dead-global":"missing"}`)
 	handler := NewHandler(store, nil, nil, nil)
 	models := listScopedModelsForTest(t, handler, &database.APIKeyRow{ID: 9})
 
@@ -131,7 +131,7 @@ func TestScopedModelsAliasesOwnersFirstSeenAndDeterministicOrder(t *testing.T) {
 	if !slices.IsSorted(ids) {
 		t.Fatalf("models are not deterministic sorted: %v", ids)
 	}
-	if owner, _, ok := scopedModelByID(models, "gpt-5.4"); !ok || owner != "codex2api" {
+	if owner, _, ok := scopedModelByID(models, "gpt-5.5"); !ok || owner != "codex2api" {
 		t.Fatalf("shared owner = %q ok=%v, want codex2api", owner, ok)
 	}
 	if owner, created, ok := scopedModelByID(models, "grok-only"); !ok || owner != "xai" || created != firstSeen.Unix() {

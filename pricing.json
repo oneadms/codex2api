@@ -1,4 +1,6 @@
 {
+  "gpt-image-2.5-flare": { "input": 5, "cached_input": 1.25, "image_input": 8, "cached_image_input": 2, "output": 30 },
+  "gpt-image-2.5-sunburst": { "input": 5, "cached_input": 1.25, "image_input": 8, "cached_image_input": 2, "output": 30 },
   "codex-auto-review": {
     "input": 2.5,
     "cached_input": 0.25,

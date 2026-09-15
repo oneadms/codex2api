@@ -40,6 +40,7 @@ func migrateOnlyEnabled() bool {
 	return value == "1" || strings.EqualFold(value, "true")
 }
 
+// main 加载配置、初始化存储与路由，并启动 Codex2API HTTP 服务。
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.Println("Codex2API v2 启动中...")
@@ -49,6 +50,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("加载核心环境配置失败 (请检查 .env 文件): %v", err)
 	}
+	proxy.ConfigureDownstreamKeepaliveFromEnv()
 	log.Printf("物理层配置加载成功: port=%d, database=%s, cache=%s, tz=%s", cfg.Port, cfg.Database.Label(), cfg.Cache.Label(), time.Local)
 
 	// 2. 初始化数据库
@@ -84,8 +86,9 @@ func main() {
 		settings = &database.SystemSettings{
 			SiteName:                          database.DefaultSiteName,
 			MaxConcurrency:                    2,
+			CodexTelemetryEnabled:             false, // 实验性:模拟遥测默认不外发,由部署者显式开启
 			GlobalRPM:                         0,
-			TestModel:                         "gpt-5.4",
+			TestModel:                         auth.DefaultTestModel,
 			TestContent:                       auth.DefaultTestContent,
 			TestConcurrency:                   50,
 			MaxRateLimitRetries:               1,
@@ -115,7 +118,7 @@ func main() {
 			UsageLogFlushIntervalSeconds:      5,
 			StreamFlushPolicy:                 proxy.StreamFlushPolicyImmediate,
 			StreamFlushIntervalMS:             20,
-			FirstTokenMode:                    proxy.FirstTokenModeStrict,
+			FirstTokenMode:                    proxy.FirstTokenModeLoose,
 			FirstTokenTimeoutSeconds:          0,
 			BillingTierPolicy:                 proxy.NormalizeBillingTierPolicy(os.Getenv("CODEX_BILLING_TIER_POLICY")),
 			ImageStorageConfig:                "{}",
@@ -138,8 +141,9 @@ func main() {
 		settings = &database.SystemSettings{
 			SiteName:                          database.DefaultSiteName,
 			MaxConcurrency:                    2,
+			CodexTelemetryEnabled:             false, // 实验性:模拟遥测默认不外发,由部署者显式开启
 			GlobalRPM:                         0,
-			TestModel:                         "gpt-5.4",
+			TestModel:                         auth.DefaultTestModel,
 			TestContent:                       auth.DefaultTestContent,
 			TestConcurrency:                   50,
 			MaxRateLimitRetries:               1,
@@ -166,7 +170,7 @@ func main() {
 			UsageLogFlushIntervalSeconds:      5,
 			StreamFlushPolicy:                 proxy.StreamFlushPolicyImmediate,
 			StreamFlushIntervalMS:             20,
-			FirstTokenMode:                    proxy.FirstTokenModeStrict,
+			FirstTokenMode:                    proxy.FirstTokenModeLoose,
 			FirstTokenTimeoutSeconds:          0,
 			BillingTierPolicy:                 proxy.NormalizeBillingTierPolicy(os.Getenv("CODEX_BILLING_TIER_POLICY")),
 			ImageStorageConfig:                "{}",
@@ -344,6 +348,7 @@ func main() {
 
 	// 5. 初始化账号管理器
 	store := auth.NewStore(db, tc, settings)
+	store.SetSchedulerWaitLimits(cfg.SchedulerMaxWaiters, cfg.SchedulerMaxWaitersPerKey)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	if err := store.Init(ctx); err != nil {
@@ -366,6 +371,7 @@ func main() {
 	store.TriggerAutoCleanupAsync()
 	defer store.Stop()
 	backgroundCtx, cancelBackground := context.WithCancel(context.Background())
+	adminHandler.StartQualityTests(backgroundCtx)
 	defer cancelBackground()
 	if !proxy.StartResponseCacheSettingsPoller(backgroundCtx, db) {
 		log.Fatalf("启动响应缓存设置同步失败")
@@ -378,6 +384,8 @@ func main() {
 	adminHandler.StartWhamDailyUsageProbe(backgroundCtx)
 	// 官方模型价目轮询默认关闭；启用后只在网络解析完成后做一次短数据库写入。
 	adminHandler.StartOfficialPricingSync(backgroundCtx)
+	// Prompt 审核日志保留清理：默认保留 7 天，每小时分批清理过期行，CY 关联行不动。
+	adminHandler.StartPromptLogRetention(backgroundCtx)
 
 	// 后台定时同步 Codex CLI 模拟版本（启动即拉一次，之后按设置的间隔）；
 	// 出上游新版本门槛时无需发版即可跟进。开关/间隔在设置页可调，
@@ -406,6 +414,7 @@ func main() {
 	r.Use(api.RequestContextMiddleware())
 	r.Use(api.VersionMiddleware())
 	security.MaxRequestBodySize = cfg.MaxRequestBodySize
+	security.ConfigureRequestMemoryBudget(cfg.RequestMemoryBudgetBytes)
 	// 账号导入端点(multipart 文件上传)单独放宽体积上限,默认 200MB,可用
 	// CODEX_MAX_IMPORT_BODY_SIZE_MB 覆盖。前端按大小分批发送,单批控制在此上限内。
 	if v := strings.TrimSpace(os.Getenv("CODEX_MAX_IMPORT_BODY_SIZE_MB")); v != "" {
@@ -429,6 +438,8 @@ func main() {
 	deviceCfg := proxy.DeviceProfileConfigFromEnv(os.Getenv)
 	handler := proxy.NewHandler(store, db, cfg, deviceCfg)
 	handler.SetRuntimeCache(tc)
+	defer handler.CloseAPIKeyAuthCache()
+	adminHandler.SetAPIKeyAuthCacheHandler(handler)
 
 	// 注册 WebSocket 执行函数（避免 proxy ↔ wsrelay 循环依赖）
 	proxy.WebsocketExecuteFunc = wsrelay.ExecuteRequestWebsocket
@@ -653,6 +664,7 @@ func main() {
 	}
 	adminHandler.WaitAutoResetCredits()
 	adminHandler.WaitAutoActivate5hWindow()
+	adminHandler.WaitQualityTests()
 	wsKeepalive.Stop()
 	wsrelay.ShutdownExecutor()
 	if !proxy.DrainResponseCacheBackendWrites(2 * time.Second) {

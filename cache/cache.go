@@ -9,9 +9,22 @@ import (
 // PoolStats 统一的缓存连接池状态表示。
 // 对于内存缓存，这些值用于向管理后台暴露一致的观测接口。
 type PoolStats struct {
-	TotalConns uint32
-	IdleConns  uint32
-	StaleConns uint32
+	TotalConns      uint32
+	IdleConns       uint32
+	StaleConns      uint32
+	WaitCount       uint32
+	WaitDurationNs  int64
+	Timeouts        uint32
+	PendingRequests uint32
+}
+
+// InUse excludes idle connections. StaleConns is a cumulative removal counter,
+// not a subset of the current pool, and must not be subtracted here.
+func (s PoolStats) InUse() uint32 {
+	if s.IdleConns >= s.TotalConns {
+		return 0
+	}
+	return s.TotalConns - s.IdleConns
 }
 
 type SessionAffinityBinding struct {

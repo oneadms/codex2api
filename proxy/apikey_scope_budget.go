@@ -24,8 +24,10 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -57,11 +59,12 @@ type apiKeyScopeUsageEvent struct {
 // apiKeyScopeUsageTracker 记录最近若干分钟内、按 (API Key, 账号) 拆分的用量事件。
 // 只跟踪确实配了 scope 限额的 Key(由 buildScopeBudgetGate 标记),其余 Key 零开销。
 type apiKeyScopeUsageTracker struct {
-	mu       sync.Mutex
-	events   map[int64][]apiKeyScopeUsageEvent
-	tracked  map[int64]time.Time
-	shared   map[int64]*sharedScopeBucketCache
-	counters map[int64]*scopeCounterCache
+	mu          sync.Mutex
+	events      map[int64][]apiKeyScopeUsageEvent
+	tracked     map[int64]time.Time
+	shared      map[int64]*sharedScopeBucketCache
+	counters    map[int64]*scopeCounterCache
+	sharedLoads singleflight.Group
 }
 
 // scopeCounterCache 缓存一次累计计数器读取的结果(见 apiKeyScopeCounterCacheTTL)。
@@ -284,7 +287,7 @@ func (h *Handler) apiKeyScopeUsageTracker() *apiKeyScopeUsageTracker {
 }
 
 // recordAPIKeyScopeUsage 在用量落库前把这笔消耗登记进本地增量。计费口径与
-// InsertUsageLog 完全一致(共用 database.UsageLogBilledCost)。
+// InsertUsageLog 完全一致(共用 database.UsageLogUserBilledCost)。
 // 运行态缓存跨实例共享(Redis)时同时写一份分钟桶,让其它实例也看得到这笔消耗。
 func (h *Handler) recordAPIKeyScopeUsage(input *database.UsageLogInput) {
 	if h == nil || input == nil || input.APIKeyID <= 0 || input.AccountID <= 0 {
@@ -294,7 +297,7 @@ func (h *Handler) recordAPIKeyScopeUsage(input *database.UsageLogInput) {
 		return
 	}
 	tokens := int64(input.TotalTokens)
-	cost := database.UsageLogBilledCost(input)
+	cost := database.UsageLogUserBilledCost(input)
 	tracker := h.apiKeyScopeUsageTracker()
 	if !tracker.isTracked(input.APIKeyID) {
 		return
@@ -315,6 +318,7 @@ const (
 	apiKeyScopeSharedReadTTL = 5 * time.Second
 	// 累计额度计数器的本地读缓存。
 	apiKeyScopeCounterCacheTTL = 5 * time.Second
+	apiKeyScopeDeltaWriteSlots = 16
 )
 
 // sharedScopeDeltaEnabled 判断是否值得走跨实例共享增量。单实例(内存缓存)时
@@ -342,11 +346,23 @@ func (h *Handler) publishSharedScopeDelta(apiKeyID, accountID, tokens int64, cos
 		fmt.Sprintf("%d:c", accountID): cost,
 	}
 	key := apiKeyScopeSharedDeltaKey(apiKeyID, time.Now().Unix()/60)
-	go func() {
+	write := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = h.cache.IncrRuntimeCounters(ctx, apiKeyScopeSharedDeltaNamespace, key, deltas, apiKeyScopeSharedDeltaTTL)
-	}()
+	}
+	h.scopeDeltaInit.Do(func() { h.scopeDeltaSlots = make(chan struct{}, apiKeyScopeDeltaWriteSlots) })
+	select {
+	case h.scopeDeltaSlots <- struct{}{}:
+		go func() {
+			defer func() { <-h.scopeDeltaSlots }()
+			write()
+		}()
+	default:
+		// Backpressure bounds background goroutines. A saturated writer must
+		// not silently discard another instance's pending usage correction.
+		write()
+	}
 }
 
 // sharedScopeBuckets 读最近几个分钟桶(全部实例的贡献),带 5s 本地缓存。
@@ -360,13 +376,48 @@ func (h *Handler) sharedScopeBuckets(ctx context.Context, apiKeyID int64) (map[i
 	if buckets, readAt, ok := tracker.cachedSharedBuckets(apiKeyID); ok {
 		return buckets, readAt
 	}
+	result := tracker.sharedLoads.DoChan(strconv.FormatInt(apiKeyID, 10), func() (any, error) {
+		if buckets, readAt, ok := tracker.cachedSharedBuckets(apiKeyID); ok {
+			return &sharedScopeBucketCache{buckets: buckets, readAt: readAt}, nil
+		}
+		// A canceled leader must not cancel the shared read for other callers.
+		readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer cancel()
+		buckets, readAt := h.loadSharedScopeBuckets(readCtx, apiKeyID)
+		tracker.storeSharedBuckets(apiKeyID, buckets, readAt)
+		return &sharedScopeBucketCache{buckets: buckets, readAt: readAt}, nil
+	})
+	select {
+	case <-ctx.Done():
+		return nil, time.Time{}
+	case result := <-result:
+		entry := result.Val.(*sharedScopeBucketCache)
+		return entry.buckets, entry.readAt
+	}
+}
 
+func (h *Handler) loadSharedScopeBuckets(ctx context.Context, apiKeyID int64) (map[int64]map[int64]database.APIKeyWindowUsage, time.Time) {
 	nowMinute := time.Now().Unix() / 60
+	keys := make([]string, apiKeyScopeSharedDeltaLookback)
+	for i := range keys {
+		keys[i] = apiKeyScopeSharedDeltaKey(apiKeyID, nowMinute-int64(i))
+	}
+	var values map[string]map[string]float64
+	if reader, ok := h.cache.(cache.RuntimeCounterBatchReader); ok {
+		values, _ = reader.GetRuntimeCountersBatch(ctx, apiKeyScopeSharedDeltaNamespace, keys)
+	} else {
+		values = make(map[string]map[string]float64, len(keys))
+		for _, key := range keys {
+			if counters, err := h.cache.GetRuntimeCounters(ctx, apiKeyScopeSharedDeltaNamespace, key); err == nil {
+				values[key] = counters
+			}
+		}
+	}
 	buckets := make(map[int64]map[int64]database.APIKeyWindowUsage, apiKeyScopeSharedDeltaLookback)
 	for i := 0; i < apiKeyScopeSharedDeltaLookback; i++ {
 		minute := nowMinute - int64(i)
-		counters, err := h.cache.GetRuntimeCounters(ctx, apiKeyScopeSharedDeltaNamespace, apiKeyScopeSharedDeltaKey(apiKeyID, minute))
-		if err != nil || len(counters) == 0 {
+		counters := values[keys[i]]
+		if len(counters) == 0 {
 			continue
 		}
 		perAccount := make(map[int64]database.APIKeyWindowUsage)
@@ -389,7 +440,6 @@ func (h *Handler) sharedScopeBuckets(ctx context.Context, apiKeyID int64) (map[i
 		buckets[minute] = perAccount
 	}
 	readAt := time.Now()
-	tracker.storeSharedBuckets(apiKeyID, buckets, readAt)
 	return buckets, readAt
 }
 

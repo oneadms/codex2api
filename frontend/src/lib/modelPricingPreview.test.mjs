@@ -50,3 +50,12 @@ test('priority and flex conventions are represented for every supported tier', (
   assert.match(preview.expression, /service_tier.*flex/)
   assert.match(preview.expression, /service_tier.*priority/)
 })
+
+
+test('image pricing preview splits text and image inputs without long-context multipliers', () => {
+  const preview = buildModelPricingPreview({ input: 5, cached_input: 1.25, image_input: 8, cached_image_input: 2, output: 30 })
+  assert.deepEqual(preview.image, { input: 8, cached: 2, output: 30 })
+  assert.match(preview.expression, /text_input \* 5 \+ image_input \* 8/)
+  assert.match(preview.expression, /cached_image \* 2 \+ image_output \* 30/)
+  assert.equal(preview.long, null)
+})

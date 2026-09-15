@@ -99,6 +99,8 @@ type openAIStreamChunk struct {
 	Model   string         `json:"model"`
 	Choices []streamChoice `json:"choices"`
 	Usage   *UsageInfo     `json:"usage,omitempty"`
+	// ServiceTier 回传上游实际处理档位（response.service_tier），只在终结块携带。
+	ServiceTier string `json:"service_tier,omitempty"`
 }
 
 // streamChoice 流式块中的选项
@@ -145,6 +147,8 @@ type openAICompactResponse struct {
 	Model   string          `json:"model"`
 	Choices []compactChoice `json:"choices"`
 	Usage   *UsageInfo      `json:"usage,omitempty"`
+	// ServiceTier 回传上游实际处理档位（response.service_tier）。
+	ServiceTier string `json:"service_tier,omitempty"`
 }
 
 // compactChoice 非流式响应中的选项
@@ -811,10 +815,11 @@ func normalizeResponsesImageOnlyModel(body map[string]any) bool {
 		body["tool_choice"] = map[string]any{"type": "image_generation"}
 		modified = true
 	}
-	if imageModel != defaultImagesMainModel {
+	mainModel := imagesMainModel()
+	if imageModel != mainModel {
 		modified = true
 	}
-	body["model"] = defaultImagesMainModel
+	body["model"] = mainModel
 	return modified
 }
 
@@ -1419,6 +1424,32 @@ func normalizeResponsesInputItemIDs(body map[string]any) bool {
 	return modified
 }
 
+// responsesInputInternalMetadataField 是 Codex CLI 在自定义 provider 名为 "OpenAI"
+// 时附在 input 项顶层的内部元数据，ChatGPT 后端不接受该字段直接 400。
+const responsesInputInternalMetadataField = "internal_chat_message_metadata_passthrough"
+
+// stripResponsesInputInternalMetadata 只删 input[] 顶层项上的内部元数据字段，
+// 不碰 content/arguments 里恰好同名的用户内容。
+func stripResponsesInputInternalMetadata(body map[string]any) bool {
+	inputItems, ok := body["input"].([]any)
+	if !ok {
+		return false
+	}
+
+	modified := false
+	for _, raw := range inputItems {
+		itemMap, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, exists := itemMap[responsesInputInternalMetadataField]; exists {
+			delete(itemMap, responsesInputInternalMetadataField)
+			modified = true
+		}
+	}
+	return modified
+}
+
 func normalizeResponsesContentPartTypes(body map[string]any) bool {
 	inputItems, ok := body["input"].([]any)
 	if !ok {
@@ -1839,11 +1870,15 @@ func cachedOrParse(rawJSON []byte) openAIRequest {
 // TranslateRequest 将 OpenAI Chat Completions 请求转换为 Codex Responses 格式
 // 采用 Unmarshal→构造 map→Marshal 模式，只做一次 JSON 序列化
 func TranslateRequest(rawJSON []byte) ([]byte, error) {
-	req := sanitizeChatCompletionToolHistory(cachedOrParse(rawJSON))
+	parsed := cachedOrParse(rawJSON)
+	req := sanitizeChatCompletionToolHistory(parsed)
 	if err := validateChatCompletionFunctionNames(req); err != nil {
 		return nil, err
 	}
 	out := buildChatResponsesRequest(req)
+	// 工具名净化映射从净化历史前的解析结果推导，与响应侧 ChatToolNameRestoreMap
+	// 使用同一份输入，保证去重后缀两边一致。
+	applyCodexToolNameMap(out, buildCodexToolNameMap(collectChatToolNames(parsed)))
 	return json.Marshal(out)
 }
 
@@ -1970,6 +2005,7 @@ func buildChatResponsesRequest(req openAIRequest) map[string]any {
 	normalizeResponsesContentPartTypes(out)
 	normalizeResponsesInputMessageContent(out)
 	normalizeResponsesInputItemIDs(out)
+	stripResponsesInputInternalMetadata(out)
 
 	// 2. reasoning effort + summary
 	// 显式向 Codex 请求 summary,否则上游不会发 response.reasoning_summary_text.delta,
@@ -2300,8 +2336,11 @@ func normalizeFunctionToolsInArray(tools []any) ([]any, bool) {
 		if _, ok := tool["strict"]; !ok {
 			if strict, ok := function["strict"]; ok {
 				tool["strict"] = strict
-				modified = true
+			} else {
+				// Chat 形态（带 function 子对象）的工具按 Chat 默认：strict=false。
+				tool["strict"] = false
 			}
+			modified = true
 		}
 		delete(tool, "function")
 		modified = true
@@ -2359,6 +2398,8 @@ type responsesBodyPrepareOptions struct {
 	expandPreviousResponse       bool
 	preservePreviousResponseID   bool
 	deferStructuredStringLengths bool
+	skipExpandedInput            bool
+	naturalImageIntent           *bool
 	cachedResponseItems          []json.RawMessage
 	// cacheOwner 是 previous_response_id 展开时使用的缓存归属命名空间
 	//（见 responseCacheOwner）。owner 不匹配的缓存按未命中处理，防跨用户注入。
@@ -2421,6 +2462,19 @@ func PrepareResponsesWebSocketBody(rawBody []byte) ([]byte, string) {
 	})
 }
 
+// The native turn only needs the outbound body. Preserve the public preparation
+// function's replay-input result for callers that actually consume it.
+func prepareResponsesWebSocketTurnBody(rawBody []byte) ([]byte, bool) {
+	var naturalImageIntent bool
+	body, _ := prepareResponsesBodyWithOptions(rawBody, responsesBodyPrepareOptions{
+		preservePreviousResponseID:   true,
+		deferStructuredStringLengths: true,
+		skipExpandedInput:            true,
+		naturalImageIntent:           &naturalImageIntent,
+	})
+	return body, naturalImageIntent
+}
+
 const codexReasoningEncryptedContentInclude = "reasoning.encrypted_content"
 
 func ensureDefaultCodexInclude(body map[string]any) {
@@ -2466,6 +2520,11 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 	var body map[string]any
 	if err := json.Unmarshal(rawBody, &body); err != nil {
 		return rawBody, ""
+	}
+	if opts.naturalImageIntent != nil {
+		// Inspect the original prompt before compatibility rewrites or automatic
+		// image-tool injection. Reuse this parse when selecting the transport.
+		*opts.naturalImageIntent = promptTextRequestsImageGeneration(extractResponsesPromptText(body))
 	}
 
 	// 1. 强制设置 Codex 必需字段
@@ -2583,6 +2642,7 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 	normalizeResponsesToolCallArgumentTypes(body)
 	sanitizeMalformedResponsesFunctionCalls(body)
 	normalizeResponsesInputItemIDs(body)
+	stripResponsesInputInternalMetadata(body)
 	dropBareReasoningInputItems(body)
 	// 6c. 修复工具调用/输出的 call_id 配对（issue #414）。
 	// previous_response_id 保留给上游的原生续链场景跳过：历史存于上游服务端，
@@ -2615,6 +2675,9 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 
 	result, err := json.Marshal(body)
 	if err != nil {
+		if opts.skipExpandedInput {
+			return rawBody, ""
+		}
 		var expandedInputRaw string
 		if input, ok := body["input"]; ok {
 			if encoded, inputErr := json.Marshal(input); inputErr == nil {
@@ -2624,6 +2687,9 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 		return rawBody, expandedInputRaw
 	}
 	result = normalizeCompactionTriggerFinal(result, false)
+	if opts.skipExpandedInput {
+		return result, ""
+	}
 	// Reuse the serialized input, including any final compaction adjustment.
 	// Serializing the same input tree separately doubles work on long histories.
 	return result, gjson.GetBytes(result, "input").Raw
@@ -3088,6 +3154,11 @@ func convertToolsToCodexFormat(rawTools []json.RawMessage) []any {
 		normalizeFunctionToolParameters(item)
 		if parsed.Function.Strict != nil {
 			item["strict"] = *parsed.Function.Strict
+		} else {
+			// Chat Completions 的 strict 默认 false，Responses 默认 true。省略时
+			// 必须显式带 false，否则上游按 strict 校验 schema（可选属性、缺
+			// additionalProperties:false 等）直接 400。Codex CLI 自身的工具也全发 false。
+			item["strict"] = false
 		}
 		tools = append(tools, item)
 	}
@@ -3330,6 +3401,7 @@ func stripUnsupportedSchemaKeysWithPolicy(schema map[string]interface{}, policy 
 }
 
 func sanitizeSchemaForUpstream(schema map[string]interface{}) {
+	simplifyConstUnionSchemas(schema)
 	stripUnsupportedSchemaKeys(schema)
 	normalizeSchemaRequiredFields(schema)
 	ensureArrayItems(schema)
@@ -3751,13 +3823,16 @@ type TokenDetails struct {
 }
 
 type UsageInfo struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
-	InputTokens      int `json:"input_tokens,omitempty"`
-	OutputTokens     int `json:"output_tokens,omitempty"`
-	ReasoningTokens  int `json:"reasoning_tokens,omitempty"`
-	CachedTokens     int `json:"cached_tokens,omitempty"`
+	ImageInputTokens       int `json:"image_input_tokens,omitempty"`
+	ImageOutputTokens      int `json:"image_output_tokens,omitempty"`
+	CachedImageInputTokens int `json:"cached_image_input_tokens,omitempty"`
+	PromptTokens           int `json:"prompt_tokens"`
+	CompletionTokens       int `json:"completion_tokens"`
+	TotalTokens            int `json:"total_tokens"`
+	InputTokens            int `json:"input_tokens,omitempty"`
+	OutputTokens           int `json:"output_tokens,omitempty"`
+	ReasoningTokens        int `json:"reasoning_tokens,omitempty"`
+	CachedTokens           int `json:"cached_tokens,omitempty"`
 	// CacheWrite* 是 Anthropic 提示缓存写入 token（cache_creation_input_tokens 及其 5m/1h 细分）。
 	CacheWriteTokens   int `json:"cache_write_tokens,omitempty"`
 	CacheWrite5mTokens int `json:"cache_write_5m_tokens,omitempty"`
@@ -3892,6 +3967,11 @@ func newToolCallDeltaChunk(id, model string, created int64, tcIndex int, argsDel
 // (Rust/serde 系)把 delta 当必填字段,缺失会直接报
 // "missing field `delta`" 并让整轮对话失败。
 func newFinalChunk(id, model string, created int64, finishReason string, usage *UsageInfo) []byte {
+	return newFinalChunkWithTier(id, model, created, finishReason, usage, "")
+}
+
+// newFinalChunkWithTier 在终结块上附带上游实际 service_tier（空则省略）。
+func newFinalChunkWithTier(id, model string, created int64, finishReason string, usage *UsageInfo, serviceTier string) []byte {
 	chunk := openAIStreamChunk{
 		ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
 		Choices: []streamChoice{{
@@ -3899,7 +3979,8 @@ func newFinalChunk(id, model string, created int64, finishReason string, usage *
 			Delta:        &streamDelta{},
 			FinishReason: &finishReason,
 		}},
-		Usage: usage,
+		Usage:       usage,
+		ServiceTier: strings.TrimSpace(serviceTier),
 	}
 	b, _ := json.Marshal(chunk)
 	return b
@@ -3963,13 +4044,13 @@ func TranslateStreamChunk(eventData []byte, model string, chunkID string, create
 
 	case "response.completed":
 		usage := extractUsage(eventData)
-		return newFinalChunk(chunkID, model, created, "stop", usage), true
+		return newFinalChunkWithTier(chunkID, model, created, "stop", usage, gjson.GetBytes(eventData, "response.service_tier").String()), true
 
 	// max_output_tokens 截断的正常终态：Chat 侧对应 finish_reason=length。
 	case "response.incomplete":
 		usage := extractUsage(eventData)
 		reason := gjson.GetBytes(eventData, "response.incomplete_details.reason").String()
-		return newFinalChunk(chunkID, model, created, responsesIncompleteFinishReason(eventType, reason), usage), true
+		return newFinalChunkWithTier(chunkID, model, created, responsesIncompleteFinishReason(eventType, reason), usage, gjson.GetBytes(eventData, "response.service_tier").String()), true
 
 	case "response.failed":
 		errMsg := gjson.GetBytes(eventData, "response.error.message").String()
@@ -4024,6 +4105,16 @@ type StreamTranslator struct {
 	toolCallFinalized     map[int]bool
 	invalidToolArguments  error
 	nextIdx               int
+	// toolNameRestore 上游名 → 客户端原名（codex_tool_names.go），nil 表示无改写。
+	toolNameRestore map[string]string
+}
+
+// SetToolNameRestore 注册工具名还原映射；请求侧未改写任何名字时可传 nil。
+func (st *StreamTranslator) SetToolNameRestore(restore map[string]string) {
+	if st == nil {
+		return
+	}
+	st.toolNameRestore = restore
 }
 
 // NewStreamTranslator 创建流式翻译器实例
@@ -4190,7 +4281,7 @@ func (st *StreamTranslator) TranslateParsed(parsed gjson.Result) ([]byte, bool) 
 		if callID == "" {
 			callID = parsed.Get("item.id").String()
 		}
-		name := parsed.Get("item.name").String()
+		name := restoreCodexToolName(st.toolNameRestore, parsed.Get("item.name").String())
 		itemID := parsed.Get("item.id").String()
 		if itemID == "" {
 			itemID = callID
@@ -4274,7 +4365,7 @@ func (st *StreamTranslator) TranslateParsed(parsed gjson.Result) ([]byte, bool) 
 		if override := responsesIncompleteFinishReason(eventType, parsed.Get("response.incomplete_details.reason").String()); override != "" {
 			finishReason = override
 		}
-		return newFinalChunk(st.ChunkID, st.Model, st.Created, finishReason, usage), true
+		return newFinalChunkWithTier(st.ChunkID, st.Model, st.Created, finishReason, usage, parsed.Get("response.service_tier").String()), true
 
 	case "response.failed":
 		errMsg := parsed.Get("response.error.message").String()
@@ -4382,6 +4473,12 @@ func BuildCompactResponse(id, model string, created int64, content, reasoning st
 // 上游按 max_output_tokens 截断时终态是 response.incomplete，推导值 stop /
 // tool_calls 会把截断响应说成正常收尾，需要覆盖成 length。空串表示不覆盖。
 func BuildCompactResponseWithFinishReason(id, model string, created int64, content, reasoning string, toolCalls []ToolCallResult, usage *UsageInfo, finishReasonOverride string) []byte {
+	return BuildCompactChatResponse(id, model, created, content, reasoning, toolCalls, usage, finishReasonOverride, "")
+}
+
+// BuildCompactChatResponse 在 BuildCompactResponseWithFinishReason 基础上附带上游
+// 实际 service_tier（空则省略）。
+func BuildCompactChatResponse(id, model string, created int64, content, reasoning string, toolCalls []ToolCallResult, usage *UsageInfo, finishReasonOverride string, serviceTier string) []byte {
 	finishReason := "stop"
 	msg := compactMessage{
 		Role:    "assistant",
@@ -4427,7 +4524,8 @@ func BuildCompactResponseWithFinishReason(id, model string, created int64, conte
 			Message:      msg,
 			FinishReason: finishReason,
 		}},
-		Usage: usage,
+		Usage:       usage,
+		ServiceTier: strings.TrimSpace(serviceTier),
 	}
 	b, _ := json.Marshal(resp)
 	return b
@@ -4449,7 +4547,11 @@ func extractUsageFromResult(usage gjson.Result) *UsageInfo {
 	outputTokens := int(usage.Get("output_tokens").Int())
 	reasoningTokens := int(usage.Get("output_tokens_details.reasoning_tokens").Int())
 	cachedTokens := int(usage.Get("input_tokens_details.cached_tokens").Int())
-	return newUsageInfo(inputTokens, outputTokens, reasoningTokens, cachedTokens)
+	result := newUsageInfo(inputTokens, outputTokens, reasoningTokens, cachedTokens)
+	result.ImageInputTokens = min(max(0, int(usage.Get("input_tokens_details.image_tokens").Int())), max(0, inputTokens))
+	result.ImageOutputTokens = min(max(0, int(usage.Get("output_tokens_details.image_tokens").Int())), max(0, outputTokens))
+	result.CachedImageInputTokens = min(max(0, int(usage.Get("input_tokens_details.cached_tokens_details.image_tokens").Int())), min(result.ImageInputTokens, max(0, cachedTokens)))
+	return result
 }
 
 // ExtractToolCallsFromOutputValidated extracts completed tool calls and rejects

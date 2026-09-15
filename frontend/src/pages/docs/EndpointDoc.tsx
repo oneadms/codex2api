@@ -1,11 +1,23 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Copy, Check, Play, Loader2 } from "lucide-react";
-import { Card, CardContent } from "@/components/ui/card";
+import {
+  Copy,
+  Check,
+  Play,
+  Loader2,
+  ChevronRight,
+  Link as LinkIcon,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
-import { Dialog, DialogContent } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
+import type { EndpointSpec } from "./docsContent";
 import { useHighlightedHtml } from "../../hooks/useHighlighter";
 
 export const CodeBlock = memo(function CodeBlock({
@@ -136,43 +148,6 @@ export function MethodBadge({ method, sm }: { method: string; sm?: boolean }) {
   );
 }
 
-function StatusTabs({
-  tabs,
-  active,
-  onChange,
-}: {
-  tabs: { code: number; label?: string }[];
-  active: number;
-  onChange: (c: number) => void;
-}) {
-  return (
-    <div className="flex items-center gap-0.5 border-b border-border mb-0">
-      {tabs.map((tab) => {
-        const isActive = active === tab.code;
-        const codeColor =
-          tab.code < 300
-            ? "text-emerald-600 dark:text-emerald-400"
-            : tab.code < 400
-              ? "text-amber-600 dark:text-amber-400"
-              : "text-red-500 dark:text-red-400";
-        return (
-          <button
-            key={tab.code}
-            onClick={() => onChange(tab.code)}
-            className={`px-3 py-2 text-sm font-semibold border-b-2 transition-colors ${
-              isActive
-                ? `border-foreground ${codeColor}`
-                : "border-transparent text-muted-foreground/60 hover:text-muted-foreground"
-            }`}
-          >
-            {tab.code}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
 function TryItDialog({
   open,
   onClose,
@@ -199,6 +174,8 @@ function TryItDialog({
   const [status, setStatus] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [duration, setDuration] = useState<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   useEffect(() => {
     if (open) {
@@ -211,6 +188,9 @@ function TryItDialog({
   }, [open, defaultBody, apiKey]);
 
   const handleSend = async () => {
+    if (loading) return;
+    const controller = new AbortController();
+    abortRef.current = controller;
     setLoading(true);
     setResponse("");
     setStatus(null);
@@ -223,10 +203,10 @@ function TryItDialog({
       };
       if (isAdmin) {
         headers["X-Admin-Key"] = token;
-      } else if (path === "/v1/messages") {
+      } else if (path.startsWith("/v1/messages")) {
         headers["x-api-key"] = token;
         headers["anthropic-version"] = "2023-06-01";
-      } else {
+      } else if (path !== "/health") {
         headers["Authorization"] = `Bearer ${token}`;
       }
 
@@ -235,6 +215,7 @@ function TryItDialog({
       const res = await fetch(url, {
         method,
         headers,
+        signal: controller.signal,
         body: isGet ? undefined : body.trim() || undefined,
       });
       setStatus(res.status);
@@ -274,17 +255,23 @@ function TryItDialog({
     <Dialog
       open={open}
       onOpenChange={(v) => {
-        if (!v) onClose();
+        if (!v) {
+          abortRef.current?.abort();
+          onClose();
+        }
       }}
     >
-      <DialogContent
-        className="sm:max-w-3xl max-h-[90vh] overflow-visible flex flex-col gap-0 p-0"
-        showCloseButton={false}
-      >
-        <div className="flex items-center gap-3 px-5 py-3.5 border-b border-border bg-muted/30">
-          <div className="flex items-center gap-2.5 flex-1 px-3 py-2 rounded-xl border border-border bg-background">
+      <DialogContent className="sm:max-w-4xl max-h-[90dvh] overflow-hidden flex flex-col gap-0 p-0">
+        <DialogTitle className="sr-only">
+          {t("apiRef.tryIt.button")} {path}
+        </DialogTitle>
+        <DialogDescription className="sr-only">
+          {t("apiRef.tryIt.requestBody")} / {t("apiRef.tryIt.responseTitle")}
+        </DialogDescription>
+        <div className="flex flex-wrap items-center gap-3 pl-4 pr-12 py-4 border-b border-border bg-muted/30">
+          <div className="flex min-w-0 items-center gap-2.5 flex-1 basis-48 px-3 py-2 rounded-xl border border-border bg-background">
             <MethodBadge method={method} />
-            <code className="code-inline">{path}</code>
+            <code className="min-w-0 break-all text-xs font-mono">{path}</code>
           </div>
           <Button
             onClick={() => void handleSend()}
@@ -300,58 +287,65 @@ function TryItDialog({
           </Button>
         </div>
 
-        <div className="flex flex-1 min-h-0 overflow-hidden">
-          <div className="flex-1 overflow-visible p-5 space-y-4 border-r border-border">
-            <div className="rounded-xl border border-border overflow-visible">
-              <div className="px-4 py-2.5 bg-muted/30 border-b border-border">
-                <span className="text-sm font-semibold text-foreground">
-                  {t("apiRef.tryIt.authTitle")}
-                </span>
-              </div>
-              <div className="p-4 space-y-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold text-foreground">
-                        {path === "/v1/messages"
-                          ? "x-api-key"
-                          : path.startsWith("/api/admin")
-                            ? "X-Admin-Key"
-                            : "Authorization"}
-                      </span>
-                      <span className="code-inline text-[11px]">string</span>
-                    </div>
-                    <Badge
-                      variant="destructive"
-                      className="mt-1 text-[10px] px-1.5 py-0"
-                    >
-                      {t("apiRef.tryIt.required")}
-                    </Badge>
-                  </div>
-                  <input
-                    className="w-52 px-3 py-1.5 rounded-lg border border-border bg-background text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/30"
-                    placeholder={t("apiRef.tryIt.keyPlaceholder")}
-                    value={token}
-                    onChange={(e) => setToken(e.target.value)}
-                  />
+        <div className="grid md:grid-cols-2 flex-1 min-h-0 overflow-y-auto">
+          <div className="min-w-0 p-4 space-y-4 md:border-r border-b md:border-b-0 border-border">
+            {path !== "/health" && (
+              <div className="rounded-xl border border-border overflow-visible">
+                <div className="px-4 py-2.5 bg-muted/30 border-b border-border">
+                  <span className="text-sm font-semibold text-foreground">
+                    {t("apiRef.tryIt.authTitle")}
+                  </span>
                 </div>
-                {allKeys.length > 0 && (
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-muted-foreground shrink-0">
-                      {t("apiRef.tryIt.selectKey")}
-                    </span>
-                    <Select
+                <div className="p-4 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold text-foreground">
+                          {path.startsWith("/v1/messages")
+                            ? "x-api-key"
+                            : path.startsWith("/api/admin")
+                              ? "X-Admin-Key"
+                              : "Authorization"}
+                        </span>
+                        <span className="code-inline text-[11px]">string</span>
+                      </div>
+                      <Badge
+                        variant="destructive"
+                        className="mt-1 text-[10px] px-1.5 py-0"
+                      >
+                        {t("apiRef.tryIt.required")}
+                      </Badge>
+                    </div>
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      data-1p-ignore="true"
+                      data-lpignore="true"
+                      aria-label={t("apiRef.tryIt.keyPlaceholder")}
+                      className="w-full min-w-0 px-3 py-1.5 rounded-lg border border-border bg-background text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/30"
+                      placeholder={t("apiRef.tryIt.keyPlaceholder")}
                       value={token}
-                      onValueChange={(v) => setToken(v)}
-                      options={allKeys.map((k) => ({
-                        label: `${k.name} — ${k.key.length > 20 ? k.key.slice(0, 8) + "..." + k.key.slice(-4) : k.key}`,
-                        value: k.key,
-                      }))}
+                      onChange={(e) => setToken(e.target.value)}
                     />
                   </div>
-                )}
+                  {allKeys.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs text-muted-foreground shrink-0">
+                        {t("apiRef.tryIt.selectKey")}
+                      </span>
+                      <Select
+                        value={token}
+                        onValueChange={(v) => setToken(v)}
+                        options={allKeys.map((k) => ({
+                          label: `${k.name} — ${k.key.length > 20 ? k.key.slice(0, 8) + "..." + k.key.slice(-4) : k.key}`,
+                          value: k.key,
+                        }))}
+                      />
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
+            )}
 
             {method !== "GET" && method !== "DELETE" && (
               <div className="rounded-xl border border-border overflow-hidden">
@@ -361,7 +355,8 @@ function TryItDialog({
                   </span>
                 </div>
                 <textarea
-                  className="w-full h-56 resize-none border-0 bg-background p-4 text-[15px] leading-relaxed outline-none"
+                  aria-label={t("apiRef.tryIt.requestBody")}
+                  className="w-full min-w-0 h-56 resize-y border-0 bg-background p-4 text-[15px] leading-relaxed outline-none"
                   style={{ fontFamily: "var(--font-mono)" }}
                   value={body}
                   onChange={(e) => setBody(e.target.value)}
@@ -371,7 +366,7 @@ function TryItDialog({
             )}
           </div>
 
-          <div className="flex-1 overflow-auto p-5">
+          <div className="min-w-0 p-4">
             <div className="rounded-xl border border-border overflow-hidden h-full flex flex-col">
               <div className="px-4 py-2.5 bg-muted/30 border-b border-border flex items-center justify-between">
                 <span className="text-sm font-semibold text-foreground">
@@ -395,7 +390,7 @@ function TryItDialog({
               <div className="flex-1 overflow-auto">
                 {response ? (
                   <pre
-                    className="p-4 text-[15px] text-foreground leading-relaxed whitespace-pre-wrap"
+                    className="p-4 text-[13px] text-foreground leading-relaxed whitespace-pre-wrap break-all max-h-[480px]"
                     style={{ fontFamily: "var(--font-mono)" }}
                   >
                     <code>{response}</code>
@@ -422,110 +417,192 @@ function TryItDialog({
 }
 
 export const EndpointDoc = memo(function EndpointDoc({
-  id,
-  method,
-  path,
-  title,
-  description,
-  curlExample,
-  responseExamples,
-  defaultBody,
-  apiKey,
-  baseUrl,
-  allKeys,
+  endpoint,
+  apiKey = "",
+  baseUrl = "",
+  allKeys = [],
+  activeId,
 }: {
-  id?: string;
-  method: string;
-  path: string;
-  title: string;
-  description: string;
-  curlExample: string;
-  responseExamples: { code: number; body: string }[];
-  defaultBody?: string;
+  endpoint: EndpointSpec;
   apiKey?: string;
   baseUrl?: string;
   allKeys?: { name: string; key: string }[];
+  activeId: string;
 }) {
-  const { t } = useTranslation();
-  const [activeStatus, setActiveStatus] = useState(
-    responseExamples[0]?.code ?? 200,
-  );
-  const activeBody =
-    responseExamples.find((r) => r.code === activeStatus)?.body ?? "";
+  const { t, i18n } = useTranslation();
+  const zh = i18n.language.startsWith("zh");
+  const { id, method, path, title, description, responses, parameters } =
+    endpoint;
+  const [expanded, setExpanded] = useState(activeId === id);
+  const [activeResponse, setActiveResponse] = useState(0);
+  const [activeRequest, setActiveRequest] = useState(0);
   const [tryOpen, setTryOpen] = useState(false);
-  const supportsJsonBody =
-    method === "GET" ||
-    method === "DELETE" ||
-    !defaultBody ||
-    (() => {
-      try {
-        JSON.parse(defaultBody);
-        return true;
-      } catch {
-        return false;
-      }
-    })();
+  useEffect(() => {
+    if (activeId === id) setExpanded(true);
+  }, [activeId, id]);
+  const requests = [
+    {
+      label: endpoint.transport === "websocket" ? "WebSocket" : "cURL",
+      lang: "bash",
+      content: endpoint.curl,
+    },
+    ...(endpoint.requestExamples || []),
+  ];
   const supportsTryIt =
+    !endpoint.transport &&
     !path.includes(":") &&
-    path !== "/api/admin/accounts/import" &&
-    supportsJsonBody;
-
+    path !== "/api/admin/accounts/import";
+  const response = responses[activeResponse] || responses[0];
   return (
-    <Card id={id} className="mb-4 scroll-mt-20 py-0">
-      <CardContent className="p-4">
-        <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h3 className="text-[17px] font-bold text-foreground">{title}</h3>
-            <p className="mt-0.5 text-[13px] text-muted-foreground">
-              {description}
-            </p>
-          </div>
-        </div>
-
-        <div className="mb-4 flex items-center gap-2 rounded-lg border border-border bg-muted/30 p-2.5">
-          <MethodBadge method={method} />
-          <code className="code-inline min-w-0 flex-1 truncate">{path}</code>
-          <Button
-            size="sm"
-            onClick={() => setTryOpen(true)}
-            disabled={!supportsTryIt}
-            className="h-8 gap-1.5 bg-emerald-600 text-white shrink-0 hover:bg-emerald-600/90 dark:bg-emerald-500/90 dark:hover:bg-emerald-500"
-          >
-            <Play className="size-3.5" />
-            {t("apiRef.tryIt.button")}
-          </Button>
-        </div>
-
-        {supportsTryIt && tryOpen && (
-          <TryItDialog
-            open={tryOpen}
-            onClose={() => setTryOpen(false)}
-            method={method}
-            path={path}
-            defaultBody={defaultBody || ""}
-            apiKey={apiKey || ""}
-            baseUrl={baseUrl || ""}
-            allKeys={allKeys || []}
+    <article id={id} className="docs-endpoint">
+      <div className="docs-endpoint-heading">
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          aria-expanded={expanded}
+          aria-controls={`${id}-body`}
+        >
+          <ChevronRight
+            className={`size-4 shrink-0 text-muted-foreground ${expanded ? "rotate-90" : ""}`}
           />
-        )}
-
-        <div className="mb-4">
-          <CodeBlock label="cURL" content={curlExample} lang="bash" />
-        </div>
-
-        <div className="code-panel">
-          <div className="code-panel-header px-4 pt-1.5 pb-0">
-            <StatusTabs
-              tabs={responseExamples.map((r) => ({ code: r.code }))}
-              active={activeStatus}
-              onChange={setActiveStatus}
-            />
+          <MethodBadge method={method} sm />
+          <span className="min-w-0">
+            <strong>{title}</strong>
+            <span className="docs-endpoint-path">{path}</span>
+          </span>
+        </button>
+        <a
+          href={`#${id}`}
+          aria-label={`${zh ? "章节链接" : "Section link"}: ${title}`}
+          title={zh ? "章节链接" : "Section link"}
+          className="p-2 rounded-md text-muted-foreground hover:text-primary"
+        >
+          <LinkIcon className="size-3.5" />
+        </a>
+      </div>
+      {expanded && (
+        <div id={`${id}-body`} className="docs-endpoint-body">
+          <p className="docs-endpoint-description">{description}</p>
+          {!!parameters?.length && (
+            <>
+              <h4 className="docs-endpoint-subtitle">
+                {zh ? "请求参数" : "Request parameters"}
+              </h4>
+              <div className="docs-table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">
+                        {zh ? "参数 / 类型" : "Parameter / type"}
+                      </th>
+                      <th scope="col">{zh ? "说明" : "Description"}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {parameters.map((p) => (
+                      <tr key={p.name}>
+                        <td>
+                          <code>{p.name}</code>
+                          <div className="text-xs text-muted-foreground">
+                            {p.type} ·{" "}
+                            {p.required
+                              ? zh
+                                ? "必填"
+                                : "required"
+                              : zh
+                                ? "可选"
+                                : "optional"}
+                          </div>
+                        </td>
+                        <td>
+                          {p.description}
+                          {p.defaultValue && (
+                            <div className="text-xs text-muted-foreground">
+                              {zh ? "默认" : "Default"}:{" "}
+                              <code>{p.defaultValue}</code>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <h4 className="docs-endpoint-subtitle">
+              {zh ? "请求示例" : "Request example"}
+            </h4>
+            {supportsTryIt && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setTryOpen(true)}
+              >
+                <Play className="size-3.5" />
+                {t("apiRef.tryIt.button")}
+              </Button>
+            )}
           </div>
-          <pre className="code-panel-pre max-h-[340px] bg-transparent text-[13px]">
-            <code>{activeBody}</code>
-          </pre>
+          {requests.length > 1 && (
+            <div
+              className="docs-example-tabs"
+              aria-label={zh ? "请求示例" : "Request examples"}
+            >
+              {requests.map((request, i) => (
+                <button
+                  type="button"
+                  key={request.label}
+                  aria-pressed={i === activeRequest}
+                  onClick={() => setActiveRequest(i)}
+                >
+                  {request.label}
+                </button>
+              ))}
+            </div>
+          )}
+          <CodeBlock {...(requests[activeRequest] || requests[0])} />
+          <h4 className="docs-endpoint-subtitle">
+            {zh ? "响应示例" : "Response examples"}
+          </h4>
+          <div
+            className="docs-example-tabs"
+            aria-label={zh ? "响应示例" : "Response examples"}
+          >
+            {responses.map((r, i) => (
+              <button
+                type="button"
+                key={`${r.code}-${i}`}
+                aria-pressed={i === activeResponse}
+                onClick={() => setActiveResponse(i)}
+              >
+                {r.code}
+                {r.label ? ` · ${r.label}` : ""}
+              </button>
+            ))}
+          </div>
+          {response && (
+            <CodeBlock
+              label={`${response.code}${response.label ? ` · ${response.label}` : ""}`}
+              content={response.body}
+              lang={response.lang || "json"}
+            />
+          )}
         </div>
-      </CardContent>
-    </Card>
+      )}
+      {tryOpen && (
+        <TryItDialog
+          open={tryOpen}
+          onClose={() => setTryOpen(false)}
+          method={method}
+          path={path}
+          defaultBody={endpoint.defaultBody || ""}
+          apiKey={apiKey}
+          baseUrl={baseUrl}
+          allKeys={allKeys}
+        />
+      )}
+    </article>
   );
 });

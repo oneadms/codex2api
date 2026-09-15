@@ -161,7 +161,7 @@ func newContinuousRetryLocalNativeStore(t *testing.T, upstreamURL string) (*auth
 	t.Cleanup(func() { resinCfg.Store(previousResin) })
 	SetResinConfig(&ResinConfig{BaseURL: upstreamURL, PlatformName: "test"})
 	store := auth.NewStore(nil, nil, &database.SystemSettings{
-		MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 0, MaxRateLimitRetries: 0,
+		MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.5", MaxRetries: 0, MaxRateLimitRetries: 0,
 	})
 	t.Cleanup(store.Stop)
 	account := &auth.Account{DBID: 1, AccessToken: "test-access", PlanType: "pro", AccountID: "test-account"}
@@ -251,7 +251,7 @@ func TestContinuousRetryReplayLimitFailureTerminatesEveryHTTPSSEProtocolLocally(
 		},
 		{
 			name: "native responses", path: "/v1/responses",
-			body:          `{"model":"gpt-5.4","input":"hello","stream":true}`,
+			body:          `{"model":"gpt-5.5","input":"hello","stream":true}`,
 			wantMarkers:   []string{`"type":"response.failed"`, `"type":"server_error"`, `"code":"internal_error"`},
 			forbidMarkers: []string{"private-local-partial", `"type":"response.completed"`},
 			invoke:        func(h *Handler, c *gin.Context) { h.Responses(c) },
@@ -259,7 +259,7 @@ func TestContinuousRetryReplayLimitFailureTerminatesEveryHTTPSSEProtocolLocally(
 		},
 		{
 			name: "chat completions", path: "/v1/chat/completions",
-			body:          `{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"stream":true}`,
+			body:          `{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}],"stream":true}`,
 			wantMarkers:   []string{`"type":"server_error"`, `"code":"internal_error"`},
 			forbidMarkers: []string{"private-local-partial", "data: [DONE]", `"finish_reason":"stop"`},
 			invoke:        func(h *Handler, c *gin.Context) { h.ChatCompletions(c) },
@@ -470,7 +470,7 @@ func newContinuousRetryNativeTransportScenario(t *testing.T) (*auth.Store, *cont
 	}
 
 	store := auth.NewStore(nil, nil, &database.SystemSettings{
-		MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 1, MaxRateLimitRetries: 0,
+		MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.5", MaxRetries: 1, MaxRateLimitRetries: 0,
 	})
 	t.Cleanup(store.Stop)
 	store.SetRetryIntervalMS(0)
@@ -495,12 +495,12 @@ func TestContinuousRetryBufferedStickyTransportRetryKeepsSameAccount(t *testing.
 	tests := []continuousRetryLocalEndpointCase{
 		{
 			name: "responses", path: "/v1/responses",
-			body:   `{"model":"gpt-5.4","input":"hello","stream":true}`,
+			body:   `{"model":"gpt-5.5","input":"hello","stream":true}`,
 			invoke: func(h *Handler, c *gin.Context) { h.Responses(c) },
 		},
 		{
 			name: "chat completions", path: "/v1/chat/completions",
-			body:   `{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"stream":true}`,
+			body:   `{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}],"stream":true}`,
 			invoke: func(h *Handler, c *gin.Context) { h.ChatCompletions(c) },
 		},
 		{
@@ -821,7 +821,7 @@ func TestContinuousRetryImageReplayLimitIsLocalProtocolFailure(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
-	responsesBody := []byte(`{"model":"gpt-5.4","input":"draw a test image","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`)
+	responsesBody := []byte(`{"model":"gpt-5.5","input":"draw a test image","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`)
 	handler.forwardImagesRequest(ctx, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", true)
 
 	body := recorder.Body.String()
@@ -868,7 +868,7 @@ func TestContinuousRetryResponsesWSReplayLimitWritesErrorBeforeClose(t *testing.
 	}
 
 	store := auth.NewStore(nil, nil, &database.SystemSettings{
-		MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 0, MaxRateLimitRetries: 0,
+		MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.5", MaxRetries: 0, MaxRateLimitRetries: 0,
 	})
 	t.Cleanup(store.Stop)
 	account := &auth.Account{DBID: 1, AccessToken: "test-access", PlanType: "pro", AccountID: "test-account"}
@@ -883,7 +883,7 @@ func TestContinuousRetryResponsesWSReplayLimitWritesErrorBeforeClose(t *testing.
 	server := httptest.NewServer(router)
 	t.Cleanup(server.Close)
 
-	requestBody := []byte(`{"type":"response.create","model":"gpt-5.4","input":"hello"}`)
+	requestBody := []byte(`{"type":"response.create","model":"gpt-5.5","input":"hello"}`)
 	headers := http.Header{"X-Codex2API-Affinity-Key": []string{"local-ws-affinity"}}
 	affinityKey := sessionAffinityKey(resolveRequestSessionIdentity(headers, requestBody).affinityID, 0)
 	conn, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", headers)

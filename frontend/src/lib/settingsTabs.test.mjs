@@ -60,11 +60,14 @@ test('channel-specific cards live in their channel tab, shared cards in general'
 
 test('tab and section labels exist in zh and en', () => {
   for (const locale of [zh, en]) {
-    for (const key of ['codex', 'codexDesc', 'claude', 'antigravity', 'grok', 'appearance', 'general', 'generalDesc', 'codexQuota', 'codexQuotaDesc', 'codexTransport', 'codexTransportDesc', 'codexClient', 'codexClientDesc']) {
+    for (const key of ['codex', 'codexDesc', 'claude', 'antigravity', 'grok', 'appearance', 'general', 'generalDesc', 'codexQuota', 'codexQuotaDesc', 'codexTransport', 'codexTransportDesc', 'codexClient', 'codexClientDesc', 'codexImages', 'codexImagesDesc']) {
       assert.equal(typeof locale.settings?.nav?.[key], 'string', `settings.nav.${key}`)
     }
     assert.equal(typeof locale.settings?.codexClientTitle, 'string')
     assert.equal(typeof locale.settings?.codexClientDesc, 'string')
+    for (const key of ['codexImagesDriver', 'codexImagesDriverDesc', 'codexImagesMainModel', 'codexImagesMainModelDesc', 'codexImagesDefault', 'codexImagesScope', 'codexImagesFallback']) {
+      assert.equal(typeof locale.settings?.[key], 'string', `settings.${key}`)
+    }
   }
 })
 

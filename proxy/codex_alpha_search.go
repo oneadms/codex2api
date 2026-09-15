@@ -65,6 +65,13 @@ func (h *Handler) CodexAlphaSearchHandler(c *gin.Context) {
 	if h.inspectPromptFilterOpenAI(c, rawBody, "/v1/alpha/search", model) {
 		return
 	}
+	continuousRetryPolicy := continuousRetryPolicyForCall(nil)
+	rememberContinuousRetryPolicyForRequest(c, continuousRetryPolicy)
+	stopRetryDeadline := installContinuousRetryHTTPDeadline(c, continuousRetryPolicy, continuousRetryProtocolResponses)
+	defer stopRetryDeadline()
+	stopRetryKeepalive := installContinuousRetryHTTPInformationalKeepalive(c)
+	defer stopRetryKeepalive()
+	activateContinuousRetryKeepalive(c.Request.Context())
 
 	apiKeyID := requestAPIKeyID(c)
 	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
@@ -173,16 +180,19 @@ func ForwardCodexAlphaSearch(ctx context.Context, account *auth.Account, proxyUR
 	if viaResin {
 		req.Header.Set("X-Resin-Account", ResinAccountID(account))
 	} else {
-		// 未启用 Resin 时沿用账号代理和池化 transport，避免泄漏 uTLS 连接。
+		// 未启用 Resin 时改用账号代理的池化 transport，避免泄漏 uTLS 连接。
+		// 池化而非每次新建，避免一次性 uTLS transport 泄漏连接（issue #446）。
 		client = getCodexMaintenanceClient(account, proxyURL)
 	}
-	resp, err := client.Do(req)
+	resp, err := executeHTTPWithContinuousRetryKeepalive(reqCtx, func() (*http.Response, error) {
+		return client.Do(req)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("codex search request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, codexAlphaSearchBodyLimit))
+	body, err := readAllLimitedWithContinuousRetryKeepalive(reqCtx, resp.Body, codexAlphaSearchBodyLimit)
 	if err != nil {
 		return nil, fmt.Errorf("read codex search response: %w", err)
 	}

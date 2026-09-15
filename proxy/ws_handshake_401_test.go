@@ -61,7 +61,7 @@ func TestResponsesWebsocketHandshake401CoolsAccountAndLogs401(t *testing.T) {
 	store.AddAccount(account)
 	handler := NewHandler(store, db, nil, nil)
 
-	body := []byte(`{"model":"gpt-5.4","stream":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+	body := []byte(`{"model":"gpt-5.5","stream":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()

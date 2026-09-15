@@ -27,6 +27,7 @@ Run it as a full **PostgreSQL + Redis** production stack or as a single-containe
 <tr><td><b>Visual admin console</b></td><td>The embedded React / Vite dashboard covers account import and testing, API keys, proxy pools, image studio (text-to-image + image-to-image), prompt filtering, usage analytics, operations, scheduler board, and system settings.</td></tr>
 <tr><td><b>Two deployment shapes</b></td><td>Use PostgreSQL + Redis for production or SQLite + Memory for lightweight single-node deployments; Docker images, source builds, local development, and the interactive deploy script are ready to use. SQLite mode binds to <code>127.0.0.1</code> by default for security.</td></tr>
 <tr><td><b>Billing and observability</b></td><td>Per-account 5h/7d windowed USD cost tracking, credit quota support, API key usage tracking, OAuth PKCE token acquisition, prompt filtering, and a usage dashboard with request logs and trend charts.</td></tr>
+<tr><td><b>Quality check</b></td><td>Compare selected accounts, models, and reasoning effort with an editable pelican-on-a-bicycle HTML/SVG animation challenge. Run up to three background tests across accounts, keep persistent test history, and review isolated animation previews, source, timing/token metrics, and HTML downloads.</td></tr>
 </table>
 
 ---
@@ -69,32 +70,6 @@ Run it as a full **PostgreSQL + Redis** production stack or as a single-containe
 
 ---
 
-## Sponsors
-
-> Want to appear here? Open an issue on GitHub.
-
-<table>
-<tr>
-<td width="180" align="center" valign="middle"><a href="https://www.fastaitoken.com/register"><img src="assets/fastaitoken-logo.jpg" width="90" alt="FastAIToken"></a></td>
-<td valign="middle"><b><a href="https://www.fastaitoken.com/register">FastAIToken</a></b> is a developer-first AI API gateway providing unified access to leading models including OpenAI, Claude, and Gemini. Fully OpenAI-API compatible and works seamlessly with Claude Code, Codex, Gemini CLI, Cherry Studio, Cline, and Continue. With a 1:1 top-up ratio (¥1 = $1 API credit) and routes ranging from 0.02× OpenAI (limited time) to 1.2× Claude Max, plus a public status page and 24/7 human support. Enterprise-ready with invoice support and 99% SLA dedicated account pools.</td>
-</tr>
-</table>
-
-<table>
-<tr>
-<td width="180" align="center" valign="middle"><a href="https://aixor.org/sign-up?aff=LaKs"><img src="assets/aixor-logo.jpg" width="160" alt="AiXor"></a></td>
-<td valign="middle"><b><a href="https://aixor.org/sign-up?aff=LaKs">AiXor</a></b> provides cost-effective AI model API access with support for mainstream models including OpenAI, Claude, and Gemini. Top-up ratio of ¥0.2 = $1 credit, bringing per-call costs down to under 10% of official pricing. Plans start at ¥25/28 days; the Premium plan (¥129/28 days) includes about $4,752 in model credit (plans cover OpenAI models only), with high-concurrency support and 95%+ SLA stability.</td>
-</tr>
-</table>
-
-<table>
-<tr>
-<td width="180" align="center" valign="middle"><a href="https://ai.centos.hk"><b>星辰·AI</b></a></td>
-<td valign="middle"><b><a href="https://ai.centos.hk">星辰·AI</a></b> provides stable and high-speed relay services for Claude Code / Codex / Gemini, suitable for both individual developers and teams.</td>
-</tr>
-</table>
-
----
 
 ## Contents
 
@@ -195,6 +170,7 @@ Antigravity accounts are managed as a dedicated Google channel with browser/impo
 | Document | Description | Path |
 | --- | --- | --- |
 | [Chinese README](README.zh-CN.md) | Main Chinese project overview | `README.zh-CN.md` |
+| [Usage Guide](docs/USAGE.md) | Client setup, SDK examples, media workflows, and troubleshooting | `docs/USAGE.md` |
 | [API Documentation](docs/API.md) | API endpoints, request and response examples, error codes | `docs/API.md` |
 | [Antigravity Integration](docs/ANTIGRAVITY.md) | Google OAuth and experimental API Key channel, models, risks, and protocol status | `docs/ANTIGRAVITY.md` |
 | [Deployment Guide](docs/DEPLOYMENT.md) | Deployment modes, upgrade guide, backup and restore | `docs/DEPLOYMENT.md` |
@@ -317,18 +293,18 @@ Each successful budget change receives a read-only generation and is polled by e
 
 ## Public API
 
-| Endpoint | Description |
-| --- | --- |
-| `POST /v1/chat/completions` | Chat Completions style endpoint |
-| `POST /v1/responses` | Responses style endpoint |
-| `POST /v1/images/generations` | OpenAI Images generation endpoint (gpt-image-2 via Codex, grok-imagine via Grok) |
-| `POST /v1/images/edits` | OpenAI Images edit endpoint |
-| `POST /v1/videos/generations` | Grok Imagine video generation (async, returns `request_id`) |
-| `POST /v1/videos/edits` / `POST /v1/videos/extensions` | Grok Imagine video edit / extension |
-| `GET /v1/videos/:id` | Poll video task status (`video.url` rewritten to the gateway content proxy) |
-| `GET /v1/videos/:id/content` | Download the generated video through the gateway (Range supported) |
-| `GET /v1/models` | List available models (includes gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-image-2, grok-imagine-*, etc.) |
-| `GET /health` | Health check |
+| Endpoint                                               | Description                                                                                                                           |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /v1/chat/completions`                            | Chat Completions style endpoint                                                                                                       |
+| `POST /v1/responses`                                   | Responses style endpoint                                                                                                              |
+| `POST /v1/images/generations`                          | OpenAI Images generation endpoint (gpt-image-2 / gpt-image-2.5 via Codex, grok-imagine via Grok)                                                      |
+| `POST /v1/images/edits`                                | OpenAI Images edit endpoint                                                                                                           |
+| `POST /v1/videos/generations`                          | Grok Imagine video generation (async, returns `request_id`)                                                                           |
+| `POST /v1/videos/edits` / `POST /v1/videos/extensions` | Grok Imagine video edit / extension                                                                                                   |
+| `GET /v1/videos/:id`                                   | Poll video task status (`video.url` rewritten to the gateway content proxy)                                                           |
+| `GET /v1/videos/:id/content`                           | Download the generated video through the gateway (Range supported)                                                                    |
+| `GET /v1/models`                                       | List available models (includes gpt-6-astra, gpt-5.6-sol/terra/luna, gpt-5.5, gpt-5.3-codex-spark, gpt-image-2, grok-imagine-*, etc.) |
+| `GET /health`                                          | Health check                                                                                                                          |
 
 > **Pricing**: gpt-5.5 is billed at $5.00/M input and $30.00/M output (standard tier). Priority tier: $12.50/M input, $75.00/M output. Other models follow pricing rules in the billing engine.
 

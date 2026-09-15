@@ -640,7 +640,7 @@ func TestResponsesWebSocketRoutesAndRecordsKnownCompaction(t *testing.T) {
 	}
 	defer conn.Close()
 
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"model":"gpt-5.4","input":[{"type":"compaction","encrypted_content":"ws-known-state"}]}`)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"model":"gpt-5.5","input":[{"type":"compaction","encrypted_content":"ws-known-state"}]}`)); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -703,7 +703,7 @@ func TestResponsesWebSocketPortableCompactionReturnsToNormalPoolScheduling(t *te
 	}
 	defer conn.Close()
 
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"model":"gpt-5.4","input":[{"type":"compaction","encrypted_content":"`+portableCompactionFixture+`"}]}`)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"model":"gpt-5.5","input":[{"type":"compaction","encrypted_content":"`+portableCompactionFixture+`"}]}`)); err != nil {
 		t.Fatal(err)
 	}
 	select {

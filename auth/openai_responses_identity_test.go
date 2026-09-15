@@ -30,14 +30,14 @@ func TestApplyOpenAIResponsesIdentityChangeRecoversRuntimeAccount(t *testing.T) 
 	store.AddAccount(acc)
 	store.MarkModelCooldown(acc, "gpt-5.6", time.Hour, "rate_limited")
 
-	if !store.ApplyOpenAIResponsesConfig(acc.DBID, acc.BaseURL, "", []string{"gpt-5.6", "gpt-5.6-mini"}, "", "auto", "") {
+	if !store.ApplyOpenAIResponsesConfig(acc.DBID, acc.BaseURL, "", []string{"gpt-5.6", "gpt-5.6-mini"}, "", "auto", "", "") {
 		t.Fatal("config-only ApplyOpenAIResponsesConfig returned false")
 	}
 	if atomic.LoadInt32(&acc.Disabled) == 0 || acc.IsAvailable() {
 		t.Fatal("config-only update unexpectedly cleared old identity failure state")
 	}
 
-	if !store.ApplyOpenAIResponsesConfig(acc.DBID, acc.BaseURL, "sk-new", acc.Models, "", "auto", "") {
+	if !store.ApplyOpenAIResponsesConfig(acc.DBID, acc.BaseURL, "sk-new", acc.Models, "", "auto", "", "") {
 		t.Fatal("identity ApplyOpenAIResponsesConfig returned false")
 	}
 	if atomic.LoadInt32(&acc.Disabled) != 0 || !acc.IsAvailable() {
@@ -139,7 +139,7 @@ func TestApplyOpenAIResponsesConfigUsesPersistedAPIKeySemantics(t *testing.T) {
 	}, ""); err != nil {
 		t.Fatalf("config-only UpdateOpenAIResponsesAccount: %v", err)
 	}
-	if !store.ApplyOpenAIResponsesConfig(accountID, "https://relay.example", "", []string{"gpt-5.6", "gpt-5.6-mini"}, "", "auto", "") {
+	if !store.ApplyOpenAIResponsesConfig(accountID, "https://relay.example", "", []string{"gpt-5.6", "gpt-5.6-mini"}, "", "auto", "", "") {
 		t.Fatal("config-only ApplyOpenAIResponsesConfig returned false")
 	}
 	acc := store.FindByID(accountID)
@@ -154,7 +154,7 @@ func TestApplyOpenAIResponsesConfigUsesPersistedAPIKeySemantics(t *testing.T) {
 	if err := db.UpdateOpenAIResponsesAccount(ctx, accountID, "relay", map[string]interface{}{"api_key": ""}, ""); err != nil {
 		t.Fatalf("UpdateOpenAIResponsesAccount: %v", err)
 	}
-	if !store.ApplyOpenAIResponsesConfig(accountID, "https://relay.example", "", []string{"gpt-5.6"}, "", "auto", "") {
+	if !store.ApplyOpenAIResponsesConfig(accountID, "https://relay.example", "", []string{"gpt-5.6"}, "", "auto", "", "") {
 		t.Fatal("ApplyOpenAIResponsesConfig returned false")
 	}
 

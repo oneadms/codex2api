@@ -1,3 +1,4 @@
+import { qualityTestFilterQuery, type QualityTestJob, type QualityTestJobsFilter, type QualityTestJobsResponse, type QualityTestPrompt } from './lib/qualityTest.ts'
 import type {
   AccountEventTrendPoint,
   AccountPortalAuthURLResponse,
@@ -88,6 +89,10 @@ import type {
   MessageResponse,
   ModelSyncResponse,
   RefreshAllModelsResponse,
+  ProxyRiskScoreSnapshot,
+  ProxyRiskScoringProfile,
+  ProxyRiskScoringJob,
+  PromptLogRetention,
   ModelPricingOverride,
 	OfficialPricingSyncConfig,
 	OfficialPricingSyncResult,
@@ -119,6 +124,7 @@ import type {
   PromptReviewTestResponse,
   PromptReviewAPIKeysResponse,
   PublicAPIKeyUsageResponse,
+  ImageStudioQuota,
   RecycleBinAccountsResponse,
   ResetCreditsDetailResponse,
   WhamDailyUsageResponse,
@@ -131,6 +137,8 @@ import type {
   CPAExportEntry,
   SystemSettings,
   ObservedInstructionsResponse,
+  CodexUserAgentCatalog,
+  CodexUserAgentPreview,
   UpdateAccountSchedulerRequest,
   UpdateAPIKeyRequest,
   UpdatePromptFilterNewAPIBindingRequest,
@@ -499,6 +507,7 @@ export type UsageLogQueryParams = {
   apiKeyId?: string
   accountId?: string
   fast?: string
+  ultra?: string
   stream?: string
   compact?: string
   hasCompactionHistory?: string
@@ -522,6 +531,7 @@ export function buildUsageLogSearchParams(params: UsageLogQueryParams) {
   if (params.apiKeyId) search.set('api_key_id', params.apiKeyId)
   if (params.accountId) search.set('account_id', params.accountId)
   if (params.fast) search.set('fast', params.fast)
+  if (params.ultra) search.set('ultra', params.ultra)
   if (params.stream) search.set('stream', params.stream)
   if (params.compact) search.set('compact', params.compact)
   if (params.hasCompactionHistory) search.set('has_compaction_history', params.hasCompactionHistory)
@@ -556,6 +566,8 @@ export const api = {
     if (params.pageSize) search.set('page_size', String(params.pageSize))
     return requestAPIKeyUsage<PublicAPIKeyUsageResponse>(`/summary?${search.toString()}`, apiKey)
   },
+  getPortalImageQuota: (apiKey: string) =>
+    requestImageStudioPortal<ImageStudioQuota>('/quota', apiKey),
   createPortalImageJob: (apiKey: string, data: CreateImageJobPayload) =>
     requestImageStudioPortal<ImageJobResponse>('/jobs', apiKey, { method: 'POST', body: JSON.stringify(data) }),
   createPortalImageEditJob: (apiKey: string, data: CreateImageJobPayload) =>
@@ -618,6 +630,7 @@ export const api = {
     if (params.healthTier) searchParams.set('health_tier', params.healthTier)
     if (params.proxyUrl) searchParams.set('proxy_url', params.proxyUrl)
     if (params.proxyFilter && params.proxyFilter !== 'all') searchParams.set('proxy_filter', params.proxyFilter)
+    if (params.subscription && params.subscription !== 'all') searchParams.set('subscription', params.subscription)
     if (params.sort) searchParams.set('sort', params.sort)
     if (params.order) searchParams.set('order', params.order)
     return request<AccountsPageResponse>(`/accounts?${searchParams.toString()}`, { signal })
@@ -938,6 +951,11 @@ export const api = {
       claude_usage_windows?: import('./types').ClaudeUsageWindow[]
       claude_usage_windows_probed?: boolean
     }>(`/accounts/${id}/usage/refresh`, { method: 'POST' }),
+  // 订阅状态:GET 只读服务端已算好的状态对象;POST 立即向订阅提供方查一次(绕过后台节流,30s 内重复点会 429)。
+  getAccountSubscription: (id: number, signal?: AbortSignal) =>
+    request<{ supported: boolean; subscription?: import('./types').SubscriptionStatus }>(`/accounts/${id}/subscription`, { signal }),
+  refreshAccountSubscription: (id: number) =>
+    request<import('./types').SubscriptionRefreshResponse>(`/accounts/${id}/subscription/refresh`, { method: 'POST', timeoutMs: 30_000 }),
   updateAccountScheduler: (id: number, data: UpdateAccountSchedulerRequest) =>
     request<MessageResponse>(`/accounts/${id}/scheduler`, { method: 'PATCH', body: JSON.stringify(data) }),
   // 设置 OAuth 账号的支持模型白名单;空数组表示清空(该账号可调度所有模型)。返回归一化后的白名单。
@@ -1182,17 +1200,17 @@ export const api = {
     const search = buildOpsErrorSearchParams(params)
     return requestBlob(`/ops/errors/export?${search.toString()}`)
   },
-  getUsageStats: (params: {
+  // 区间统计卡片可携带与 /usage/logs 同一套维度筛选(账号/密钥/模型/端点/搜索等),
+  // 后端会忽略状态类参数;累计字段始终全局。
+  getUsageStats: (params: Partial<Omit<UsageLogQueryParams, 'start' | 'end'>> & {
     start?: string
     end?: string
-    channel?: string
     detail?: 'summary'
     signal?: AbortSignal
   } = {}) => {
-    const searchParams = new URLSearchParams()
-    if (params.start) searchParams.set('start', params.start)
-    if (params.end) searchParams.set('end', params.end)
-    if (params.channel) searchParams.set('channel', params.channel)
+    const searchParams = buildUsageLogSearchParams({ ...params, start: params.start ?? '', end: params.end ?? '' })
+    if (!params.start) searchParams.delete('start')
+    if (!params.end) searchParams.delete('end')
     if (params.detail) searchParams.set('detail', params.detail)
     const qs = searchParams.toString()
     return request<UsageStats>(qs ? `/usage/stats?${qs}` : '/usage/stats', {
@@ -1358,6 +1376,10 @@ export const api = {
     }>('/settings/claude-config/cli-version/sync', { method: 'POST' }),
   getObservedInstructions: () =>
     request<ObservedInstructionsResponse>('/settings/observed-instructions'),
+  getCodexUserAgentCatalog: () =>
+    request<CodexUserAgentCatalog>('/settings/codex-user-agent/catalog'),
+  previewCodexUserAgent: (data: { config: string; client_compat_mode?: string; codex_min_cli_version?: string }) =>
+    request<CodexUserAgentPreview>('/settings/codex-user-agent/preview', { method: 'POST', body: JSON.stringify(data) }),
   updateSettings: (data: Partial<SystemSettings>) =>
     request<SystemSettings>('/settings', { method: 'PUT', body: JSON.stringify(data) }),
   uploadBackground: (file: File) => {
@@ -1431,6 +1453,11 @@ export const api = {
 		request<PromptPolicyIncidentDetailResponse>(`/prompt-policy/incidents/${encodeURIComponent(incidentId)}`),
 	getPromptPolicyAuditHealth: () =>
 		request<PromptPolicyAuditHealth>('/prompt-policy/incidents/health'),
+	getPromptLogRetention: () => request<PromptLogRetention>('/prompt-filter/retention'),
+	updatePromptLogRetention: (retentionDays: number) =>
+		request<PromptLogRetention>('/prompt-filter/retention', { method: 'PUT', body: JSON.stringify({ retention_days: retentionDays }) }),
+	runPromptLogRetention: () =>
+		request<{ started: boolean; retention_days: number }>('/prompt-filter/retention/run', { method: 'POST' }),
 	clearPromptPolicyIncidents: () =>
 		request<MessageResponse>('/prompt-policy/incidents', { method: 'DELETE' }),
 	deletePromptPolicyIncident: (incidentId: string) =>
@@ -1509,6 +1536,8 @@ export const api = {
     request<import('./types').PromptIntelligenceAIProvidersResponse>('/prompt-filter/intelligence/ai-providers'),
   analyzePromptIntelligenceCandidate: (id: number, data: import('./types').PromptIntelligenceAIAnalysisRequest) =>
     request<import('./types').PromptIntelligenceAIAnalysisResponse>(`/prompt-filter/intelligence/candidates/${id}/analyze`, { method: 'POST', body: JSON.stringify(data) }),
+  suggestPromptIntelligenceCandidateDraft: (id: number, data: { provider: import('./types').PromptIntelligenceAIProvider; model?: string; api_key_id?: number }) =>
+    request<import('./types').PromptIntelligenceDraftSuggestion>(`/prompt-filter/intelligence/candidates/${id}/draft/suggest`, { method: 'POST', body: JSON.stringify(data), timeoutMs: 90_000 }),
   applyPromptIntelligenceIdentityUpdate: (candidateId: number, evidenceId: number) =>
     request<{ identity_update: import('./types').PromptIdentityUpdateResult }>(`/prompt-filter/intelligence/candidates/${candidateId}/identity-updates/${evidenceId}/apply`, { method: 'POST' }),
   rollbackPromptIntelligenceIdentityUpdate: (candidateId: number, evidenceId: number) =>
@@ -1520,6 +1549,24 @@ export const api = {
   dismissPromptIntelligenceCandidate: (id: number) =>
     request<import('./types').PromptIntelligenceCandidate>(`/prompt-filter/intelligence/candidates/${id}/dismiss`, { method: 'POST' }),
   getModels: () => request<ModelsResponse>('/models'),
+  getQualityTestOptions: (id: number, signal?: AbortSignal) =>
+    request<{ models: string[]; reasoning_efforts: string[] }>(`/accounts/${id}/quality-test/options`, { signal }),
+  getQualityTestPrompts: (signal?: AbortSignal) =>
+    request<{ prompts: QualityTestPrompt[] }>('/quality-test-prompts', { signal }),
+  createQualityTestPrompt: (body: { name: string; prompt: string }) =>
+    request<{ prompt: QualityTestPrompt }>('/quality-test-prompts', { method: 'POST', body: JSON.stringify(body) }),
+  updateQualityTestPrompt: (id: number, body: { name?: string; prompt?: string }) =>
+    request<{ prompt: QualityTestPrompt }>(`/quality-test-prompts/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteQualityTestPrompt: (id: number) =>
+    request<{ message: string }>(`/quality-test-prompts/${id}`, { method: 'DELETE' }),
+  createQualityTest: (accountId: number, body: { model: string; reasoning_effort: string; prompt: string; prompt_id?: number; preset_key?: string; preset_name?: string }) =>
+    request<{ job: QualityTestJob }>(`/accounts/${accountId}/quality-test`, { method: 'POST', body: JSON.stringify(body) }),
+  getQualityTests: (page = 1, filter: QualityTestJobsFilter = {}, signal?: AbortSignal) =>
+    request<QualityTestJobsResponse>(`/quality-tests?${qualityTestFilterQuery(page, filter)}`, { signal }),
+  getQualityTest: (id: number, signal?: AbortSignal) =>
+    request<{ job: QualityTestJob }>(`/quality-tests/${id}`, { signal }),
+  cancelQualityTest: (id: number) =>
+    request<{ job: QualityTestJob }>(`/quality-tests/${id}/cancel`, { method: 'POST' }),
   syncModels: () => request<ModelSyncResponse>('/models/sync', { method: 'POST' }),
   syncCodexCLIVersion: () =>
     request<{
@@ -1650,6 +1697,26 @@ export const api = {
     request<{ message: string; cleaned: number; unbound: number }>('/proxies/clean-error', { method: 'POST' }),
   autoBalanceProxies: (data: { channel?: UpstreamChannel; mode?: 'unbound' | 'all'; max_per_proxy?: number; proxy_ids?: number[] }) =>
     request<AutoBalanceProxiesResult>('/proxies/auto-balance', { method: 'POST', body: JSON.stringify(data) }),
+  listProxyRiskScoringProfiles: () =>
+    request<{ profiles: ProxyRiskScoringProfile[] }>('/proxy-risk-scoring/profiles'),
+  createProxyRiskScoringProfile: (data: Partial<ProxyRiskScoringProfile> & { scamalytics_key?: string }) =>
+    request<ProxyRiskScoringProfile>('/proxy-risk-scoring/profiles', { method: 'POST', body: JSON.stringify(data) }),
+  updateProxyRiskScoringProfile: (id: number, data: Partial<ProxyRiskScoringProfile> & { scamalytics_key?: string }) =>
+    request<ProxyRiskScoringProfile>(`/proxy-risk-scoring/profiles/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteProxyRiskScoringProfile: (id: number) =>
+    request<MessageResponse>(`/proxy-risk-scoring/profiles/${id}`, { method: 'DELETE' }),
+  testProxyRiskScoringProfile: (id: number) =>
+    request<{ success: boolean; latency_ms?: number; score?: number | null; risk_level?: string; credits_remaining?: number | null; snapshot?: ProxyRiskScoreSnapshot | null; message?: string; error?: string }>(`/proxy-risk-scoring/profiles/${id}/test`, { method: 'POST' }),
+  startProxyRiskScoringJob: (data: { profile_id?: number; proxy_ids?: number[]; force?: boolean }) =>
+    request<ProxyRiskScoringJob>('/proxies/risk-score', { method: 'POST', body: JSON.stringify(data) }),
+  getProxyRiskScoringJob: (id: string, after = 0) =>
+    request<ProxyRiskScoringJob>(`/proxies/risk-score/jobs/${encodeURIComponent(id)}${after > 0 ? `?after=${after}` : ''}`),
+  cancelProxyRiskScoringJob: (id: string) =>
+    request<MessageResponse>(`/proxies/risk-score/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+  getProxyRiskScore: (id: number) =>
+    request<ProxyRiskScoreSnapshot | { score: null; status: 'unscored' }>(`/proxies/${id}/risk-score`),
+  getProxyRiskScoreHistory: (id: number, profileId: number, page = 1, pageSize = 20) =>
+    request<{ items: ProxyRiskScoreSnapshot[]; total: number; page: number; page_size: number }>(`/proxies/${id}/risk-score/history?profile_id=${profileId}&page=${page}&page_size=${pageSize}`),
   testProxy: (url: string, id?: number, lang?: string) =>
     request<ProxyTestResult>('/proxies/test', { method: 'POST', body: JSON.stringify({ url, id, lang }) }),
   // OAuth
@@ -1671,6 +1738,7 @@ export interface ProxyRow {
   test_location: string
   test_latency_ms: number
   test_status: 'untested' | 'success' | 'error'
+  risk_score?: ProxyRiskScoreSnapshot | null
   /** 绑定到该代理的账号数(服务端聚合,前端免拉全量账号)。 */
   bound_count: number
 }

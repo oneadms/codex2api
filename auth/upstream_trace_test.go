@@ -33,3 +33,16 @@ func TestUpstreamTraceConfigAndProxySnapshots(t *testing.T) {
 		t.Fatal("outbox snapshot dropped trace configuration")
 	}
 }
+
+func TestValidateUpstreamRequestIDHeaderRejectsCredentialHeaders(t *testing.T) {
+	for _, name := range []string{"Authorization", "x-api-key", "anthropic-auth-token", "X-Goog-Api-Key", "cookie"} {
+		if err := ValidateUpstreamRequestIDHeader(name); err == nil {
+			t.Errorf("%s must be rejected as a credential header", name)
+		}
+	}
+	for _, name := range []string{"", "x-request-id", "cf-ray"} {
+		if err := ValidateUpstreamRequestIDHeader(name); err != nil {
+			t.Errorf("%q must be accepted: %v", name, err)
+		}
+	}
+}

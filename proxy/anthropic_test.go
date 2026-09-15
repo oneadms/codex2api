@@ -506,7 +506,7 @@ func TestTranslateAnthropicToCodexCanonicalizesDynamicMappedModelAlias(t *testin
 		"messages":[{"role":"user","content":"hello"}]
 	}`)
 
-	body, originalModel, err := TranslateAnthropicToCodexWithModels(raw, `{"claude-haiku-4-5-20251001":"gpt5-4"}`, []string{"gpt-5.4", "gpt-5.4-mini"})
+	body, originalModel, err := TranslateAnthropicToCodexWithModels(raw, `{"claude-haiku-4-5-20251001":"gpt5-5"}`, []string{"gpt-5.5", "gpt-5.6-luna"})
 	if err != nil {
 		t.Fatalf("TranslateAnthropicToCodexWithModels returned error: %v", err)
 	}
@@ -520,8 +520,8 @@ func TestTranslateAnthropicToCodexCanonicalizesDynamicMappedModelAlias(t *testin
 	if err := json.Unmarshal(body, &out); err != nil {
 		t.Fatalf("unmarshal translated body: %v", err)
 	}
-	if out.Model != "gpt-5.4" {
-		t.Fatalf("translated model = %q, want gpt-5.4", out.Model)
+	if out.Model != "gpt-5.5" {
+		t.Fatalf("translated model = %q, want gpt-5.5", out.Model)
 	}
 }
 
@@ -532,7 +532,7 @@ func TestTranslateAnthropicToCodexDoesNotCanonicalizeDisabledModelAlias(t *testi
 		"messages":[{"role":"user","content":"hello"}]
 	}`)
 
-	body, _, err := TranslateAnthropicToCodexWithModels(raw, `{"claude-haiku-4-5-20251001":"gpt5-4"}`, []string{"gpt-5.4-mini"})
+	body, _, err := TranslateAnthropicToCodexWithModels(raw, `{"claude-haiku-4-5-20251001":"gpt5-5"}`, []string{"gpt-5.6-luna"})
 	if err != nil {
 		t.Fatalf("TranslateAnthropicToCodexWithModels returned error: %v", err)
 	}
@@ -543,8 +543,8 @@ func TestTranslateAnthropicToCodexDoesNotCanonicalizeDisabledModelAlias(t *testi
 	if err := json.Unmarshal(body, &out); err != nil {
 		t.Fatalf("unmarshal translated body: %v", err)
 	}
-	if out.Model != "gpt5-4" {
-		t.Fatalf("translated model = %q, want gpt5-4", out.Model)
+	if out.Model != "gpt5-5" {
+		t.Fatalf("translated model = %q, want gpt5-5", out.Model)
 	}
 }
 

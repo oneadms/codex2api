@@ -85,7 +85,8 @@ func (a *Account) sparkDispatchEligibleLocked(now time.Time) bool {
 	if !a.hasDispatchCredentialLocked() {
 		return false
 	}
-	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) && !isUsageLimitCooldownReason(a.CooldownReason) {
+	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) &&
+		(a.isTransientRateLimitCooldownLocked() || !isUsageLimitCooldownReason(a.CooldownReason)) {
 		return false
 	}
 	return !a.sparkUsageExhaustedLocked(now)
@@ -112,6 +113,9 @@ func (a *Account) SparkDispatchUsageLimited() bool {
 	now := time.Now()
 	if a.Status == StatusError || a.healthTierLocked() == HealthTierBanned || !a.hasDispatchCredentialLocked() {
 		return false
+	}
+	if a.isTransientRateLimitCooldownLocked() && now.Before(a.CooldownUtil) {
+		return true
 	}
 	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) && !isUsageLimitCooldownReason(a.CooldownReason) {
 		return false

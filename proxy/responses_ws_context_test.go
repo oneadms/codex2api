@@ -89,7 +89,7 @@ func TestResponsesWSContextSurvivesMultiTurnFallback(t *testing.T) {
 				}
 				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(sse))}, nil
 			}
-			store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+			store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.5"})
 			store.AddAccount(&auth.Account{DBID: 1, AccessToken: "test-token", PlanType: "plus", AccountID: "test-account"})
 			handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
 			router := gin.New()
@@ -112,7 +112,7 @@ func TestResponsesWSContextSurvivesMultiTurnFallback(t *testing.T) {
 				if err := json.Unmarshal([]byte(input), &request); err != nil {
 					t.Fatal(err)
 				}
-				request["type"], request["model"], request["prompt_cache_key"] = "response.create", "gpt-5.4", "har-context-test"
+				request["type"], request["model"], request["prompt_cache_key"] = "response.create", "gpt-5.5", "har-context-test"
 				if err := conn.WriteJSON(request); err != nil {
 					t.Fatal(err)
 				}
@@ -257,7 +257,7 @@ func TestResponsesWSContextMissingFailsClosedAndReleasesAccount(t *testing.T) {
 		attempts.Add(1)
 		return &http.Response{StatusCode: http.StatusBadRequest, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":{"code":"previous_response_not_found"}}`))}, nil
 	}
-	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.5"})
 	t.Cleanup(store.Stop)
 	account := &auth.Account{DBID: 1, AccessToken: "test-token", PlanType: "plus", AccountID: "test-account"}
 	store.AddAccount(account)
@@ -271,7 +271,7 @@ func TestResponsesWSContextMissingFailsClosedAndReleasesAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5.4","previous_response_id":"resp_missing","input":[{"type":"custom_tool_call_output","call_id":"call_missing","output":"result"}]}`)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5.5","previous_response_id":"resp_missing","input":[{"type":"custom_tool_call_output","call_id":"call_missing","output":"result"}]}`)); err != nil {
 		t.Fatal(err)
 	}
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -353,7 +353,7 @@ func TestResponsesWSContextOnDemandBootstrapsFromStoreSignal(t *testing.T) {
 		sse := wsContextTestSSE(id, `{"type":"message","id":"msg_x","role":"assistant","content":[{"type":"output_text","text":"ok"}]}`)
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(sse))}, nil
 	}
-	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.5"})
 	t.Cleanup(store.Stop)
 	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "test-token", PlanType: "plus", AccountID: "test-account"})
 	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
@@ -378,12 +378,12 @@ func TestResponsesWSContextOnDemandBootstrapsFromStoreSignal(t *testing.T) {
 	}
 	// 缓存写入发生在终态帧写给客户端之后；帧循环是串行的，所以上一轮的写入
 	// 决定在下一轮终态到达时必然已经落定，断言按这个顺序排。
-	send(`{"type":"response.create","model":"gpt-5.4","store":false,"input":[{"type":"message","role":"user","content":"full context every turn"}]}`)
-	send(`{"type":"response.create","model":"gpt-5.4","input":[{"type":"message","role":"user","content":"incremental root"}]}`)
+	send(`{"type":"response.create","model":"gpt-5.5","store":false,"input":[{"type":"message","role":"user","content":"full context every turn"}]}`)
+	send(`{"type":"response.create","model":"gpt-5.5","input":[{"type":"message","role":"user","content":"incremental root"}]}`)
 	if getResponseCache("anon", "resp_1") != nil {
 		t.Fatal("store:false root turn was cached under on_demand")
 	}
-	send(`{"type":"response.create","model":"gpt-5.4","previous_response_id":"resp_2","input":[{"type":"message","role":"user","content":"second turn"}]}`)
+	send(`{"type":"response.create","model":"gpt-5.5","previous_response_id":"resp_2","input":[{"type":"message","role":"user","content":"second turn"}]}`)
 	if getResponseCache("anon", "resp_2") == nil {
 		t.Fatal("continuation-capable root turn was not cached under on_demand")
 	}

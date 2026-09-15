@@ -35,13 +35,13 @@ func TestParseOfficialCodexModelIDs(t *testing.T) {
 		<div data-model-slug="gpt-4.1"></div>
 	`
 	models, skipped := ParseOfficialCodexModelIDs(html)
-	for _, model := range []string{"gpt-5.5", "gpt-5.4", "gpt-5.3-codex-spark"} {
+	for _, model := range []string{"gpt-5.5", "gpt-5.3-codex-spark"} {
 		if !slices.Contains(models, model) {
 			t.Fatalf("parsed models missing %q in %v", model, models)
 		}
 	}
-	// 5.3 只保留 spark；gpt-5.2 及以下、gpt-5.2-codex、gpt-4.1 均被过滤。
-	for _, model := range []string{"gpt-5.2", "gpt-5.2-codex", "gpt-4.1"} {
+	// gpt-5.4 全系下线；5.3 只保留 spark；gpt-5.2 及以下、gpt-5.2-codex、gpt-4.1 均被过滤。
+	for _, model := range []string{"gpt-5.4", "gpt-5.2", "gpt-5.2-codex", "gpt-4.1"} {
 		if !slices.Contains(skipped, model) {
 			t.Fatalf("skipped models missing %q in %v", model, skipped)
 		}
@@ -289,14 +289,14 @@ func TestLearnModelsFromManifest_AllKnownIsNoOp(t *testing.T) {
 	}
 }
 
-// 上游同步/学习的模型准入策略：5.4+ 放行，5.3 仅 spark，5.2 及以下下线。
+// 上游同步/学习的模型准入策略：5.5+ 放行，5.3 仅 spark，5.4 全系与 5.2 及以下下线。
 func TestIsAllowedUpstreamCodexModel_Policy(t *testing.T) {
 	cases := map[string]bool{
 		"gpt-6-astra":         true,
 		"gpt-5.6-sol":         true,
 		"gpt-5.5":             true,
-		"gpt-5.4":             true,
-		"gpt-5.4-mini":        true,
+		"gpt-5.4":             false,
+		"gpt-5.4-mini":        false,
 		"gpt-6.0":             true,
 		"gpt-5.3-codex-spark": true,
 		"gpt-5.3-codex":       false,
@@ -398,9 +398,9 @@ func TestIsAllowedUpstreamCodexModelAcceptsMajorOnlyVersions(t *testing.T) {
 			t.Fatalf("%s should be rejected", id)
 		}
 	}
-	models, _ := ParseOfficialCodexModelIDs(`<div data-model-slug="gpt-6-astra"></div> &quot;slug&quot;:[0,&quot;gpt-5.4&quot;]`)
-	if !slices.Contains(models, "gpt-6-astra") || !slices.Contains(models, "gpt-5.4") {
-		t.Fatalf("parsed models missing gpt-6-astra / gpt-5.4: %v", models)
+	models, _ := ParseOfficialCodexModelIDs(`<div data-model-slug="gpt-6-astra"></div> &quot;slug&quot;:[0,&quot;gpt-5.5&quot;]`)
+	if !slices.Contains(models, "gpt-6-astra") || !slices.Contains(models, "gpt-5.5") {
+		t.Fatalf("parsed models missing gpt-6-astra / gpt-5.5: %v", models)
 	}
 }
 
@@ -414,7 +414,7 @@ func TestParseOfficialCodexModelIDsIgnoresNonModelContexts(t *testing.T) {
 		<img src="/images/api/models/gpt-5.6-sol.webp">
 		<astro-island props="{&quot;name&quot;:[0,&quot;gpt-6-astra&quot;],&quot;wallpaperUrl&quot;:[0,&quot;/images/api/models/gpt-6-astra-texture.webp&quot;]}"></astro-island>
 		<div class="not-prose" data-model-slug="gpt-5.6-sol"><code>codex -m gpt-5.6-sol</code></div>
-		<astro-island props="{&quot;slug&quot;:[0,&quot;gpt-5.4-mini&quot;]}"></astro-island>
+		<astro-island props="{&quot;slug&quot;:[0,&quot;gpt-5.6-luna&quot;]}"></astro-island>
 		<astro-island props="{&quot;code&quot;:[0,&quot;codex --model gpt-5.6&quot;]}"></astro-island>
 		<astro-island props="{&quot;code&quot;:[0,&quot;codex exec -m gpt-5.6 \&quot;review\&quot;&quot;]}"></astro-island>
 		<span class="shiki-token">"gpt-5.6"</span>
@@ -422,7 +422,7 @@ func TestParseOfficialCodexModelIDsIgnoresNonModelContexts(t *testing.T) {
 		<script>{"model":"gpt-5.4"}</script>
 	`
 	models, skipped := ParseOfficialCodexModelIDs(html)
-	want := []string{"gpt-6-astra", "gpt-5.6-sol", "gpt-5.4-mini"}
+	want := []string{"gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-luna"}
 	if len(models) != len(want) {
 		t.Fatalf("models = %v, want exactly %v (skipped=%v)", models, want, skipped)
 	}
@@ -487,7 +487,7 @@ func TestApplyOfficialCodexModelSyncPrunesStaleOfficialRows(t *testing.T) {
 		{ID: "gpt-daybreak-blue-latest", Enabled: true, Category: ModelCategoryCodex, Source: ModelSourceUpstreamManifest, APIKeyAuthAvailable: true},
 		{ID: "gpt-7-manual", Enabled: true, Category: ModelCategoryCodex, Source: "manual", APIKeyAuthAvailable: true},
 		// 内置模型即使带 official 来源、页面暂时没列出，也不能删。
-		{ID: "gpt-5.4-mini", Enabled: false, Category: ModelCategoryCodex, Source: ModelSourceOfficialCodexDocs, APIKeyAuthAvailable: true},
+		{ID: "gpt-5.5", Enabled: false, Category: ModelCategoryCodex, Source: ModelSourceOfficialCodexDocs, APIKeyAuthAvailable: true},
 	}
 	if err := db.UpsertModelRegistryRows(ctx, seed); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -511,12 +511,12 @@ func TestApplyOfficialCodexModelSyncPrunesStaleOfficialRows(t *testing.T) {
 	if _, ok := got["gpt-5.6"]; ok {
 		t.Fatal("stale official row gpt-5.6 should be deleted")
 	}
-	for _, keep := range []string{"gpt-daybreak-blue-latest", "gpt-7-manual", "gpt-5.4-mini", "gpt-6-astra", "gpt-5.6-sol"} {
+	for _, keep := range []string{"gpt-daybreak-blue-latest", "gpt-7-manual", "gpt-5.5", "gpt-6-astra", "gpt-5.6-sol"} {
 		if _, ok := got[keep]; !ok {
 			t.Fatalf("row %s should survive the sync", keep)
 		}
 	}
-	if got["gpt-5.4-mini"].Enabled {
+	if got["gpt-5.5"].Enabled {
 		t.Fatal("admin-disabled builtin row must keep enabled=false")
 	}
 	if slices.Contains(result.Models, "gpt-5.6") {

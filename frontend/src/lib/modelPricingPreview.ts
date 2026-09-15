@@ -7,6 +7,7 @@ export type PricingPreviewRate = {
 }
 
 export type ModelPricingPreview = {
+  image?: PricingPreviewRate
   mode: 'single' | 'tiered'
   threshold: number
   standard: PricingPreviewRate
@@ -58,7 +59,10 @@ export function buildModelPricingPreview(
   )
   const priority = hasRate(candidatePriority) ? candidatePriority : null
   const mode = long ? 'tiered' : 'single'
-  const baseExpression = long
+  const image = numberValue(pricing.image_input) > 0 ? rate(pricing.image_input, pricing.cached_image_input, pricing.output) : undefined
+  const baseExpression = image
+    ? `text_input * ${standard.input} + image_input * ${image.input} + cached_text * ${standard.cached} + cached_image * ${image.cached} + image_output * ${image.output}`
+    : long
     ? `len < ${threshold} ? tier("standard", ${rateExpression(standard)}) : tier("long_context", ${rateExpression(long)})`
     : `tier("standard", ${rateExpression(standard)})`
   const withServiceTiers = priority || long
@@ -66,6 +70,7 @@ export function buildModelPricingPreview(
     : baseExpression
 
   return {
+    ...(image ? { image } : {}),
     mode,
     threshold,
     standard,

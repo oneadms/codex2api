@@ -18,7 +18,8 @@ func ValidateUpstreamRequestIDHeader(value string) error {
 		return fmt.Errorf("upstream_request_id_header must be a valid HTTP header name of at most 64 bytes")
 	}
 	switch strings.ToLower(value) {
-	case "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key":
+	case "authorization", "proxy-authorization", "cookie", "set-cookie",
+		"x-api-key", "anthropic-auth-token", "x-goog-api-key":
 		return fmt.Errorf("upstream_request_id_header cannot name a credential header")
 	}
 	return nil

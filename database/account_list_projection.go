@@ -25,7 +25,8 @@ func (db *DB) ListAccountListProjection(ctx context.Context, channel string) ([]
 			traecn_upstream_models jsonb, traecn_model_allowlist jsonb,
 			traecn_model_allowlist_set boolean, traecn_models_synced_at text,
 			claude_usage_probe_at text, claude_usage_probe_error text,
-			claude_auth_kind text
+			claude_auth_kind text,
+			subscription_expires_at text, subscription_sync_state text, subscription_grace_until text
 		)`
 	credentialColumns := `
 		COALESCE(account_public.upstream_type, ''),
@@ -51,7 +52,10 @@ func (db *DB) ListAccountListProjection(ctx context.Context, channel string) ([]
 		COALESCE(account_public.traecn_models_synced_at, ''),
 		COALESCE(account_public.claude_usage_probe_at, ''),
 		COALESCE(account_public.claude_usage_probe_error, ''),
-		COALESCE(account_public.claude_auth_kind, '')`
+		COALESCE(account_public.claude_auth_kind, ''),
+		COALESCE(account_public.subscription_expires_at, ''),
+		COALESCE(account_public.subscription_sync_state, ''),
+		COALESCE(account_public.subscription_grace_until, '')`
 	if db.isSQLite() {
 		upstreamExpr = `LOWER(COALESCE(json_extract(credentials, '$.upstream_type'), ''))`
 		fromClause = `FROM accounts`
@@ -79,7 +83,10 @@ func (db *DB) ListAccountListProjection(ctx context.Context, channel string) ([]
 			COALESCE(json_extract(credentials, '$.traecn_models_synced_at'), ''),
 			COALESCE(json_extract(credentials, '$.claude_usage_probe_at'), ''),
 			COALESCE(json_extract(credentials, '$.claude_usage_probe_error'), ''),
-			COALESCE(json_extract(credentials, '$.claude_auth_kind'), '')`
+			COALESCE(json_extract(credentials, '$.claude_auth_kind'), ''),
+			COALESCE(json_extract(credentials, '$.subscription_expires_at'), ''),
+			COALESCE(json_extract(credentials, '$.subscription_sync_state'), ''),
+			COALESCE(json_extract(credentials, '$.subscription_grace_until'), '')`
 	}
 	where += accountChannelFilterSQL(channel, upstreamExpr)
 	query := `SELECT id, name, type, proxy_url, status, cooldown_reason, cooldown_until,
@@ -118,6 +125,7 @@ func scanAccountListProjection(scanner accountProjectionScanner) (*AccountRow, e
 	var traeCNModelAllowlistSet bool
 	var traeCNModelsSyncedAt string
 	var claudeUsageProbeAt, claudeUsageProbeError, claudeAuthKind string
+	var subscriptionExpiresAt, subscriptionSyncState, subscriptionGraceUntil string
 	var modelsRaw interface{}
 	var hasAPIKey, hasRefreshToken, verifiedEmail bool
 	if err := scanner.Scan(
@@ -130,6 +138,7 @@ func scanAccountListProjection(scanner accountProjectionScanner) (*AccountRow, e
 		&antigravitySyncError, &antigravitySyncWarning, &antigravityPermissions, &antigravityQuota,
 		&traeCNHost, &traeCNUserID, &traeCNUpstreamModelsRaw, &traeCNModelAllowlistRaw, &traeCNModelAllowlistSet, &traeCNModelsSyncedAt,
 		&claudeUsageProbeAt, &claudeUsageProbeError, &claudeAuthKind,
+		&subscriptionExpiresAt, &subscriptionSyncState, &subscriptionGraceUntil,
 	); err != nil {
 		return nil, fmt.Errorf("扫描账号列表投影失败: %w", err)
 	}
@@ -191,6 +200,17 @@ func scanAccountListProjection(scanner accountProjectionScanner) (*AccountRow, e
 	// 所有 Claude 账号都被推断成 oauth,Setup Token 页签恒为 0。
 	if trimmed := strings.TrimSpace(claudeAuthKind); trimmed != "" {
 		row.Credentials["claude_auth_kind"] = trimmed
+	}
+	// 订阅状态筛选按快照行计算业务状态（到期/宽限期/同步状态）;投影缺了这三个键会让
+	// 全部账号被判成"状态未知"。
+	if trimmed := strings.TrimSpace(subscriptionExpiresAt); trimmed != "" {
+		row.Credentials["subscription_expires_at"] = trimmed
+	}
+	if trimmed := strings.TrimSpace(subscriptionSyncState); trimmed != "" {
+		row.Credentials["subscription_sync_state"] = trimmed
+	}
+	if trimmed := strings.TrimSpace(subscriptionGraceUntil); trimmed != "" {
+		row.Credentials["subscription_grace_until"] = trimmed
 	}
 	if models := decodeProjectionStringSlice(modelsRaw); len(models) > 0 {
 		row.Credentials["models"] = models

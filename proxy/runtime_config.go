@@ -20,6 +20,8 @@ const (
 	StreamFlushPolicyImmediate = "immediate"
 	StreamFlushPolicyCoalesce  = "coalesce"
 
+	// FirstTokenModeStrict 已退役：首字统计统一按宽松口径(loose)记录，
+	// 常量仅保留给旧配置/旧库值的兼容归一化。
 	FirstTokenModeStrict = "strict"
 	FirstTokenModeLoose  = "loose"
 
@@ -40,7 +42,7 @@ const (
 	defaultStreamFlushIntervalMS = 20
 	minStreamFlushIntervalMS     = 1
 	maxStreamFlushIntervalMS     = 1000
-	defaultFirstTokenMode        = FirstTokenModeStrict
+	defaultFirstTokenMode        = FirstTokenModeLoose
 	defaultFirstTokenTimeoutSec  = 0
 	maxFirstTokenTimeoutSec      = 600
 	defaultBillingTierPolicy     = BillingTierPolicyActual
@@ -67,6 +69,11 @@ type RuntimeSettings struct {
 	ClientCompatMode      string
 	CodexMinCLIVersion    string
 	CodexUserAgentConfig  string
+	CodexTelemetryEnabled bool
+	// CodexTelemetryTimingDebug 打开模拟遥测的临时计时探针（仅打日志，默认关闭）。
+	CodexTelemetryTimingDebug bool
+	// CodexImagesMainModel 为空时沿用环境变量或内置生图文本驱动模型。
+	CodexImagesMainModel  string
 	StreamFlushPolicy     string
 	StreamFlushIntervalMS int
 	FirstTokenMode        string
@@ -170,6 +177,8 @@ func DefaultRuntimeSettings() RuntimeSettings {
 		ClientCompatMode:                 defaultClientCompatMode,
 		CodexMinCLIVersion:               defaultCodexMinCLIVersion,
 		CodexUserAgentConfig:             DefaultCodexUserAgentConfigJSON(),
+		CodexTelemetryEnabled:            false,
+		CodexTelemetryTimingDebug:        false,
 		StreamFlushPolicy:                defaultStreamFlushPolicy,
 		StreamFlushIntervalMS:            defaultStreamFlushIntervalMS,
 		FirstTokenMode:                   defaultFirstTokenMode,
@@ -238,15 +247,10 @@ func NormalizeStreamFlushPolicy(policy string) string {
 	}
 }
 
-func NormalizeFirstTokenMode(mode string) string {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "", FirstTokenModeStrict:
-		return FirstTokenModeStrict
-	case FirstTokenModeLoose:
-		return FirstTokenModeLoose
-	default:
-		return FirstTokenModeStrict
-	}
+// NormalizeFirstTokenMode 统一返回宽松口径：严格首字开关已取消，旧库/旧请求里
+// 残留的 strict 或任意非法值都按 loose 生效。
+func NormalizeFirstTokenMode(_ string) string {
+	return FirstTokenModeLoose
 }
 
 func NormalizeBillingTierPolicy(policy string) string {
@@ -268,6 +272,7 @@ func NormalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 	settings.BillingTierPolicy = NormalizeBillingTierPolicy(settings.BillingTierPolicy)
 	settings.ModelsListReadMaxBytes = database.NormalizeModelsListReadMaxBytes(settings.ModelsListReadMaxBytes)
 	settings.RequestIsolationMode = NormalizeRequestIsolationMode(settings.RequestIsolationMode)
+	settings.CodexImagesMainModel, _ = NormalizeImagesMainModel(settings.CodexImagesMainModel)
 	if strings.TrimSpace(settings.CodexMinCLIVersion) == "" {
 		settings.CodexMinCLIVersion = defaults.CodexMinCLIVersion
 	} else {
@@ -338,6 +343,9 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.ClientCompatMode = settings.ClientCompatMode
 		next.CodexMinCLIVersion = settings.CodexMinCLIVersion
 		next.CodexUserAgentConfig = settings.CodexUserAgentConfig
+		next.CodexTelemetryEnabled = settings.CodexTelemetryEnabled
+		next.CodexTelemetryTimingDebug = settings.CodexTelemetryTimingDebug
+		next.CodexImagesMainModel = settings.CodexImagesMainModel
 		next.StreamFlushPolicy = settings.StreamFlushPolicy
 		next.StreamFlushIntervalMS = settings.StreamFlushIntervalMS
 		next.FirstTokenMode = settings.FirstTokenMode
@@ -439,9 +447,6 @@ func currentFirstTokenTimeout() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-func currentFirstTokenMode() string {
-	return CurrentRuntimeSettings().FirstTokenMode
-}
 
 // codexContinueThinkingSettings 返回续想折叠开关与最大轮数（一次快照读取）。
 func codexContinueThinkingSettings() (bool, int) {

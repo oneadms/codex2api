@@ -747,7 +747,7 @@ func TestResponsesWebSocketContinuousRetryDeadlineWritesOneErrorAndCloses1013(t 
 	store := auth.NewStore(db, nil, &database.SystemSettings{
 		MaxConcurrency:      2,
 		TestConcurrency:     1,
-		TestModel:           "gpt-5.4",
+		TestModel:           "gpt-5.5",
 		MaxRetries:          0,
 		MaxRateLimitRetries: 0,
 		RetryIntervalMS:     0,
@@ -778,7 +778,7 @@ func TestResponsesWebSocketContinuousRetryDeadlineWritesOneErrorAndCloses1013(t 
 		t.Fatalf("dial Responses websocket: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5.4","input":"hello"}`)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5.5","input":"hello"}`)); err != nil {
 		t.Fatalf("write Responses websocket request: %v", err)
 	}
 	select {

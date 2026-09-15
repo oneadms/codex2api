@@ -214,7 +214,7 @@ func TestResponseCacheOversizeBypassAndRejectionCounters(t *testing.T) {
 }
 
 func TestResponseCacheKnownUnavailableCountsOnlyFinal409(t *testing.T) {
-	raw := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_missing","input":[{"type":"function_call_output","call_id":"call_1","output":"ok"}],"stream":true}`)
+	raw := []byte(`{"model":"gpt-5.5","previous_response_id":"resp_missing","input":[{"type":"function_call_output","call_id":"call_1","output":"ok"}],"stream":true}`)
 
 	t.Run("final memory 409 counts once", func(t *testing.T) {
 		resetResponseCacheStateForTest(testResponseCacheConfig())

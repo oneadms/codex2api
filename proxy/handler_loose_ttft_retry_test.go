@@ -112,7 +112,7 @@ func TestChatCompletionsLooseTTFTDoesNotBlockPreContentContinuousRetry(t *testin
 	store := auth.NewStore(nil, nil, &database.SystemSettings{
 		MaxConcurrency:      1,
 		TestConcurrency:     1,
-		TestModel:           "gpt-5.4",
+		TestModel:           "gpt-5.5",
 		MaxRetries:          0,
 		MaxRateLimitRetries: 0,
 	})
@@ -374,7 +374,7 @@ func TestResponsesWebSocketCatchAllStopsAtExplicitCyberPolicy(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{
 		MaxConcurrency:      1,
 		TestConcurrency:     1,
-		TestModel:           "gpt-5.4",
+		TestModel:           "gpt-5.5",
 		MaxRetries:          0,
 		MaxRateLimitRetries: 0,
 	})
@@ -396,7 +396,7 @@ func TestResponsesWebSocketCatchAllStopsAtExplicitCyberPolicy(t *testing.T) {
 		t.Fatalf("dial Responses websocket: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5.4","input":"hello"}`)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5.5","input":"hello"}`)); err != nil {
 		t.Fatalf("write Responses websocket request: %v", err)
 	}
 
@@ -459,7 +459,7 @@ func TestResponsesWebSocketCatchAllTreatsErrorEventAndEOFAsFailedAttempts(t *tes
 	}
 
 	store := auth.NewStore(nil, nil, &database.SystemSettings{
-		MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 0, MaxRateLimitRetries: 0,
+		MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.5", MaxRetries: 0, MaxRateLimitRetries: 0,
 	})
 	t.Cleanup(store.Stop)
 	for id := int64(1); id <= 3; id++ {
@@ -479,7 +479,7 @@ func TestResponsesWebSocketCatchAllTreatsErrorEventAndEOFAsFailedAttempts(t *tes
 		t.Fatalf("dial Responses websocket: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5.4","input":"hello"}`)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5.5","input":"hello"}`)); err != nil {
 		t.Fatal(err)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -535,7 +535,7 @@ func TestResponsesWebSocketSelectiveRetriesSelectedFailureAfterPartialOutput(t *
 	}
 
 	store := auth.NewStore(nil, nil, &database.SystemSettings{
-		MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 0, MaxRateLimitRetries: 0,
+		MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.5", MaxRetries: 0, MaxRateLimitRetries: 0,
 	})
 	t.Cleanup(store.Stop)
 	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "at-1", PlanType: "pro", AccountID: "acct-1"})
@@ -554,7 +554,7 @@ func TestResponsesWebSocketSelectiveRetriesSelectedFailureAfterPartialOutput(t *
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5.4","input":"hello"}`)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5.5","input":"hello"}`)); err != nil {
 		t.Fatal(err)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -606,7 +606,7 @@ func TestResponsesWebSocketSelectiveReturnsOnlyUnselectedTerminalFailure(t *test
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(sse))}, nil
 	}
 
-	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.5"})
 	t.Cleanup(store.Stop)
 	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "at", PlanType: "pro", AccountID: "acct"})
 	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
@@ -623,7 +623,7 @@ func TestResponsesWebSocketSelectiveReturnsOnlyUnselectedTerminalFailure(t *test
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5.4","input":"hello"}`)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5.5","input":"hello"}`)); err != nil {
 		t.Fatal(err)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -653,7 +653,7 @@ func TestResponsesWebSocketReplayCachesOnlyAfterSuccessfulFilteredWrite(t *testi
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(sse))}, nil
 	}
 
-	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.5"})
 	t.Cleanup(store.Stop)
 	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "at", PlanType: "pro", AccountID: "acct"})
 	filterConfig := promptfilter.DefaultConfig()
@@ -679,7 +679,7 @@ func TestResponsesWebSocketReplayCachesOnlyAfterSuccessfulFilteredWrite(t *testi
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	request := `{"type":"response.create","model":"gpt-5.4","input":[{"type":"message","role":"user","content":"hello"}]}`
+	request := `{"type":"response.create","model":"gpt-5.5","input":[{"type":"message","role":"user","content":"hello"}]}`
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(request)); err != nil {
 		t.Fatal(err)
 	}

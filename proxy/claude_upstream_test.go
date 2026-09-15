@@ -142,7 +142,7 @@ func TestBuildClaudeBetaHeader_HaikuOmitsClaudeCode(t *testing.T) {
 }
 
 func TestBuildClaudeBetaHeader_BodyDriven(t *testing.T) {
-	body := []byte(`{"model":"claude-opus-5","thinking":{"type":"enabled","budget_tokens":1000},"tools":[{"name":"a"}],"context_management":{"edits":[]},"output_config":{"effort":"high"},"system":[{"type":"text","text":"x","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[]}`)
+	body := []byte(`{"model":"claude-opus-5","thinking":{"type":"enabled","budget_tokens":1000},"tools":[{"name":"a"},{"type":"tool_search_tool_regex_20251119","name":"tool_search"}],"context_management":{"edits":[]},"output_config":{"effort":"high"},"system":[{"type":"text","text":"x","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[]}`)
 	got := buildClaudeBetaHeader(nil, auth.DefaultClaudeSecurityConfig(), body)
 	for _, want := range []string{
 		auth.ClaudeCodeBeta, auth.ClaudeOAuthBeta,
@@ -153,6 +153,34 @@ func TestBuildClaudeBetaHeader_BodyDriven(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("缺 body 驱动 beta %s: %s", want, got)
 		}
+	}
+}
+
+// Claude Code 2.1.258 实测:普通工具声明不带 advanced-tool-use,只有工具搜索/
+// 延迟加载/工具用例/程序化调用上线时才带;客户端显式带的仍按白名单透传。
+func TestBuildClaudeBetaHeader_AdvancedToolUseOnlyForAdvancedFeatures(t *testing.T) {
+	const beta = "advanced-tool-use-2025-11-20"
+	plain := []byte(`{"model":"claude-opus-5","tools":[{"name":"Read","input_schema":{"type":"object"}},{"name":"Bash","input_schema":{"type":"object"}}],"messages":[]}`)
+	if got := buildClaudeBetaHeader(nil, auth.DefaultClaudeSecurityConfig(), plain); strings.Contains(got, beta) {
+		t.Fatalf("普通工具声明不应带 %s: %s", beta, got)
+	}
+	for name, body := range map[string]string{
+		"tool_search_tool": `{"model":"claude-opus-5","tools":[{"type":"tool_search_tool_bm25_20251119","name":"tool_search"},{"name":"Read","input_schema":{"type":"object"}}],"messages":[]}`,
+		"defer_loading":    `{"model":"claude-opus-5","tools":[{"name":"Read","input_schema":{"type":"object"},"defer_loading":true}],"messages":[]}`,
+		"input_examples":   `{"model":"claude-opus-5","tools":[{"name":"Read","input_schema":{"type":"object"},"input_examples":[{"path":"a"}]}],"messages":[]}`,
+		"allowed_callers":  `{"model":"claude-opus-5","tools":[{"name":"Read","input_schema":{"type":"object"},"allowed_callers":["code_execution_20250825"]}],"messages":[]}`,
+	} {
+		if got := buildClaudeBetaHeader(nil, auth.DefaultClaudeSecurityConfig(), []byte(body)); !strings.Contains(got, beta) {
+			t.Fatalf("%s 上线时必须带 %s: %s", name, beta, got)
+		}
+	}
+	h := http.Header{}
+	h.Set("anthropic-beta", beta)
+	if got := buildClaudeBetaHeader(h, auth.DefaultClaudeSecurityConfig(), plain); strings.Count(got, beta) != 1 {
+		t.Fatalf("客户端显式带的 %s 应按白名单透传且只出现一次: %s", beta, got)
+	}
+	if claudeBodyUsesAdvancedToolUse([]byte(`{"tools":"not-an-array"}`)) || claudeBodyUsesAdvancedToolUse(nil) {
+		t.Fatal("非法 tools 形态不应判定为高级工具特性")
 	}
 }
 

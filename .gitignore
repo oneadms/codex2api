@@ -30,6 +30,7 @@ Thumbs.db
 .deploy/
 USAGE_WINDOW_LOGIC.md
 .claude/settings.local.json
+.pi
 scripts
 # 上面的 scripts 会匹配任意层级的同名目录;前端构建/CI 用的脚本需要入库。
 !frontend/scripts/
@@ -39,6 +40,7 @@ scripts
 logs/
 AGENTS.md
 CLIProxyAPI/
+CLIProxyAPI-Pro/
 sub2api/
 new-api/
 CPA-Manager-Plus/

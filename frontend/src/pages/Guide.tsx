@@ -53,7 +53,13 @@ const CLIENT_TOOLS: ClientTool[] = [
   },
 ]
 
-const FALLBACK_MODELS = ['gpt-5.5', 'gpt-5.4-mini', 'gpt-5.3-codex', 'claude-sonnet-4-5']
+const FALLBACK_MODELS = [
+  "gpt-5.5",
+  "gpt-5.6-sol",
+  "gpt-5.6-luna",
+  "gpt-6-astra",
+  "claude-sonnet-4-5",
+];
 
 function encodeBase64(text: string): string {
   return btoa(unescape(encodeURIComponent(text)))

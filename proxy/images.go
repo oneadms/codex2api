@@ -15,10 +15,12 @@ import (
 	"log"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/codex2api/auth"
@@ -35,11 +37,26 @@ import (
 )
 
 const (
-	defaultImagesMainModel = "gpt-5.4-mini"
+	// defaultImagesMainModel 是生图链路里驱动 image_generation 工具调用的主模型
+	// (图像本身由 tools[0].model 决定,主模型只负责发起工具调用,token 开销极小)。
+	// 2026-09 起 ChatGPT 账号的 Codex manifest 已不含 gpt-5.4-mini,上游对它直接回
+	// 400 "The 'gpt-5.4-mini' model is not supported when using Codex with a ChatGPT
+	// account",整条生图链路随之全断;free/plus/pro 三档 manifest 均含 gpt-5.6-luna,
+	// 故改用它。系统生图设置或 CODEX_IMAGES_MAIN_MODEL 可覆盖;上游再次下线时,
+	// imagesMainModelFallbacks 会在同一账号上按序换驱动重试,不会把 400 记到生图模型头上。
+	defaultImagesMainModel = "gpt-5.6-luna"
 	defaultImagesToolModel = "gpt-image-2"
 
 	imageModel2KAlias = "gpt-image-2-2k"
 	imageModel4KAlias = "gpt-image-2-4k"
+
+	// imageModel2KSuffix / imageModel4KSuffix 是分辨率档位别名后缀:任意
+	// gpt-image-* 模型都可以带 -2k / -4k(如 gpt-image-2-4k),网关剥掉后缀
+	// 作为 tools[0].model 发上游,并按档位补默认尺寸与超分计划。
+	imageModel2KSuffix = "-2k"
+	imageModel4KSuffix = "-4k"
+
+	imagesMainModelEnv = "CODEX_IMAGES_MAIN_MODEL"
 
 	defaultImages1KSize = "1024x1024"
 	defaultImages2KSize = "2048x2048"
@@ -65,7 +82,6 @@ const (
 	MaxImageEditInputCount = 16
 
 	imageStreamConnectedComment = ": connected\n\n"
-	imageStreamKeepaliveComment = ": keepalive\n\n"
 
 	// imageCloudURLTTL 控制 response_format=url 时返回的预签名云直链有效期。
 	imageCloudURLTTL = time.Hour
@@ -74,7 +90,73 @@ const (
 	imageModelTextMaxBytes        = 600
 )
 
-var imageStreamKeepaliveInterval = 15 * time.Second
+// imagesMainModelFallbacks 是驱动主模型被上游按"不支持"拒绝时的候选序列,
+// 按 free/plus/pro 三档 manifest 的交集从便宜到贵排列。
+var imagesMainModelFallbacks = []string{"gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"}
+
+// ImagesDefaultMainModel 返回未配置系统生图设置时的文本驱动，供后台展示。
+func ImagesDefaultMainModel() string {
+	if value := strings.TrimSpace(os.Getenv(imagesMainModelEnv)); value != "" {
+		return value
+	}
+	return defaultImagesMainModel
+}
+
+// NormalizeImagesMainModel 校验文本驱动名称；空值表示使用部署默认值。
+// 允许尚未同步到模型目录的名称，以便使用中转或新发布的文本模型。
+func NormalizeImagesMainModel(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if len(value) > 128 || strings.IndexFunc(value, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		return "", fmt.Errorf("codex_images_main_model 必须是不超过 128 字节且不含空白的模型名称")
+	}
+	if isImageOnlyModel(value) {
+		return "", fmt.Errorf("codex_images_main_model 必须是文本模型，不能使用图像模型")
+	}
+	return value, nil
+}
+
+// imagesMainModel 在每次构造生图请求时读取配置，后台保存后立即生效。
+// 优先级：系统设置 > 环境变量 > 内置默认值。
+func imagesMainModel() string {
+	if value := CurrentRuntimeSettings().CodexImagesMainModel; value != "" {
+		return value
+	}
+	return ImagesDefaultMainModel()
+}
+
+// imagesMainModelCandidates 返回驱动主模型的完整候选序列(首选 + 回退),去重且
+// 排除生图模型本身。
+func imagesMainModelCandidates() []string {
+	seen := make(map[string]bool, len(imagesMainModelFallbacks)+1)
+	candidates := make([]string, 0, len(imagesMainModelFallbacks)+1)
+	for _, candidate := range append([]string{imagesMainModel()}, imagesMainModelFallbacks...) {
+		key := strings.ToLower(strings.TrimSpace(candidate))
+		if key == "" || seen[key] || isImageOnlyModel(key) {
+			continue
+		}
+		seen[key] = true
+		candidates = append(candidates, strings.TrimSpace(candidate))
+	}
+	return candidates
+}
+
+// nextImagesMainModelAfterUnsupported 判断上游 400 是否在拒绝当前驱动主模型
+// (而不是生图模型或请求内容),是则返回下一个未试过的候选驱动。tried 记录本次请求
+// 已被拒绝的驱动,由调用方跨重试保存。
+func nextImagesMainModelAfterUnsupported(responsesBody, errBody []byte, tried map[string]bool) (string, bool) {
+	current := strings.TrimSpace(gjson.GetBytes(responsesBody, "model").String())
+	rejected := codexUnsupportedModelFromBody(errBody)
+	if current == "" || rejected == "" || !strings.EqualFold(current, rejected) || isImageOnlyModel(rejected) {
+		return "", false
+	}
+	tried[strings.ToLower(current)] = true
+	for _, candidate := range imagesMainModelCandidates() {
+		if !tried[strings.ToLower(candidate)] {
+			return candidate, true
+		}
+	}
+	return "", false
+}
 
 type imageCallResult struct {
 	Result        string
@@ -361,6 +443,34 @@ func isImageOnlyModel(model string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "gpt-image-")
 }
 
+// IsGPTImageModel 判断模型名是否属于 Codex 生图模型族(gpt-image-*),含 -2k/-4k
+// 档位别名与带日期的快照名。供 admin 生图台等外部包复用同一准入判定。
+func IsGPTImageModel(model string) bool {
+	return isImageOnlyModel(model)
+}
+
+// splitImageModelSizeAlias 把 gpt-image-*-2k / -4k 拆成基础模型与档位后缀;
+// 无后缀时返回原模型与空串。
+func splitImageModelSizeAlias(model string) (string, string) {
+	model = strings.TrimSpace(model)
+	lower := strings.ToLower(model)
+	for _, suffix := range []string{imageModel2KSuffix, imageModel4KSuffix} {
+		if strings.HasSuffix(lower, suffix) && len(lower) > len(suffix) {
+			base := model[:len(model)-len(suffix)]
+			if isImageOnlyModel(base) {
+				return base, suffix
+			}
+		}
+	}
+	return model, ""
+}
+
+// isGPTImage2FamilyModel 判断是否 gpt-image-2 世代(含 2.5 flare/sunburst 及其快照名):
+// 这一族共用 1K/2K/4K 尺寸档位与提示词方向推断;更早或未知型号不补默认尺寸。
+func isGPTImage2FamilyModel(model string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "gpt-image-2")
+}
+
 type imageDefaultSizeSet struct {
 	defaultSize   string
 	squareSize    string
@@ -374,30 +484,39 @@ func normalizeImageToolModel(model string) (string, string) {
 
 func normalizeImageToolModelForPrompt(model string, prompt string) (string, string) {
 	model = strings.TrimSpace(model)
-	switch strings.ToLower(model) {
-	case "", defaultImagesToolModel:
-		return defaultImagesToolModel, inferDefaultImageSize(prompt, imageDefaultSizeSet{
-			defaultSize:   defaultImages1KSize,
-			squareSize:    defaultImages1KSize,
-			landscapeSize: defaultImages1KLandscapeSize,
-			portraitSize:  defaultImages1KPortraitSize,
-		})
-	case imageModel2KAlias:
-		return defaultImagesToolModel, inferDefaultImageSize(prompt, imageDefaultSizeSet{
+	if model == "" {
+		model = defaultImagesToolModel
+	}
+	base, tier := splitImageModelSizeAlias(model)
+	if strings.EqualFold(base, defaultImagesToolModel) {
+		base = defaultImagesToolModel
+	}
+	if !isGPTImage2FamilyModel(base) {
+		// gpt-image-1.5 等更早型号或未知名字:原样透传,尺寸交给上游默认。
+		return model, ""
+	}
+	switch tier {
+	case imageModel2KSuffix:
+		return base, inferDefaultImageSize(prompt, imageDefaultSizeSet{
 			defaultSize:   defaultImages2KSize,
 			squareSize:    defaultImages2KSize,
 			landscapeSize: defaultImages2KLandscapeSize,
 			portraitSize:  defaultImages2KPortraitSize,
 		})
-	case imageModel4KAlias:
-		return defaultImagesToolModel, inferDefaultImageSize(prompt, imageDefaultSizeSet{
+	case imageModel4KSuffix:
+		return base, inferDefaultImageSize(prompt, imageDefaultSizeSet{
 			defaultSize:   defaultImages4KSize,
 			squareSize:    defaultImages4KSquareSize,
 			landscapeSize: defaultImages4KLandscapeSize,
 			portraitSize:  defaultImages4KPortraitSize,
 		})
 	default:
-		return model, ""
+		return base, inferDefaultImageSize(prompt, imageDefaultSizeSet{
+			defaultSize:   defaultImages1KSize,
+			squareSize:    defaultImages1KSize,
+			landscapeSize: defaultImages1KLandscapeSize,
+			portraitSize:  defaultImages1KPortraitSize,
+		})
 	}
 }
 
@@ -467,7 +586,7 @@ func setDefaultImageToolSize(tool []byte, defaultSize string) []byte {
 
 func shouldValidateGPTImage2Size(model string) bool {
 	toolModel, _ := normalizeImageToolModel(model)
-	return strings.EqualFold(strings.TrimSpace(toolModel), defaultImagesToolModel)
+	return isGPTImage2FamilyModel(toolModel)
 }
 
 func validateGPTImage2Size(size string) error {
@@ -611,27 +730,25 @@ func normalizeImageIntentText(text string) string {
 	if text == "" {
 		return ""
 	}
-	replacer := strings.NewReplacer(
-		"\r", " ",
-		"\n", " ",
-		"\t", " ",
-		"，", " ",
-		"。", " ",
-		"！", " ",
-		"？", " ",
-		"；", " ",
-		"：", " ",
-		",", " ",
-		".", " ",
-		"!", " ",
-		"?", " ",
-		";", " ",
-		":", " ",
-		"\"", " ",
-		"'", " ",
-		"`", " ",
-	)
-	return strings.Join(strings.Fields(replacer.Replace(text)), " ")
+	previousSpace := false
+	for _, r := range text {
+		if isImageIntentPunctuation(r) || (unicode.IsSpace(r) && (r != ' ' || previousSpace)) {
+			return strings.Join(strings.FieldsFunc(text, func(r rune) bool {
+				return unicode.IsSpace(r) || isImageIntentPunctuation(r)
+			}), " ")
+		}
+		previousSpace = r == ' '
+	}
+	return text
+}
+
+func isImageIntentPunctuation(r rune) bool {
+	switch r {
+	case '，', '。', '！', '？', '；', '：', ',', '.', '!', '?', ';', ':', '"', '\'', '`':
+		return true
+	default:
+		return false
+	}
 }
 
 func containsAnyPhrase(text string, phrases []string) bool {
@@ -847,43 +964,9 @@ func stripResponsesImageGenerationCapabilities(body []byte) []byte {
 		}
 	}
 
-	// 2. Responses Lite: input[].additional_tools.tools[]
-	if input := gjson.GetBytes(body, "input"); input.Exists() && input.IsArray() {
-		items := input.Array()
-		keptItems := make([]interface{}, 0, len(items))
-		mutated := false
-		for _, item := range items {
-			if strings.TrimSpace(item.Get("type").String()) != "additional_tools" {
-				keptItems = append(keptItems, item.Value())
-				continue
-			}
-			nested := item.Get("tools")
-			if !nested.Exists() || !nested.IsArray() {
-				keptItems = append(keptItems, item.Value())
-				continue
-			}
-			keptTools, removed := stripImageGenerationToolsFromArray(nested.Array())
-			if !removed {
-				keptItems = append(keptItems, item.Value())
-				continue
-			}
-			mutated = true
-			if len(keptTools) == 0 {
-				// 载体工具全被剥离：移除整个 additional_tools 项。
-				continue
-			}
-			rebuilt, _ := sjson.SetBytes([]byte(item.Raw), "tools", keptTools)
-			var rebuiltVal interface{}
-			if err := json.Unmarshal(rebuilt, &rebuiltVal); err == nil {
-				keptItems = append(keptItems, rebuiltVal)
-			} else {
-				keptItems = append(keptItems, item.Value())
-			}
-		}
-		if mutated {
-			body, _ = sjson.SetBytes(body, "input", keptItems)
-		}
-	}
+	// 2. Responses Lite: only inspect matching carriers. Ordinary conversation
+	// items stay opaque, including when a different carrier must be rewritten.
+	body = stripResponsesInputImageTools(body)
 
 	// 3. tool_choice：仅删显式指向图片工具的选择
 	if choice := gjson.GetBytes(body, "tool_choice"); choice.Exists() {
@@ -913,6 +996,74 @@ func stripResponsesImageGenerationCapabilities(body []byte) []byte {
 		}
 	}
 	return body
+}
+
+func stripResponsesInputImageTools(body []byte) []byte {
+	// The wildcard admits whitespace around the type, matching the existing
+	// TrimSpace policy, and decodes JSON escapes. It returns only a candidate
+	// carrier rather than copying the entire input just to learn none exists.
+	if !gjson.GetBytes(body, `input.#(type%"*additional_tools*")`).Exists() {
+		return body
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body
+	}
+	items := input.Array()
+	var replacements map[int][]byte
+	for index, item := range items {
+		if strings.TrimSpace(item.Get("type").String()) != "additional_tools" {
+			continue
+		}
+		nested := item.Get("tools")
+		if !nested.IsArray() {
+			continue
+		}
+		kept, removed := stripImageGenerationToolsFromArray(nested.Array())
+		if !removed {
+			continue
+		}
+		var replacement []byte
+		if len(kept) > 0 {
+			var err error
+			replacement, err = sjson.SetBytes([]byte(item.Raw), "tools", kept)
+			if err != nil {
+				continue
+			}
+		}
+		if replacements == nil {
+			replacements = make(map[int][]byte)
+		}
+		replacements[index] = replacement
+	}
+	if len(replacements) == 0 {
+		return body
+	}
+	var encoded bytes.Buffer
+	encoded.Grow(len(input.Raw))
+	encoded.WriteByte('[')
+	written := false
+	for index, item := range items {
+		replacement, changed := replacements[index]
+		if changed && replacement == nil {
+			continue
+		}
+		if written {
+			encoded.WriteByte(',')
+		}
+		if changed {
+			encoded.Write(replacement)
+		} else {
+			encoded.WriteString(item.Raw)
+		}
+		written = true
+	}
+	encoded.WriteByte(']')
+	updated, err := sjson.SetRawBytes(body, "input", encoded.Bytes())
+	if err != nil {
+		return body
+	}
+	return updated
 }
 
 func validateImagesModel(model string) error {
@@ -1377,7 +1528,7 @@ func (h *Handler) imagesEditsFromJSON(c *gin.Context) {
 
 func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte) []byte {
 	req := []byte(`{"instructions":"","stream":true,"reasoning":{"effort":"medium","summary":"auto"},"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"model":"","store":false,"tool_choice":{"type":"image_generation"}}`)
-	req, _ = sjson.SetBytes(req, "model", defaultImagesMainModel)
+	req, _ = sjson.SetBytes(req, "model", imagesMainModel())
 
 	input := []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`)
 	input, _ = sjson.SetBytes(input, "0.content.0.text", prompt)
@@ -1428,6 +1579,7 @@ func (h *Handler) nextImageAccount(c *gin.Context, apiKeyID int64, exclude map[i
 	return h.nextAccountForSessionWithFilter("", apiKeyID, exclude, h.applyScopeBudgetFilter(c, fallbackFilter))
 }
 
+// forwardImagesRequest 执行 Images 请求的账号调度、上游重试、响应聚合和下游输出。
 func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestModel, logModel, logEffectiveModel string, responsesBody []byte, responseFormat, streamPrefix string, stream bool) {
 	if strings.TrimSpace(logModel) == "" {
 		logModel = requestModel
@@ -1448,9 +1600,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 	defer stopRetryDeadline()
 	stopRetryKeepalive := installContinuousRetrySSEKeepalive(c, stream, "text/event-stream")
 	defer stopRetryKeepalive()
-	if continuousRetryBuffersAttempts(continuousRetryPolicy) {
-		activateContinuousRetryKeepalive(c.Request.Context())
-	}
+	activateContinuousRetryKeepalive(c.Request.Context())
 	maxRetries := h.getMaxRetries()
 	maxRateLimitRetries := h.getMaxRateLimitRetries()
 	generalRetries := 0
@@ -1461,6 +1611,9 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 	continuousRetryActive := false
 	var sameAccountRetryID int64
 	sameAccountEmptyRetried := make(map[int64]bool)
+	// 驱动主模型被上游拒绝("The 'X' model is not supported ...")时换下一个候选驱动
+	// 在同一账号上重试;记录已拒绝的驱动避免绕圈。
+	rejectedMainModels := make(map[string]bool)
 
 	// 仅在 response_format=url 且配置了云存储时启用：上传图片到对象存储、
 	// 登记进图库并返回预签名直链。否则 urlFor 为 nil，沿用 base64/data URL。
@@ -1510,7 +1663,11 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 				return
 			}
 			waitFilter := applyAffinityGroupRouting(c, sessionIdentity, h.withModelCooldownFilter(requestModel, imageCapableAccountFilter))
-			account, stickyProxyURL = h.waitForRetryAccountAvailable(c.Request.Context(), "", apiKeyID, retryExclusions.ForSelection(), h.applyScopeBudgetFilter(c, waitFilter), false, dispatchPolicyForModel(requestModel))
+			var selectionErr error
+			account, stickyProxyURL, selectionErr = h.waitForRetryAccountAvailable(c.Request.Context(), "", apiKeyID, retryExclusions.ForSelection(), h.applyScopeBudgetFilter(c, waitFilter), false, dispatchPolicyForModel(requestModel))
+			if writeSchedulerQueueError(c, selectionErr, continuousRetryProtocolResponses) {
+				return
+			}
 			if account != nil && c.Request.Context().Err() != nil {
 				h.store.Release(account)
 				if continuousRetryDeadlineExceeded(c.Request.Context()) {
@@ -1596,7 +1753,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			errBody, _ := io.ReadAll(resp.Body)
+			errBody, _ := readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
 			rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 			resp.Body.Close()
 			if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
@@ -1609,6 +1766,36 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			SyncCodexUsageState(h.store, account, resp)
 			h.store.Release(account)
 			logUpstreamError(inboundEndpoint, resp.StatusCode, logModel, account.ID(), errBody)
+			if resp.StatusCode == http.StatusBadRequest {
+				// 400 拒绝的是驱动主模型而非生图模型:不能按 (账号, 生图模型) 冷却——那会把
+				// 唯一能生图的账号整体拉黑 30 分钟;换下一个候选驱动在同一账号上重试。
+				if nextMainModel, ok := nextImagesMainModelAfterUnsupported(responsesBody, errBody, rejectedMainModels); ok {
+					rejectedMainModel := gjson.GetBytes(responsesBody, "model").String()
+					log.Printf("账号 %d (plan=%s) 生图驱动模型 %s 被上游拒绝，改用 %s 重试（可通过 %s 覆盖默认驱动）", account.ID(), account.GetPlanType(), rejectedMainModel, nextMainModel, imagesMainModelEnv)
+					if rewritten, err := sjson.SetBytes(responsesBody, "model", nextMainModel); err == nil {
+						responsesBody = rewritten
+					}
+					h.logUsageForRequest(c, &database.UsageLogInput{
+						AccountID:         account.ID(),
+						Endpoint:          inboundEndpoint,
+						Model:             logModel,
+						EffectiveModel:    logEffectiveModel,
+						StatusCode:        resp.StatusCode,
+						DurationMs:        durationMs,
+						InboundEndpoint:   inboundEndpoint,
+						UpstreamEndpoint:  "/v1/responses",
+						Stream:            stream,
+						IsRetryAttempt:    true,
+						AttemptIndex:      attempt + 1,
+						UpstreamErrorKind: "images_main_model_unsupported",
+						ErrorMessage:      usageLogErrorMessage(resp.StatusCode, errBody),
+					})
+					lastStatusCode = resp.StatusCode
+					lastBody = errBody
+					sameAccountRetryID = account.ID()
+					continue
+				}
+			}
 			promptPolicyIncidentID := acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, inboundEndpoint, logModel, errBody, upstreamCyberPolicyAttempt{
 				Transport: upstreamPromptPolicyTransport(stream, false), StatusCode: resp.StatusCode,
 				AccountID: account.ID(), AttemptIndex: attempt + 1,
@@ -1880,6 +2067,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			logInput.OutputTokens = usage.OutputTokens
 			logInput.ReasoningTokens = usage.ReasoningTokens
 			logInput.CachedTokens = usage.CachedTokens
+			logInput.ImageInputTokens, logInput.ImageOutputTokens, logInput.CachedImageInputTokens = usage.ImageInputTokens, usage.ImageOutputTokens, usage.CachedImageInputTokens
 		}
 		if imageCount > 0 && logInput.CompletionTokens == 0 {
 			logInput.CompletionTokens = imageCount
@@ -1939,6 +2127,7 @@ func buildImageErrorUsageLog(account *auth.Account, inboundEndpoint, logModel, l
 		logInput.OutputTokens = usage.OutputTokens
 		logInput.ReasoningTokens = usage.ReasoningTokens
 		logInput.CachedTokens = usage.CachedTokens
+		logInput.ImageInputTokens, logInput.ImageOutputTokens, logInput.CachedImageInputTokens = usage.ImageInputTokens, usage.ImageOutputTokens, usage.CachedImageInputTokens
 	}
 	applyImageUsageLogInfo(logInput, imageLogInfo)
 	return logInput
@@ -2084,10 +2273,10 @@ func (p imageUpscalePlan) enabled() bool {
 // 里最终生效的 size(用户显式值优先,否则别名默认),它是权威目标尺寸。
 func imageUpscalePlanForRequest(requestModel string, responsesBody []byte) imageUpscalePlan {
 	var scale string
-	switch strings.ToLower(strings.TrimSpace(requestModel)) {
-	case imageModel2KAlias:
+	switch _, tier := splitImageModelSizeAlias(requestModel); tier {
+	case imageModel2KSuffix:
 		scale = imageproc.Upscale2K
-	case imageModel4KAlias:
+	case imageModel4KSuffix:
 		scale = imageproc.Upscale4K
 	default:
 		return imageUpscalePlan{}
@@ -2129,6 +2318,16 @@ func applyImageUpscalePlan(ctx context.Context, plan imageUpscalePlan, results [
 		results[i].Size = fmt.Sprintf("%dx%d", upscaled.Width, upscaled.Height)
 	}
 	return results
+}
+
+// applyImageUpscalePlanWithKeepalive 在图片超分期间保持下游连接有协议流量。
+func applyImageUpscalePlanWithKeepalive(ctx context.Context, plan imageUpscalePlan, results []imageCallResult) ([]imageCallResult, error) {
+	if !plan.enabled() {
+		return results, nil
+	}
+	return runWithContinuousRetryKeepalive(ctx, func() []imageCallResult {
+		return applyImageUpscalePlan(ctx, plan, results)
+	})
 }
 
 func imageFormatFromContentType(contentType string) string {
@@ -2484,6 +2683,7 @@ func imageErrorPrefersSameAccountRetry(err error) bool {
 	return outcome != nil && outcome.kind == imageNoOutputEmpty
 }
 
+// collectImagesResponse 聚合 Images 上游 SSE，并在读取期间维持请求级下游保活。
 func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, fallbackModel string, urlFor imageURLBuilder, upscalePlan imageUpscalePlan, requireSuccessfulTerminal ...bool) ([]byte, *UsageInfo, int, imageUsageLogInfo, error) {
 	var (
 		out            []byte
@@ -2497,7 +2697,7 @@ func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, 
 		modelText      strings.Builder
 	)
 	requireTerminal := len(requireSuccessfulTerminal) > 0 && requireSuccessfulTerminal[0]
-	err := ReadSSEStreamWithEvent(body, func(event string, data []byte) bool {
+	err := readSSEStreamWithContinuousRetryKeepalive(ctx, body, func(event string, data []byte) bool {
 		collectImageModelText(&modelText, data)
 		if meta, eventCreatedAt, ok := extractImageMetaFromLifecycleEvent(data); ok {
 			mergeImageMeta(&firstMeta, meta)
@@ -2535,7 +2735,12 @@ func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, 
 				readErr = classifyImageNoOutput(modelText.String())
 				return false
 			}
-			results = applyImageUpscalePlan(ctx, upscalePlan, results)
+			var upscaleErr error
+			results, upscaleErr = applyImageUpscalePlanWithKeepalive(ctx, upscalePlan, results)
+			if upscaleErr != nil {
+				readErr = upscaleErr
+				return false
+			}
 			out, readErr = buildImagesAPIResponse(ctx, results, createdAt, usageRaw, firstMeta, responseFormat, urlFor)
 			imageLogInfo = imageUsageLogInfoFromImages(results)
 			return false
@@ -2566,7 +2771,10 @@ func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, 
 			for i := range pendingResults {
 				mergeImageMeta(&pendingResults[i], firstMeta)
 			}
-			pendingResults = applyImageUpscalePlan(ctx, upscalePlan, pendingResults)
+			pendingResults, readErr = applyImageUpscalePlanWithKeepalive(ctx, upscalePlan, pendingResults)
+			if readErr != nil {
+				return nil, usage, 0, imageLogInfo, readErr
+			}
 			out, readErr = buildImagesAPIResponse(ctx, pendingResults, createdAt, nil, firstMeta, responseFormat, urlFor)
 			if readErr != nil {
 				return nil, usage, 0, imageLogInfo, readErr
@@ -2579,6 +2787,7 @@ func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, 
 	return out, usage, len(gjson.GetBytes(out, "data").Array()), imageLogInfo, nil
 }
 
+// streamImagesResponse 将 Images 上游事件转发为下游 SSE，并插入协议保活帧。
 func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseFormat, streamPrefix, fallbackModel string, start time.Time, upscalePlan imageUpscalePlan, attempts ...*continuousRetryStreamAttempt) (*UsageInfo, int, int, imageUsageLogInfo, bool, error) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
@@ -2697,12 +2906,7 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 	if err := writeKeepalive(imageStreamConnectedComment); err != nil {
 		return nil, 0, 0, imageUsageLogInfo{}, false, getReadErr()
 	}
-	stopKeepalive := startImageStreamKeepalive(c.Request.Context(), imageStreamKeepaliveInterval, func() bool {
-		return writeKeepalive(imageStreamKeepaliveComment) == nil
-	})
-	defer stopKeepalive()
-
-	err := ReadSSEStreamWithEvent(body, func(event string, data []byte) bool {
+	err := readSSEStreamWithContinuousRetryKeepalive(c.Request.Context(), body, func(event string, data []byte) bool {
 		if getReadErr() != nil {
 			return false
 		}
@@ -2765,8 +2969,16 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 				setReadErr(err)
 				return false
 			}
-			// 超分期间 keepalive 注释帧仍在发送,下游连接不会因此空闲超时。
-			results = applyImageUpscalePlan(c.Request.Context(), upscalePlan, results)
+			// 超分期间由独立的请求级保活循环继续发送注释帧。
+			var upscaleErr error
+			results, upscaleErr = applyImageUpscalePlanWithKeepalive(c.Request.Context(), upscalePlan, results)
+			if upscaleErr != nil {
+				if wroteImageOutput {
+					_ = writeEvent("error", buildImagesStreamErrorPayload(upscaleErr.Error()))
+				}
+				setReadErr(upscaleErr)
+				return false
+			}
 			eventName := streamPrefix + ".completed"
 			for _, image := range results {
 				mergeImageMeta(&image, streamMeta)
@@ -2803,7 +3015,6 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 		}
 		return true
 	})
-	stopKeepalive()
 	writeMu.Lock()
 	if finalizeErr := streamWriter.Finalize(); finalizeErr != nil && readErr == nil {
 		if streamAttempt != nil {
@@ -2823,7 +3034,14 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 		_ = writeRaw("", true)
 	}
 	if imageCount == 0 && len(pendingResults) > 0 && getReadErr() == nil && streamAttempt == nil {
-		pendingResults = applyImageUpscalePlan(c.Request.Context(), upscalePlan, pendingResults)
+		var upscaleErr error
+		pendingResults, upscaleErr = applyImageUpscalePlanWithKeepalive(c.Request.Context(), upscalePlan, pendingResults)
+		if upscaleErr != nil {
+			setReadErr(upscaleErr)
+		}
+		if getReadErr() != nil {
+			return usage, imageCount, firstTokenMs, imageLogInfo, wroteImageOutput, getReadErr()
+		}
 		eventName := streamPrefix + ".completed"
 		for _, image := range pendingResults {
 			mergeImageMeta(&image, streamMeta)
@@ -2855,41 +3073,6 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 	}
 	writeMu.Unlock()
 	return usage, imageCount, firstTokenMs, imageLogInfo, wroteImageOutput, getReadErr()
-}
-
-func startImageStreamKeepalive(ctx context.Context, interval time.Duration, writeKeepalive func() bool) func() {
-	if interval <= 0 || writeKeepalive == nil {
-		return func() {}
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	done := make(chan struct{})
-	exited := make(chan struct{})
-	var stopOnce sync.Once
-	go func() {
-		defer close(exited)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				if !writeKeepalive() {
-					return
-				}
-			case <-ctx.Done():
-				return
-			case <-done:
-				return
-			}
-		}
-	}()
-	return func() {
-		stopOnce.Do(func() {
-			close(done)
-		})
-		<-exited
-	}
 }
 
 func imageGenerationFailureError(payload []byte) error {

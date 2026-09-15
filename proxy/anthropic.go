@@ -153,6 +153,28 @@ type anthropicUsage struct {
 	OutputTokens             int `json:"output_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	// OutputTokensDetails 回传 Codex 的 reasoning_tokens。开了 thinking-token-count
+	// beta 的 Claude Code 按 thinking_tokens 拼写读取;output_tokens 已含思考部分,
+	// 这里只是细分而非额外计费。缺失时整个字段省略,不能把"没报"说成 0。
+	OutputTokensDetails *anthropicOutputTokensDetails `json:"output_tokens_details,omitempty"`
+}
+
+type anthropicOutputTokensDetails struct {
+	ThinkingTokens int `json:"thinking_tokens"`
+}
+
+// anthropicThinkingTokensFromUsage 从 Responses usage 取 reasoning_tokens:只认非负
+// 数值,并钳到 output_tokens(思考是输出的子集,不能超过总输出)。
+func anthropicThinkingTokensFromUsage(usage gjson.Result) *anthropicOutputTokensDetails {
+	detail := usage.Get("output_tokens_details.reasoning_tokens")
+	if !detail.Exists() || detail.Type != gjson.Number || detail.Num < 0 {
+		return nil
+	}
+	tokens := int(detail.Int())
+	if output := int(usage.Get("output_tokens").Int()); tokens > output {
+		tokens = max(output, 0)
+	}
+	return &anthropicOutputTokensDetails{ThinkingTokens: tokens}
 }
 
 // ==================== Anthropic 流式事件类型 ====================
@@ -179,25 +201,35 @@ type anthropicDelta struct {
 
 // ==================== 模型映射 ====================
 
-// defaultAnthropicModelMap 默认的模型映射（当数据库中无配置时使用）
+// defaultAnthropicModelMap 默认的模型映射（当数据库中无配置时使用）。
+// 目标只用当前上游仍在线的模型：gpt-5.4 全系、gpt-5.3-codex、gpt-5.2 已下线，
+// 映射过去只会得到 400。opus/sonnet 落到 gpt-5.5（free/plus/pro 三档均可用），
+// haiku 落到 gpt-5.6-luna（上游"更快的模型"档位，同样三档可用）。
 var defaultAnthropicModelMap = map[string]string{
-	"claude-opus-4-6":            "gpt-5.4",
-	"claude-opus-4-6-20250610":   "gpt-5.4",
-	"claude-haiku-4-5-20251001":  "gpt-5.4-mini",
-	"claude-haiku-4-5":           "gpt-5.4-mini",
-	"claude-sonnet-4-6":          "gpt-5.3-codex",
-	"claude-sonnet-4-5-20250929": "gpt-5.2",
-	"claude-opus-4-5-20251101":   "gpt-5.3-codex",
-	"claude-sonnet-4-5-20250514": "gpt-5.4",
-	"claude-sonnet-4-5":          "gpt-5.4",
-	"claude-sonnet-4.5":          "gpt-5.4",
-	"claude-sonnet-4-20250514":   "gpt-5.4",
-	"claude-sonnet-4":            "gpt-5.4",
-	"claude-opus-4-20250514":     "gpt-5.4",
-	"claude-opus-4":              "gpt-5.4",
-	"claude-3-5-sonnet-20241022": "gpt-5.4",
-	"claude-3-5-haiku-20241022":  "gpt-5.4-mini",
+	"claude-opus-4-6":            "gpt-5.5",
+	"claude-opus-4-6-20250610":   "gpt-5.5",
+	"claude-haiku-4-5-20251001":  "gpt-5.6-luna",
+	"claude-haiku-4-5":           "gpt-5.6-luna",
+	"claude-sonnet-4-6":          "gpt-5.5",
+	"claude-sonnet-4-5-20250929": "gpt-5.5",
+	"claude-opus-4-5-20251101":   "gpt-5.5",
+	"claude-sonnet-4-5-20250514": "gpt-5.5",
+	"claude-sonnet-4-5":          "gpt-5.5",
+	"claude-sonnet-4.5":          "gpt-5.5",
+	"claude-sonnet-4-20250514":   "gpt-5.5",
+	"claude-sonnet-4":            "gpt-5.5",
+	"claude-opus-4-20250514":     "gpt-5.5",
+	"claude-opus-4":              "gpt-5.5",
+	"claude-3-5-sonnet-20241022": "gpt-5.5",
+	"claude-3-5-haiku-20241022":  "gpt-5.6-luna",
 }
+
+// defaultAnthropicFallbackModel / defaultAnthropicHaikuFallbackModel 是模糊匹配与
+// 兜底阶段使用的 Codex 模型。
+const (
+	defaultAnthropicFallbackModel      = "gpt-5.5"
+	defaultAnthropicHaikuFallbackModel = "gpt-5.6-luna"
+)
 
 func canonicalizeCodexModel(model string, supportedModels []string) string {
 	trimmed := strings.TrimSpace(model)
@@ -214,15 +246,13 @@ func canonicalizeCodexModel(model string, supportedModels []string) string {
 	aliases := map[string]string{
 		"gpt5-5":       "gpt-5.5",
 		"gpt5.5":       "gpt-5.5",
-		"gpt5-4":       "gpt-5.4",
-		"gpt5.4":       "gpt-5.4",
-		"gpt5-4-mini":  "gpt-5.4-mini",
-		"gpt5.4-mini":  "gpt-5.4-mini",
-		"gpt-5.4mini":  "gpt-5.4-mini",
-		"gpt5-3-codex": "gpt-5.3-codex",
-		"gpt5.3-codex": "gpt-5.3-codex",
-		"gpt5-2":       "gpt-5.2",
-		"gpt5.2":       "gpt-5.2",
+		"gpt5-6-sol":   "gpt-5.6-sol",
+		"gpt5.6-sol":   "gpt-5.6-sol",
+		"gpt5-6-terra": "gpt-5.6-terra",
+		"gpt5.6-terra": "gpt-5.6-terra",
+		"gpt5-6-luna":  "gpt-5.6-luna",
+		"gpt5.6-luna":  "gpt-5.6-luna",
+		"gpt6-astra":   "gpt-6-astra",
 	}
 	if canonical, ok := aliases[lower]; ok {
 		for _, supported := range supportedModels {
@@ -262,17 +292,17 @@ func resolveAnthropicModel(model string, dynamicMappingJSON string, supportedMod
 	// 4. 模糊匹配
 	lower := strings.ToLower(model)
 	if strings.Contains(lower, "haiku") {
-		return "gpt-5.4-mini"
+		return defaultAnthropicHaikuFallbackModel
 	}
 	if strings.Contains(lower, "claude") {
-		return "gpt-5.4"
+		return defaultAnthropicFallbackModel
 	}
 
 	// 5. 默认
 	if len(supportedModels) > 0 {
 		return supportedModels[0]
 	}
-	return "gpt-5.4"
+	return defaultAnthropicFallbackModel
 }
 
 // ==================== Call ID 转换 ====================
@@ -921,6 +951,9 @@ func convertAnthropicTools(tools []anthropicTool) []any {
 		item := map[string]any{
 			"type": "function",
 			"name": t.Name,
+			// Anthropic 工具没有 strict 概念，input_schema 常带可选属性；Responses
+			// 默认 strict=true 会按严格模式校验 schema 而 400，显式关掉。
+			"strict": false,
 		}
 		if t.Description != "" {
 			item["description"] = t.Description
@@ -995,6 +1028,7 @@ type anthropicStreamTranslator struct {
 	inputTokens               int
 	outputTokens              int
 	cachedTokens              int
+	thinkingTokens            *anthropicOutputTokensDetails
 	pingAfterStartSent        bool
 	deltasSincePing           int
 }
@@ -1296,6 +1330,7 @@ func (t *anthropicStreamTranslator) handleCompleted(data []byte) []anthropicStre
 		t.cachedTokens = int(usage.Get("input_tokens_details.cached_tokens").Int())
 		t.inputTokens = max(int(usage.Get("input_tokens").Int())-t.cachedTokens, 0)
 		t.outputTokens = int(usage.Get("output_tokens").Int())
+		t.thinkingTokens = anthropicThinkingTokensFromUsage(usage)
 	}
 
 	// 确定 stop_reason
@@ -1322,6 +1357,7 @@ func (t *anthropicStreamTranslator) handleCompleted(data []byte) []anthropicStre
 			InputTokens:          t.inputTokens,
 			OutputTokens:         t.outputTokens,
 			CacheReadInputTokens: t.cachedTokens,
+			OutputTokensDetails:  t.thinkingTokens,
 		},
 	})
 
@@ -1618,6 +1654,7 @@ func buildAnthropicResponseFromCompleted(completedData []byte, model string) *an
 			InputTokens:          input,
 			OutputTokens:         int(usage.Get("output_tokens").Int()),
 			CacheReadInputTokens: cached,
+			OutputTokensDetails:  anthropicThinkingTokensFromUsage(usage),
 		}
 	}
 

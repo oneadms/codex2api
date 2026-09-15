@@ -837,7 +837,7 @@ func mergeAnthropicBetaWithConfig(incoming http.Header, cfg auth.ClaudeSecurityC
 //  2. body 驱动(按 body 实际携带的功能补声明,保证字段与 beta 成对,
 //     缺失会被上游 400 "required beta"):thinking→interleaved-thinking /
 //     thinking-token-count / redact-thinking;context_management→
-//     context-management;tools→advanced-tool-use;effort→effort;
+//     context-management;工具搜索/高级工具特性→advanced-tool-use;effort→effort;
 //     1h 缓存→extended-cache-ttl;cache scope→prompt-caching-scope;
 //  3. 下游透传:入站 anthropic-beta 按白名单过滤(白名单缺省时用真实 CLI
 //     注册表 DefaultClaudeAllowedBetaHeaders,避免任意第三方 beta 混入)。
@@ -892,7 +892,11 @@ func buildClaudeBetaHeader(incoming http.Header, cfg auth.ClaudeSecurityConfig, 
 		if gjson.GetBytes(body, "context_management").Exists() {
 			add("context-management-2025-06-27", false)
 		}
-		if gjson.GetBytes(body, "tools").Exists() {
+		// Claude Code 2.1.258 实测:普通工具声明不再带 advanced-tool-use,只有工具
+		// 搜索(tool_search_tool_* 服务端工具、defer_loading)、工具用例(input_examples)
+		// 或程序化调用(allowed_callers)上线时才发。客户端自己带了该 beta 时仍按
+		// 白名单从入站头透传(见下方)。
+		if claudeBodyUsesAdvancedToolUse(body) {
 			add("advanced-tool-use-2025-11-20", false)
 		}
 		if gjson.GetBytes(body, "output_config.effort").Exists() || gjson.GetBytes(body, "reasoning_effort").Exists() || gjson.GetBytes(body, "effort").Exists() {
@@ -919,6 +923,27 @@ func buildClaudeBetaHeader(incoming http.Header, cfg auth.ClaudeSecurityConfig, 
 		}
 	}
 	return strings.Join(ordered, ",")
+}
+
+// claudeBodyUsesAdvancedToolUse 报告请求是否用到了 advanced-tool-use beta 背后的
+// 功能:工具搜索服务端工具(type 以 tool_search_tool_ 开头)、延迟加载的工具
+// (defer_loading)、工具用例(input_examples)、程序化调用(allowed_callers)。
+// 这些都能从 body 直接看出,用到了就必须成对带上 beta,否则上游 400。
+func claudeBodyUsesAdvancedToolUse(body []byte) bool {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
+		if strings.HasPrefix(toolType, "tool_search_tool_") {
+			return true
+		}
+		if tool.Get("defer_loading").Bool() || tool.Get("input_examples").Exists() || tool.Get("allowed_callers").Exists() {
+			return true
+		}
+	}
+	return false
 }
 
 // claudeCacheControlHasExtendedTTL 报告请求中是否存在 ttl=1h 的 cache_control 块

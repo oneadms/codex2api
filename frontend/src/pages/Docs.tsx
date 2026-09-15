@@ -1,15 +1,21 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { DocsSearch, GuideArticle } from "./docs/DocsChrome";
+import { buildGuides, type DocsSection } from "./docs/docsGuides";
+import { resolveDocsTarget, type DocEntry } from "./docs/docsNavigation";
+import "./docs/docs.css";
 import {
   Copy,
   Check,
-  ClipboardCheck,
   ExternalLink,
   Sparkles,
   Terminal,
-  KeyRound,
   Wand2,
   Server,
+  BookOpen,
+  LifeBuoy,
+  List,
 } from "lucide-react";
 import { api, getAdminKey } from "../api";
 import { Card, CardContent } from "@/components/ui/card";
@@ -19,12 +25,7 @@ import { Select } from "@/components/ui/select";
 import { useToast } from "../hooks/useToast";
 import { CodeBlock, EndpointDoc } from "./docs/EndpointDoc";
 import DocsTOC, { type DocsTOCItem } from "./docs/DocsTOC";
-import {
-  buildQuickTools,
-  resolveTemplate,
-  type DocsLocale,
-  type QuickTool,
-} from "./docs/quickStartTools";
+import { buildQuickTools, type DocsLocale } from "./docs/quickStartTools";
 import {
   buildAdminSpecs,
   buildDocsMarkdown,
@@ -36,15 +37,23 @@ import type { ModelsResponse, SystemSettings } from "../types";
 
 const FALLBACK_MODELS = [
   "gpt-5.5",
-  "gpt-5.4",
-  "gpt-5.4-mini",
-  "gpt-5.3-codex",
+  "gpt-5.6-sol",
+  "gpt-5.6-luna",
+  "gpt-6-astra",
   "claude-sonnet-4-5",
 ];
+const DEFAULT_QUICK_START_MODEL = "gpt-5.5";
 type CCSwitchApp = "claude" | "codex" | "gemini";
 type QuickToolTab = "codex-cli" | "claude-code" | "cc-switch" | "cherry-studio";
 type QuickServiceTier = "default" | "fast" | "ultrafast";
-type QuickReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "ultra";
+type QuickReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "ultra";
 
 const CC_SWITCH_LOGO = "https://ccswitch.io/assets/cc-switch-logo-BPrI77SG.png";
 // Bundled from npm `@lobehub/icons-static-svg`.
@@ -89,43 +98,6 @@ const CC_SWITCH_APPS: Record<
   },
 };
 
-const SECTION_ICON: Record<string, ReactNode> = {
-  "quick-start": <Sparkles className="size-4" />,
-  "client-config": <Terminal className="size-4" />,
-  authentication: <KeyRound className="size-4" />,
-  "model-api": <Wand2 className="size-4" />,
-  "admin-api": <Server className="size-4" />,
-};
-
-const SECTION_TONE: Record<string, { text: string; bg: string; ring: string }> =
-  {
-    "quick-start": {
-      text: "text-amber-600 dark:text-amber-400",
-      bg: "bg-amber-500/10 dark:bg-amber-500/15",
-      ring: "ring-amber-500/20",
-    },
-    "client-config": {
-      text: "text-emerald-600 dark:text-emerald-400",
-      bg: "bg-emerald-500/10 dark:bg-emerald-500/15",
-      ring: "ring-emerald-500/20",
-    },
-    authentication: {
-      text: "text-fuchsia-600 dark:text-fuchsia-400",
-      bg: "bg-fuchsia-500/10 dark:bg-fuchsia-500/15",
-      ring: "ring-fuchsia-500/20",
-    },
-    "model-api": {
-      text: "text-sky-600 dark:text-sky-400",
-      bg: "bg-sky-500/10 dark:bg-sky-500/15",
-      ring: "ring-sky-500/20",
-    },
-    "admin-api": {
-      text: "text-rose-600 dark:text-rose-400",
-      bg: "bg-rose-500/10 dark:bg-rose-500/15",
-      ring: "ring-rose-500/20",
-    },
-  };
-
 function OsTabs({
   active,
   onChange,
@@ -138,6 +110,8 @@ function OsTabs({
     <div className="border-b border-border mb-4">
       <nav className="-mb-px flex space-x-4">
         <button
+          type="button"
+          aria-pressed={active === "unix"}
           onClick={() => onChange("unix")}
           className={`whitespace-nowrap py-2.5 px-1 border-b-2 font-medium text-sm transition-colors flex items-center gap-2 ${
             active === "unix"
@@ -148,6 +122,8 @@ function OsTabs({
           macOS / Linux
         </button>
         <button
+          type="button"
+          aria-pressed={active === "windows"}
           onClick={() => onChange("windows")}
           className={`whitespace-nowrap py-2.5 px-1 border-b-2 font-medium text-sm transition-colors flex items-center gap-2 ${
             active === "windows"
@@ -170,10 +146,10 @@ const CONFIG_PANEL =
 
 function FieldBox({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="min-w-0">
-      <label className={FIELD_LABEL}>{label}</label>
+    <label className="block min-w-0">
+      <span className={FIELD_LABEL}>{label}</span>
       {children}
-    </div>
+    </label>
   );
 }
 
@@ -318,6 +294,7 @@ function ToolTabButton({
   return (
     <button
       type="button"
+      aria-pressed={selected}
       onClick={onClick}
       className={`inline-flex h-8 items-center justify-center gap-2 rounded-lg px-3 text-[13px] font-semibold transition-[background-color,color,box-shadow] ${
         selected
@@ -351,6 +328,7 @@ function UnderlineTabs<T extends string>({
             <button
               key={tab.value}
               type="button"
+              aria-pressed={selected}
               onClick={() => onChange(tab.value)}
               className={`whitespace-nowrap border-b-2 px-1 py-2.5 text-sm font-medium transition-colors ${
                 selected
@@ -364,105 +342,6 @@ function UnderlineTabs<T extends string>({
           );
         })}
       </nav>
-    </div>
-  );
-}
-
-function QuickToolCard({
-  tool,
-  baseUrl,
-  apiKey,
-  onCopied,
-  onLaunched,
-}: {
-  tool: QuickTool;
-  baseUrl: string;
-  apiKey: string;
-  onCopied: (name: string) => void;
-  onLaunched: (name: string) => void;
-}) {
-  const { t } = useTranslation();
-  const [copied, setCopied] = useState(false);
-
-  const isProtocol = tool.kind === "protocol";
-  const hasKey = Boolean(apiKey);
-  const previewKey = hasKey ? apiKey : "YOUR_API_KEY";
-  const resolved = resolveTemplate(tool, baseUrl, previewKey);
-
-  const handleClick = async () => {
-    if (isProtocol) {
-      if (!hasKey) return;
-      window.open(resolved, "_blank");
-      onLaunched(tool.name);
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(resolved);
-    } catch {
-      const ta = document.createElement("textarea");
-      ta.value = resolved;
-      ta.style.cssText = "position:fixed;left:-9999px";
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
-    }
-    setCopied(true);
-    onCopied(tool.name);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  return (
-    <div className="group relative flex flex-col gap-2.5 rounded-xl border border-border bg-card/70 p-4 transition-all hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-md">
-      <div className="flex items-start gap-3">
-        <div
-          className={`inline-flex size-10 shrink-0 items-center justify-center rounded-lg text-sm font-bold ${tool.iconHue}`}
-        >
-          {tool.glyph}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
-            <h4 className="truncate text-[14px] font-bold text-foreground">
-              {tool.name}
-            </h4>
-            <Badge
-              variant="outline"
-              className="shrink-0 px-1.5 py-0 text-[10px] font-bold"
-            >
-              {tool.badge}
-            </Badge>
-          </div>
-          <p className="mt-1 line-clamp-2 text-[12px] leading-snug text-muted-foreground">
-            {tool.blurb}
-          </p>
-        </div>
-      </div>
-      <Button
-        variant={isProtocol ? "default" : "outline"}
-        size="sm"
-        disabled={isProtocol && !hasKey}
-        onClick={() => void handleClick()}
-        className="mt-1 w-full justify-center gap-1.5"
-      >
-        {isProtocol ? (
-          <>
-            <ExternalLink className="size-3.5" />
-            {hasKey
-              ? t("docs.quickStart.launch")
-              : t("docs.quickStart.needKey")}
-          </>
-        ) : copied ? (
-          <>
-            <ClipboardCheck className="size-3.5 text-emerald-500" />
-            {t("docs.quickStart.copied")}
-          </>
-        ) : (
-          <>
-            <Copy className="size-3.5" />
-            {t("docs.quickStart.copyConfig")}
-          </>
-        )}
-      </Button>
     </div>
   );
 }
@@ -551,51 +430,6 @@ function encodeBase64(text: string): string {
   return btoa(unescape(encodeURIComponent(text)));
 }
 
-function SectionHeader({
-  id,
-  icon,
-  tone,
-  eyebrow,
-  title,
-  description,
-}: {
-  id: string;
-  icon: ReactNode;
-  tone: { text: string; bg: string; ring: string };
-  eyebrow?: string;
-  title: string;
-  description?: string;
-}) {
-  return (
-    <div id={id} className="scroll-mt-20 mt-4 mb-3 first:mt-0">
-      <div className="flex items-start gap-3">
-        <span
-          className={`mt-0.5 inline-flex size-9 shrink-0 items-center justify-center rounded-xl ring-1 ${tone.bg} ${tone.text} ${tone.ring}`}
-        >
-          {icon}
-        </span>
-        <div className="min-w-0 flex-1">
-          {eyebrow ? (
-            <div
-              className={`text-[10.5px] font-bold uppercase tracking-[0.14em] ${tone.text}`}
-            >
-              {eyebrow}
-            </div>
-          ) : null}
-          <h2 className="mt-0.5 text-[22px] font-bold leading-tight text-foreground">
-            {title}
-          </h2>
-          {description ? (
-            <p className="mt-1 max-w-[640px] text-[13px] leading-relaxed text-muted-foreground">
-              {description}
-            </p>
-          ) : null}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export default function Docs() {
   const { t, i18n } = useTranslation();
   const baseUrl = useMemo(() => window.location.origin, []);
@@ -610,10 +444,12 @@ export default function Docs() {
   const [firstKey, setFirstKey] = useState("");
   const [allKeys, setAllKeys] = useState<{ name: string; key: string }[]>([]);
   const [copyingMd, setCopyingMd] = useState(false);
-  const { toast, showToast } = useToast();
+  const { showToast } = useToast();
   const [selectedKey, setSelectedKey] = useState("");
   const [activeToolTab, setActiveToolTab] = useState<QuickToolTab>("codex-cli");
-  const [quickStartModel, setQuickStartModel] = useState("gpt-5.4");
+  const [quickStartModel, setQuickStartModel] = useState(
+    DEFAULT_QUICK_START_MODEL,
+  );
   const [quickServiceTier, setQuickServiceTier] =
     useState<QuickServiceTier>("default");
   const [quickReasoningEffort, setQuickReasoningEffort] =
@@ -623,14 +459,14 @@ export default function Docs() {
   const [ccSwitchName, setCcSwitchName] = useState("");
   const [ccSwitchNameEdited, setCcSwitchNameEdited] = useState(false);
   const [ccSwitchModels, setCcSwitchModels] = useState<Record<string, string>>({
-    model: "gpt-5.4",
+    model: DEFAULT_QUICK_START_MODEL,
   });
   const [cherryProviderId, setCherryProviderId] = useState("");
   const [cherryProviderEdited, setCherryProviderEdited] = useState(false);
   const [activeCurl, setActiveCurl] = useState<
     "responses" | "chat" | "messages"
   >("responses");
-  const [curlModel, setCurlModel] = useState("gpt-5.4");
+  const [curlModel, setCurlModel] = useState(DEFAULT_QUICK_START_MODEL);
   const [models, setModels] = useState(FALLBACK_MODELS);
   const [claudeModels, setClaudeModels] = useState<string[]>([]);
 
@@ -653,12 +489,14 @@ export default function Docs() {
 
   useEffect(() => {
     Promise.all([
-      api.getModels().catch((): ModelsResponse => ({
-        models: [],
-        items: [],
-        claude_models: [],
-        source_url: "",
-      })),
+      api.getModels().catch(
+        (): ModelsResponse => ({
+          models: [],
+          items: [],
+          claude_models: [],
+          source_url: "",
+        }),
+      ),
       api.getSettings().catch(() => null),
     ])
       .then(([res, nextSettings]) => {
@@ -666,10 +504,19 @@ export default function Docs() {
         const next = [
           ...(res.models ?? []),
           ...(res.items ?? []).map((item) => item.id),
-        ].filter((model): model is string => Boolean(model) && !model.toLowerCase().startsWith("claude-"));
+        ].filter(
+          (model): model is string =>
+            Boolean(model) && !model.toLowerCase().startsWith("claude-"),
+        );
         const unique = Array.from(new Set(next));
         setClaudeModels(
-          Array.from(new Set((res.claude_models ?? []).filter((model: string): model is string => Boolean(model)))),
+          Array.from(
+            new Set(
+              (res.claude_models ?? []).filter(
+                (model: string): model is string => Boolean(model),
+              ),
+            ),
+          ),
         );
         if (unique.length === 0) return;
         setModels(unique);
@@ -677,8 +524,8 @@ export default function Docs() {
         const preferred =
           configuredModel && unique.includes(configuredModel)
             ? configuredModel
-            : unique.includes("gpt-5.4")
-              ? "gpt-5.4"
+            : unique.includes(DEFAULT_QUICK_START_MODEL)
+              ? DEFAULT_QUICK_START_MODEL
               : unique[0];
         setQuickStartModel((current) =>
           unique.includes(current) ? current : preferred,
@@ -721,9 +568,8 @@ export default function Docs() {
     );
     return merged.map((model) => ({ label: model, value: model }));
   }, [claudeModels, mappedClaudeModels, models]);
-  const curlModelOptions = activeCurl === "messages"
-    ? claudeModelOptions
-    : modelOptions;
+  const curlModelOptions =
+    activeCurl === "messages" ? claudeModelOptions : modelOptions;
   useEffect(() => {
     if (curlModelOptions.some((option) => option.value === curlModel)) return;
     if (curlModelOptions[0]) setCurlModel(curlModelOptions[0].value);
@@ -820,57 +666,166 @@ export default function Docs() {
   ]);
 
   const modelEndpoints = useMemo(
-    () => buildEndpointSpecs(baseUrl, docsLocale),
-    [baseUrl, docsLocale],
+    () => buildEndpointSpecs(quickBaseUrl, docsLocale),
+    [quickBaseUrl, docsLocale],
   );
   const adminEndpoints = useMemo(
-    () => buildAdminSpecs(baseUrl, docsLocale),
-    [baseUrl, docsLocale],
+    () => buildAdminSpecs(quickBaseUrl, docsLocale),
+    [quickBaseUrl, docsLocale],
   );
 
-  const tocItems: DocsTOCItem[] = useMemo(
+  const copy = useMemo(
+    () => (zh: string, en: string) => (docsLocale === "zh" ? zh : en),
+    [docsLocale],
+  );
+  const guides = useMemo(
+    () => buildGuides(quickBaseUrl, docsLocale),
+    [quickBaseUrl, docsLocale],
+  );
+  const sections = useMemo(
     () => [
       {
         id: "quick-start",
-        label: t("docs.toc.quickStart"),
-        children: [
-          { id: "qs-tools", label: t("docs.toc.qsTools") },
-          { id: "qs-curl", label: t("docs.toc.qsCurl") },
-        ],
+        label: copy("快速接入", "Quick start"),
+        summary: copy(
+          "选好客户端，生成配置，完成第一次请求。",
+          "Choose a client, generate its configuration and make your first request.",
+        ),
+        icon: <Sparkles className="size-4" />,
       },
       {
-        id: "client-config",
-        label: t("docs.toc.clientConfig"),
-        children: [
-          { id: "client-codex", label: "Codex CLI" },
-          { id: "client-claude", label: "Claude Code" },
-          { id: "client-mapping", label: t("docs.toc.modelMapping") },
-        ],
-      },
-      {
-        id: "authentication",
-        label: t("docs.toc.authentication"),
+        id: "development",
+        label: copy("开发指南", "Development"),
+        summary: copy(
+          "从地址与认证到 SDK、流式响应和工具调用。",
+          "URLs, authentication, SDKs, streaming and tool calls.",
+        ),
+        icon: <Terminal className="size-4" />,
       },
       {
         id: "model-api",
-        label: t("docs.toc.modelApi"),
-        children: modelEndpoints.map((e) => ({
-          id: e.id,
-          label: e.path,
-          method: e.method,
-        })),
+        label: copy("接口参考", "API reference"),
+        summary: copy(
+          "按需展开文本、图片、视频与进阶接口，查看参数和示例。",
+          "Expand text, image, video and advanced endpoints for parameters and examples.",
+        ),
+        icon: <Wand2 className="size-4" />,
+      },
+      {
+        id: "troubleshooting",
+        label: copy("故障排查", "Troubleshooting"),
+        summary: copy(
+          "根据错误码找到原因，明确下一步操作。",
+          "Find the cause by error code and choose the next action.",
+        ),
+        icon: <LifeBuoy className="size-4" />,
       },
       {
         id: "admin-api",
-        label: t("docs.toc.adminApi"),
-        children: adminEndpoints.map((e) => ({
-          id: e.id,
-          label: e.path,
-          method: e.method,
-        })),
+        label: copy("管理与进阶", "Administration"),
+        summary: copy(
+          "理解密钥范围、额度、凭据与模型映射，查阅常用管理接口。",
+          "Key scopes, budgets, credentials, model mappings and common admin endpoints.",
+        ),
+        icon: <Server className="size-4" />,
       },
     ],
-    [t, modelEndpoints, adminEndpoints],
+    [copy],
+  );
+  const entries = useMemo<DocEntry[]>(
+    () => [
+      ...sections.map((s) => ({
+        id: s.id,
+        section: s.id,
+        title: s.label,
+        summary: s.summary,
+      })),
+      {
+        id: "qs-tools",
+        section: "quick-start",
+        title: copy("客户端配置", "Client configuration"),
+        summary: "Codex CLI · Claude Code · CC Switch · Cherry Studio",
+      },
+      {
+        id: "qs-curl",
+        section: "quick-start",
+        title: copy("cURL 验证", "cURL verification"),
+        summary: copy(
+          "发送第一个请求并验证响应",
+          "Send your first request and verify its response",
+        ),
+      },
+      ...guides.map((g) => ({
+        id: g.id,
+        section: g.section,
+        title: g.title,
+        summary: [
+          g.summary,
+          ...(g.paragraphs || []),
+          ...(g.table?.rows.map((r) => r.join(" ")) || []),
+        ].join(" "),
+      })),
+      ...modelEndpoints.map((e) => ({
+        id: e.id,
+        section: "model-api",
+        title: `${e.title} · ${e.path}`,
+        summary: [
+          e.description,
+          ...(e.parameters || []).map((p) => `${p.name} ${p.description}`),
+        ].join(" "),
+        method: e.method,
+      })),
+      ...adminEndpoints.map((e) => ({
+        id: e.id,
+        section: "admin-api",
+        title: `${e.title} · ${e.path}`,
+        summary: e.description,
+        method: e.method,
+      })),
+    ],
+    [sections, guides, modelEndpoints, adminEndpoints, copy],
+  );
+  const [hash, setHash] = useState(() => window.location.hash);
+  const [navigationRevision, setNavigationRevision] = useState(0);
+  const [mobileToc, setMobileToc] = useState(false);
+  useEffect(() => {
+    const navigate = () => {
+      setHash(window.location.hash);
+      setNavigationRevision((n) => n + 1);
+      setMobileToc(false);
+    };
+    window.addEventListener("hashchange", navigate);
+    return () => window.removeEventListener("hashchange", navigate);
+  }, []);
+  const target = useMemo(
+    () => resolveDocsTarget(hash, entries),
+    [hash, entries],
+  );
+  const activeSection = target.section as DocsSection;
+  const section = sections.find((s) => s.id === activeSection) || sections[0];
+  useEffect(() => {
+    if (target.client) setActiveToolTab(target.client as QuickToolTab);
+    if (!hash) return;
+    const frame = requestAnimationFrame(() =>
+      document.getElementById(target.id)?.scrollIntoView({ block: "start" }),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [target.id, target.client, hash, navigationRevision]);
+  const tocItems = useMemo<DocsTOCItem[]>(
+    () => [
+      {
+        id: section.id,
+        label: section.label,
+        children: entries
+          .filter((e) => e.section === activeSection && e.id !== activeSection)
+          .map((e) => ({
+            id: e.id,
+            label: e.method ? e.title.split(" · ")[0] : e.title,
+            method: e.method,
+          })),
+      },
+    ],
+    [entries, activeSection, section],
   );
 
   const handleCopyMarkdown = async () => {
@@ -878,7 +833,20 @@ export default function Docs() {
     const md = buildDocsMarkdown({
       baseUrl: quickBaseUrl,
       quickTools,
-      apiKeyExample: firstKey || "YOUR_API_KEY",
+      apiKeyExample: "YOUR_API_KEY",
+      clientConfigs: [
+        { label: codexConfigPath, lang: "toml", content: codexConfigToml },
+        {
+          label: codexAuthPath,
+          lang: "json",
+          content: codexAuthJson.split(activeKey).join("YOUR_API_KEY"),
+        },
+        {
+          label: claudeSettingsPath,
+          lang: "json",
+          content: claudeSettingsJson.split(activeKey).join("YOUR_API_KEY"),
+        },
+      ],
       locale: docsLocale,
     });
     try {
@@ -917,7 +885,9 @@ export default function Docs() {
   const activeKey = selectedKey || firstKey || "YOUR_API_KEY";
 
   const codexServiceTierLine =
-    quickServiceTier === "default" ? "" : `\nservice_tier = "${quickServiceTier}"`;
+    quickServiceTier === "default"
+      ? ""
+      : `\nservice_tier = "${quickServiceTier}"`;
   const codexConfigToml = `model_provider = "OpenAI"
 model = "${quickStartModel}"
 review_model = "${quickStartModel}"
@@ -954,7 +924,7 @@ export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`;
 set ANTHROPIC_AUTH_TOKEN=${activeKey}
 set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`;
 
-  const responsesCurl = `curl -X POST ${quickBaseUrl}/v1/responses \\
+  const responsesCurl = `curl -N -X POST ${quickBaseUrl}/v1/responses \\
   -H "Authorization: Bearer ${activeKey}" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -962,7 +932,7 @@ set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`;
     "input": [{"role": "user", "content": [{"type": "input_text", "text": "Hello"}]}],
     "stream": true
   }'`;
-  const chatCurl = `curl -X POST ${quickBaseUrl}/v1/chat/completions \\
+  const chatCurl = `curl -N -X POST ${quickBaseUrl}/v1/chat/completions \\
   -H "Authorization: Bearer ${activeKey}" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -970,7 +940,7 @@ set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`;
     "messages": [{"role": "user", "content": "Hello"}],
     "stream": true
   }'`;
-  const messagesCurl = `curl -X POST ${quickBaseUrl}/v1/messages \\
+  const messagesCurl = `curl -N -X POST ${quickBaseUrl}/v1/messages \\
   -H "x-api-key: ${activeKey}" \\
   -H "Content-Type: application/json" \\
   -H "anthropic-version: 2023-06-01" \\
@@ -992,8 +962,7 @@ set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`;
     models: ccSwitchModels,
     homepage: quickBaseUrl,
     serviceTier: ccSwitchApp === "codex" ? quickServiceTier : "default",
-    reasoningEffort:
-      ccSwitchApp === "codex" ? quickReasoningEffort : undefined,
+    reasoningEffort: ccSwitchApp === "codex" ? quickReasoningEffort : undefined,
   });
   const cherryConfig = `cherrystudio://providers/api-keys?v=1&data=${encodeURIComponent(
     encodeBase64(
@@ -1009,659 +978,639 @@ set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`;
     showToast(t("docs.quickStart.copiedToast", { name }), "success");
   };
   return (
-    <>
-      <div className="mb-4 max-w-[760px]">
-        <div className="max-w-[760px]">
-          <h2 className="text-2xl font-semibold leading-tight text-foreground sm:text-[28px]">
-            {t("docs.title")}
-          </h2>
-          <p className="mt-2 max-w-[640px] text-sm leading-relaxed text-muted-foreground">
-            {t("docs.description")}
+    <div
+      className="docs-page"
+      onClick={(event) => {
+        const anchor = (event.target as Element).closest<HTMLAnchorElement>(
+          'a[href^="#"]',
+        );
+        if (anchor?.getAttribute("href") === window.location.hash)
+          setNavigationRevision((n) => n + 1);
+      }}
+    >
+      <header className="docs-hero">
+        <div>
+          <div className="docs-eyebrow">
+            <BookOpen className="size-3.5" />
+            CODEX2API / {copy("使用文档", "DOCUMENTATION")}
+          </div>
+          <h2>{copy("从接入到用好每个接口", "Connect. Build. Go further.")}</h2>
+          <p>
+            {copy(
+              "客户端配置、开发示例与接口参考，都从这里开始。",
+              "Client configuration, working examples and API reference, all in one place.",
+            )}
           </p>
         </div>
-        <div className="mt-3 xl:hidden">
+        <div className="docs-hero-actions">
           <Button
             variant="outline"
             size="sm"
             onClick={() => void handleCopyMarkdown()}
             disabled={copyingMd}
-            className="gap-1.5"
+            aria-label={t("docs.copyMarkdown")}
+            title={t("docs.copyMarkdown")}
           >
             {copyingMd ? (
-              <Check className="size-3.5 text-emerald-500" />
+              <Check className="size-4" />
             ) : (
-              <Copy className="size-3.5" />
+              <Copy className="size-4" />
             )}
-            {t("docs.copyMarkdown")}
+            <span className="docs-export-text">{t("docs.copyMarkdown")}</span>
           </Button>
         </div>
-      </div>
-
-
-      <div className="xl:hidden mb-3 -mx-2 overflow-x-auto px-2">
-        <div className="flex gap-1.5 pb-1">
-          {tocItems.map((parent) => (
+      </header>
+      <div className="docs-toolbar">
+        <nav
+          className="docs-tabs"
+          aria-label={copy("文档分类", "Documentation sections")}
+        >
+          {sections.map((s) => (
             <a
-              key={parent.id}
-              href={`#${parent.id}`}
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-[12px] font-semibold text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+              key={s.id}
+              href={`#${s.id}`}
+              aria-current={activeSection === s.id ? "page" : undefined}
             >
-              {parent.label}
+              {s.icon}
+              {s.label}
             </a>
           ))}
-        </div>
+        </nav>
+        <DocsSearch entries={entries} locale={docsLocale} />
+        <Button
+          variant="outline"
+          size="sm"
+          className="docs-mobile-toc"
+          onClick={() => setMobileToc(true)}
+          aria-label={copy("打开目录", "Open table of contents")}
+        >
+          <List className="size-4" />
+        </Button>
       </div>
-
-      <SectionHeader
-        id="quick-start"
-        icon={SECTION_ICON["quick-start"]}
-        tone={SECTION_TONE["quick-start"]}
-        eyebrow={t("docs.section1Eyebrow")}
-        title={t("docs.quickStart.title")}
-        description={t("docs.quickStart.description")}
-      />
-
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_260px]">
-        <div className="min-w-0">
-          <Card id="qs-tools" className="mb-4 scroll-mt-20 py-0">
-            <CardContent className="p-5">
-              <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
-                <div className="min-w-0">
-                  <h3 className="text-[15px] font-semibold text-foreground">
-                    {t("docs.quickStart.toolsTitle")}
-                  </h3>
-                  <p className="mt-0.5 text-[12.5px] text-muted-foreground">
-                    {t("docs.quickStart.toolsDesc")}
-                  </p>
-                </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  {allKeys.length > 0 ? (
-                    <>
-                      <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                        {t("docs.quickStart.useKey")}
+      <div className="docs-layout">
+        <div className="docs-content">
+          <div
+            id={section.id}
+            className={
+              activeSection === "quick-start"
+                ? "docs-start-anchor"
+                : "docs-section-heading"
+            }
+          >
+            {activeSection !== "quick-start" && (
+              <>
+                <h3>{section.label}</h3>
+                <p>{section.summary}</p>
+              </>
+            )}
+          </div>
+          {activeSection === "quick-start" && (
+            <>
+              <div className="docs-steps">
+                <div className="docs-step">
+                  <span>01</span>
+                  <div>
+                    <strong>
+                      {copy("准备可用账号", "Prepare an account")}
+                    </strong>
+                    <p>
+                      <a href="/admin/accounts">
+                        {copy("账号管理", "Accounts")}
+                      </a>
+                      <span className="docs-step-detail">
+                        {" "}
+                        ·{" "}
+                        {copy(
+                          "确认账号已启用且模型可用。",
+                          "Enable an account with the model you need.",
+                        )}
                       </span>
-                      <Select
-                        compact
-                        className="w-44"
-                        value={selectedKey}
-                        onValueChange={setSelectedKey}
-                        options={allKeys.map((k) => ({
-                          label: k.name
-                            ? `${k.name} · ${k.key.slice(0, 6)}…${k.key.slice(-4)}`
-                            : k.key,
-                          value: k.key,
-                        }))}
-                      />
-                    </>
-                  ) : (
-                    <a
-                      href="/admin/api-keys"
-                      className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] font-bold text-amber-600 dark:text-amber-400"
-                    >
-                      {t("docs.quickStart.createKeyFirst")}
-                    </a>
-                  )}
+                    </p>
+                  </div>
+                </div>
+                <div className="docs-step">
+                  <span>02</span>
+                  <div>
+                    <strong>
+                      {copy("选择客户端密钥", "Choose a client key")}
+                    </strong>
+                    <p>
+                      <a href="/admin/api-keys">
+                        {copy("API 密钥", "API keys")}
+                      </a>
+                      <span className="docs-step-detail">
+                        {" "}
+                        ·{" "}
+                        {copy(
+                          "为客户端创建独立访问凭据。",
+                          "Create a dedicated key for your client.",
+                        )}
+                      </span>
+                    </p>
+                  </div>
+                </div>
+                <div className="docs-step">
+                  <span>03</span>
+                  <div>
+                    <strong>{copy("配置并验证", "Configure & verify")}</strong>
+                    <p>
+                      <a href="#qs-curl">
+                        {copy("发送验证请求", "Send a test request")}
+                      </a>
+                      <span className="docs-step-detail">
+                        {" "}
+                        ·{" "}
+                        {copy(
+                          "在使用统计确认结果。",
+                          "Check the result in Usage.",
+                        )}
+                      </span>
+                    </p>
+                  </div>
                 </div>
               </div>
-              <div className="mb-3 rounded-xl border border-border bg-muted/25 p-1">
-                <div className="grid gap-1 sm:grid-cols-4">
-                  {[
-                    { value: "codex-cli", label: "Codex CLI" },
-                    { value: "claude-code", label: "Claude Code" },
-                    { value: "cc-switch", label: "CC Switch" },
-                    { value: "cherry-studio", label: "Cherry Studio" },
-                  ].map((tab) => (
-                    <ToolTabButton
-                      key={tab.value}
-                      selected={activeToolTab === tab.value}
-                      id={tab.value as QuickToolTab}
-                      label={tab.label}
-                      onClick={() =>
-                        setActiveToolTab(tab.value as QuickToolTab)
-                      }
-                    />
-                  ))}
-                </div>
-              </div>
-              <div
-                className={`mb-4 ${CONFIG_PANEL} ${
-                  showQuickCodexOptions
-                    ? "md:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_190px_170px_150px]"
-                    : "md:grid-cols-[minmax(0,1fr)_260px]"
-                }`}
-              >
-                <FieldBox label={t("docs.clientConfig.endpointLabel")}>
-                  <input
-                    className={`${FIELD_INPUT} font-mono`}
-                    value={
-                      activeToolTab === "cc-switch"
-                        ? ccSwitchConfig.endpoint(quickBaseUrl)
-                        : quickBaseUrl
-                    }
-                    onChange={(event) => {
-                      const value = event.target.value;
-                      if (
-                        activeToolTab === "cc-switch" &&
-                        ccSwitchApp === "codex" &&
-                        value.endsWith("/v1")
-                      ) {
-                        setQuickBaseUrl(value.slice(0, -3));
-                      } else {
-                        setQuickBaseUrl(value);
-                      }
-                    }}
-                  />
-                </FieldBox>
-                <FieldBox label={t("docs.clientConfig.defaultModel")}>
-                  <Select
-                    compact
-                    value={quickStartModel}
-                    onValueChange={setQuickStartModel}
-                    options={modelOptions}
-                  />
-                </FieldBox>
-                {showQuickCodexOptions ? (
-                  <FieldBox label={t("docs.clientConfig.reasoningEffort")}>
-                    <Select
-                      compact
-                      value={quickReasoningEffort}
-                      onValueChange={(value) =>
-                        setQuickReasoningEffort(value as QuickReasoningEffort)
-                      }
-                      options={[
-                        { label: "None", value: "none" },
-                        { label: "Minimal", value: "minimal" },
-                        { label: "Low", value: "low" },
-                        { label: "Medium", value: "medium" },
-                        { label: "High", value: "high" },
-                        { label: "xhigh", value: "xhigh" },
-                        { label: "ultra", value: "ultra" },
-                      ]}
-                    />
-                  </FieldBox>
-                ) : null}
-                {showQuickCodexOptions ? (
-                  <FieldBox label={t("docs.clientConfig.fastMode")}>
-                    <Select
-                      compact
-                      value={quickServiceTier}
-                      onValueChange={(value) =>
-                        setQuickServiceTier(value as QuickServiceTier)
-                      }
-                      options={[
-                        {
-                          label: t("docs.clientConfig.fastModeDefault"),
-                          value: "default",
-                        },
-                        {
-                          label: t("docs.clientConfig.fastModeEnabled"),
-                          value: "fast",
-                        },
-                        { label: "Ultrafast", value: "ultrafast" },
-                      ]}
-                    />
-                  </FieldBox>
-                ) : null}
-              </div>
-              <div className="space-y-4">
-                {activeToolTab === "codex-cli" && (
-                  <>
-                    <OsTabs active={codexOs} onChange={setCodexOs} />
-                    <CodeBlock
-                      label={codexConfigPath}
-                      content={codexConfigToml}
-                      lang="toml"
-                    />
-                    <CodeBlock
-                      label={codexAuthPath}
-                      content={codexAuthJson}
-                      lang="json"
-                    />
-                  </>
-                )}
-                {activeToolTab === "claude-code" && (
-                  <>
-                    <OsTabs active={claudeOs} onChange={setClaudeOs} />
-                    <CodeBlock
-                      label={
-                        claudeOs === "unix"
-                          ? t("docs.clientConfig.unixTerminal")
-                          : t("docs.clientConfig.windowsTerminal")
-                      }
-                      content={
-                        claudeOs === "unix" ? claudeEnvUnix : claudeEnvWindows
-                      }
-                      lang="bash"
-                    />
-                    <CodeBlock
-                      label={claudeSettingsPath}
-                      content={claudeSettingsJson}
-                      lang="json"
-                    />
-                  </>
-                )}
-                {activeToolTab === "cc-switch" && (
-                  <>
-                    <div className={`${CONFIG_PANEL} md:grid-cols-2`}>
-                      <FieldBox label={t("docs.clientConfig.importTarget")}>
-                        <Select
-                          compact
-                          value={ccSwitchApp}
-                          onValueChange={(value) =>
-                            setCcSwitchApp(value as CCSwitchApp)
-                          }
-                          options={(
-                            Object.keys(CC_SWITCH_APPS) as CCSwitchApp[]
-                          ).map((app) => ({
-                            label: CC_SWITCH_APPS[app].label,
-                            value: app,
-                          }))}
-                        />
-                      </FieldBox>
-                      <FieldBox label={t("docs.clientConfig.configName")}>
-                        <input
-                          className={FIELD_INPUT}
-                          value={ccSwitchName}
-                          onChange={(event) => {
-                            setCcSwitchNameEdited(true);
-                            setCcSwitchName(event.target.value);
-                          }}
-                        />
-                      </FieldBox>
-                      {ccSwitchConfig.fields.map((field) => (
-                        <FieldBox
-                          key={field.key}
-                          label={t(
-                            `docs.clientConfig.ccSwitchFields.${field.key}`,
-                          )}
+              <Card id="qs-tools" className="mb-4 scroll-mt-20 py-0">
+                <CardContent className="p-5">
+                  <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+                    <div className="min-w-0">
+                      <h3 className="text-[15px] font-semibold text-foreground">
+                        {copy("生成客户端配置", "Configure your client")}
+                      </h3>
+                      <p className="mt-0.5 text-[12.5px] text-muted-foreground">
+                        {copy(
+                          "选择工具后，复制对应配置或一键导入。",
+                          "Choose a tool, then copy its configuration or import it.",
+                        )}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      {allKeys.length > 0 ? (
+                        <>
+                          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                            {t("docs.quickStart.useKey")}
+                          </span>
+                          <Select
+                            compact
+                            className="w-44"
+                            value={selectedKey}
+                            onValueChange={setSelectedKey}
+                            options={allKeys.map((k) => ({
+                              label: k.name
+                                ? `${k.name} · ${k.key.slice(0, 6)}…${k.key.slice(-4)}`
+                                : k.key,
+                              value: k.key,
+                            }))}
+                          />
+                        </>
+                      ) : (
+                        <a
+                          href="/admin/api-keys"
+                          className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] font-bold text-amber-600 dark:text-amber-400"
                         >
-                          <div className="space-y-1.5">
-                            <Select
-                              compact
-                              value={ccSwitchModels[field.key] || ""}
-                              onValueChange={(value) =>
-                                setCcSwitchModels((current) => ({
-                                  ...current,
-                                  [field.key]: value,
-                                }))
-                              }
-                              options={ccSwitchModelOptions}
-                            />
-                            {ccSwitchApp === "claude" &&
-                            ccSwitchModels[field.key] ? (
-                              <div className="truncate text-[11px] font-medium text-muted-foreground">
-                                {t("docs.clientConfig.mappedTo")}{" "}
-                                <code className="font-mono text-foreground">
-                                  {modelMapping[ccSwitchModels[field.key]] ??
-                                    t("docs.clientConfig.backendDefaultModel")}
-                                </code>
-                              </div>
-                            ) : null}
-                          </div>
-                        </FieldBox>
+                          {t("docs.quickStart.createKeyFirst")}
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                  <div className="mb-3 rounded-xl border border-border bg-muted/25 p-1">
+                    <div className="docs-client-tabs">
+                      {[
+                        { value: "codex-cli", label: "Codex CLI" },
+                        { value: "claude-code", label: "Claude Code" },
+                        { value: "cc-switch", label: "CC Switch" },
+                        { value: "cherry-studio", label: "Cherry Studio" },
+                      ].map((tab) => (
+                        <ToolTabButton
+                          key={tab.value}
+                          selected={activeToolTab === tab.value}
+                          id={tab.value as QuickToolTab}
+                          label={tab.label}
+                          onClick={() =>
+                            setActiveToolTab(tab.value as QuickToolTab)
+                          }
+                        />
                       ))}
                     </div>
-                    <ImportPreviewCard
-                      title={t("docs.clientConfig.ccSwitchPreviewTitle")}
-                      description={t("docs.clientConfig.ccSwitchPreviewDesc")}
-                      icon={<ClientIcon id="cc-switch" size={20} />}
-                      link={ccSwitchUrl}
-                      disabled={!hasUsableKey}
-                      onCopied={() => handleImportLinkCopied("CC Switch")}
-                      onLaunch={() => {
-                        window.open(ccSwitchUrl, "_blank");
-                        showToast(
-                          t("docs.quickStart.launchedToast", {
-                            name: "CC Switch",
-                          }),
-                          "success",
-                        );
-                      }}
-                    />
-                  </>
-                )}
-                {activeToolTab === "cherry-studio" && (
-                  <>
-                    <div className={`${CONFIG_PANEL} md:grid-cols-2`}>
-                      <FieldBox label={t("docs.clientConfig.importTarget")}>
-                        <code
-                          className={`${FIELD_INPUT} flex items-center truncate font-mono`}
-                        >
-                          Cherry Studio
-                        </code>
-                      </FieldBox>
-                      <FieldBox label={t("docs.clientConfig.providerId")}>
-                        <input
-                          className={`${FIELD_INPUT} font-mono`}
-                          value={cherryProviderId}
-                          onChange={(event) => {
-                            setCherryProviderEdited(true);
-                            setCherryProviderId(event.target.value);
+                  </div>
+                  <div className="docs-config-fields">
+                    <FieldBox label={t("docs.clientConfig.endpointLabel")}>
+                      <input
+                        className={`${FIELD_INPUT} font-mono`}
+                        value={
+                          activeToolTab === "cc-switch"
+                            ? ccSwitchConfig.endpoint(quickBaseUrl)
+                            : quickBaseUrl
+                        }
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          if (
+                            activeToolTab === "cc-switch" &&
+                            ccSwitchApp === "codex" &&
+                            value.endsWith("/v1")
+                          ) {
+                            setQuickBaseUrl(value.slice(0, -3));
+                          } else {
+                            setQuickBaseUrl(value);
+                          }
+                        }}
+                      />
+                    </FieldBox>
+                    <FieldBox label={t("docs.clientConfig.defaultModel")}>
+                      <Select
+                        compact
+                        value={quickStartModel}
+                        onValueChange={setQuickStartModel}
+                        options={modelOptions}
+                      />
+                    </FieldBox>
+                  </div>
+                  {showQuickCodexOptions && (
+                    <details className="docs-advanced">
+                      <summary>
+                        {copy(
+                          "高级选项 · 思考强度与服务档位",
+                          "Advanced · reasoning effort & service tier",
+                        )}
+                      </summary>
+                      <div>
+                        {showQuickCodexOptions ? (
+                          <FieldBox
+                            label={t("docs.clientConfig.reasoningEffort")}
+                          >
+                            <Select
+                              compact
+                              value={quickReasoningEffort}
+                              onValueChange={(value) =>
+                                setQuickReasoningEffort(
+                                  value as QuickReasoningEffort,
+                                )
+                              }
+                              options={[
+                                { label: "None", value: "none" },
+                                { label: "Minimal", value: "minimal" },
+                                { label: "Low", value: "low" },
+                                { label: "Medium", value: "medium" },
+                                { label: "High", value: "high" },
+                                { label: "xhigh", value: "xhigh" },
+                                { label: "ultra", value: "ultra" },
+                              ]}
+                            />
+                          </FieldBox>
+                        ) : null}
+                        {showQuickCodexOptions ? (
+                          <FieldBox label={t("docs.clientConfig.fastMode")}>
+                            <Select
+                              compact
+                              value={quickServiceTier}
+                              onValueChange={(value) =>
+                                setQuickServiceTier(value as QuickServiceTier)
+                              }
+                              options={[
+                                {
+                                  label: t("docs.clientConfig.fastModeDefault"),
+                                  value: "default",
+                                },
+                                {
+                                  label: t("docs.clientConfig.fastModeEnabled"),
+                                  value: "fast",
+                                },
+                                { label: "Ultrafast", value: "ultrafast" },
+                              ]}
+                            />
+                          </FieldBox>
+                        ) : null}
+                      </div>
+                    </details>
+                  )}
+                  <div className="space-y-4">
+                    {activeToolTab === "codex-cli" && (
+                      <>
+                        <OsTabs active={codexOs} onChange={setCodexOs} />
+                        <p className="docs-callout">
+                          {t("docs.clientConfig.codexConfigHint")} ·{" "}
+                          {codexOs === "windows"
+                            ? t("docs.clientConfig.codexNoteWindows")
+                            : t("docs.clientConfig.codexNoteUnix")}
+                        </p>
+                        <CodeBlock
+                          label={codexConfigPath}
+                          content={codexConfigToml}
+                          lang="toml"
+                        />
+                        <CodeBlock
+                          label={codexAuthPath}
+                          content={codexAuthJson}
+                          lang="json"
+                        />
+                      </>
+                    )}
+                    {activeToolTab === "claude-code" && (
+                      <>
+                        <OsTabs active={claudeOs} onChange={setClaudeOs} />
+                        <p className="docs-callout">
+                          {t("docs.clientConfig.claudeEnvNote")}{" "}
+                          {t("docs.clientConfig.claudeSettingsNote")}
+                        </p>
+                        <CodeBlock
+                          label={
+                            claudeOs === "unix"
+                              ? t("docs.clientConfig.unixTerminal")
+                              : t("docs.clientConfig.windowsTerminal")
+                          }
+                          content={
+                            claudeOs === "unix"
+                              ? claudeEnvUnix
+                              : claudeEnvWindows
+                          }
+                          lang="bash"
+                        />
+                        <CodeBlock
+                          label={claudeSettingsPath}
+                          content={claudeSettingsJson}
+                          lang="json"
+                        />
+                      </>
+                    )}
+                    {activeToolTab === "cc-switch" && (
+                      <>
+                        <div className={`${CONFIG_PANEL} md:grid-cols-2`}>
+                          <FieldBox label={t("docs.clientConfig.importTarget")}>
+                            <Select
+                              compact
+                              value={ccSwitchApp}
+                              onValueChange={(value) =>
+                                setCcSwitchApp(value as CCSwitchApp)
+                              }
+                              options={(
+                                Object.keys(CC_SWITCH_APPS) as CCSwitchApp[]
+                              ).map((app) => ({
+                                label: CC_SWITCH_APPS[app].label,
+                                value: app,
+                              }))}
+                            />
+                          </FieldBox>
+                          <FieldBox label={t("docs.clientConfig.configName")}>
+                            <input
+                              className={FIELD_INPUT}
+                              value={ccSwitchName}
+                              onChange={(event) => {
+                                setCcSwitchNameEdited(true);
+                                setCcSwitchName(event.target.value);
+                              }}
+                            />
+                          </FieldBox>
+                          {ccSwitchConfig.fields.map((field) => (
+                            <FieldBox
+                              key={field.key}
+                              label={t(
+                                `docs.clientConfig.ccSwitchFields.${field.key}`,
+                              )}
+                            >
+                              <div className="space-y-1.5">
+                                <Select
+                                  compact
+                                  value={ccSwitchModels[field.key] || ""}
+                                  onValueChange={(value) =>
+                                    setCcSwitchModels((current) => ({
+                                      ...current,
+                                      [field.key]: value,
+                                    }))
+                                  }
+                                  options={ccSwitchModelOptions}
+                                />
+                                {ccSwitchApp === "claude" &&
+                                ccSwitchModels[field.key] ? (
+                                  <div className="truncate text-[11px] font-medium text-muted-foreground">
+                                    {t("docs.clientConfig.mappedTo")}{" "}
+                                    <code className="font-mono text-foreground">
+                                      {modelMapping[
+                                        ccSwitchModels[field.key]
+                                      ] ??
+                                        t(
+                                          "docs.clientConfig.backendDefaultModel",
+                                        )}
+                                    </code>
+                                  </div>
+                                ) : null}
+                              </div>
+                            </FieldBox>
+                          ))}
+                        </div>
+                        <ImportPreviewCard
+                          title={t("docs.clientConfig.ccSwitchPreviewTitle")}
+                          description={t(
+                            "docs.clientConfig.ccSwitchPreviewDesc",
+                          )}
+                          icon={<ClientIcon id="cc-switch" size={20} />}
+                          link={ccSwitchUrl}
+                          disabled={!hasUsableKey}
+                          onCopied={() => handleImportLinkCopied("CC Switch")}
+                          onLaunch={() => {
+                            window.open(ccSwitchUrl, "_blank");
+                            showToast(
+                              t("docs.quickStart.launchedToast", {
+                                name: "CC Switch",
+                              }),
+                              "success",
+                            );
                           }}
                         />
-                      </FieldBox>
+                      </>
+                    )}
+                    {activeToolTab === "cherry-studio" && (
+                      <>
+                        <div className={`${CONFIG_PANEL} md:grid-cols-2`}>
+                          <FieldBox label={t("docs.clientConfig.importTarget")}>
+                            <code
+                              className={`${FIELD_INPUT} flex items-center truncate font-mono`}
+                            >
+                              Cherry Studio
+                            </code>
+                          </FieldBox>
+                          <FieldBox label={t("docs.clientConfig.providerId")}>
+                            <input
+                              className={`${FIELD_INPUT} font-mono`}
+                              value={cherryProviderId}
+                              onChange={(event) => {
+                                setCherryProviderEdited(true);
+                                setCherryProviderId(event.target.value);
+                              }}
+                            />
+                          </FieldBox>
+                        </div>
+                        <ImportPreviewCard
+                          title={t("docs.clientConfig.cherryPreviewTitle")}
+                          description={t("docs.clientConfig.cherryPreviewDesc")}
+                          icon={<ClientIcon id="cherry-studio" size={20} />}
+                          link={cherryConfig}
+                          disabled={!hasUsableKey}
+                          onCopied={() =>
+                            handleImportLinkCopied("Cherry Studio")
+                          }
+                          onLaunch={() => {
+                            window.open(cherryConfig, "_blank");
+                            showToast(
+                              t("docs.quickStart.launchedToast", {
+                                name: "Cherry Studio",
+                              }),
+                              "success",
+                            );
+                          }}
+                        />
+                      </>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card id="qs-curl" className="mb-4 scroll-mt-20 py-0">
+                <CardContent className="p-6">
+                  <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h3 className="text-base font-semibold text-foreground mb-1">
+                        {t("docs.quickStart.curlTitle")}
+                      </h3>
+                      <p className="text-sm text-muted-foreground">
+                        {copy(
+                          "使用当前选中的密钥与模型验证。Responses / Chat 返回 SSE，Messages 返回 JSON。",
+                          "Verify with the selected key and model. Responses / Chat return SSE; Messages returns JSON.",
+                        )}
+                      </p>
                     </div>
-                    <ImportPreviewCard
-                      title={t("docs.clientConfig.cherryPreviewTitle")}
-                      description={t("docs.clientConfig.cherryPreviewDesc")}
-                      icon={<ClientIcon id="cherry-studio" size={20} />}
-                      link={cherryConfig}
-                      disabled={!hasUsableKey}
-                      onCopied={() => handleImportLinkCopied("Cherry Studio")}
-                      onLaunch={() => {
-                        window.open(cherryConfig, "_blank");
-                        showToast(
-                          t("docs.quickStart.launchedToast", {
-                            name: "Cherry Studio",
-                          }),
-                          "success",
-                        );
-                      }}
+                    <Select
+                      compact
+                      className="w-52"
+                      value={curlModel}
+                      onValueChange={setCurlModel}
+                      options={curlModelOptions}
                     />
-                  </>
-                )}
-              </div>
-            </CardContent>
-          </Card>
+                  </div>
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <UnderlineTabs
+                      active={activeCurl}
+                      onChange={setActiveCurl}
+                      tabs={[
+                        {
+                          value: "responses",
+                          label: "Responses",
+                          hint: "/v1/responses",
+                        },
+                        {
+                          value: "chat",
+                          label: "Chat",
+                          hint: "/v1/chat/completions",
+                        },
+                        {
+                          value: "messages",
+                          label: "Messages",
+                          hint: "/v1/messages",
+                        },
+                      ]}
+                    />
+                    <code className="code-inline text-[11px]">
+                      {activeCurl === "responses"
+                        ? "/v1/responses"
+                        : activeCurl === "chat"
+                          ? "/v1/chat/completions"
+                          : "/v1/messages"}
+                    </code>
+                  </div>
+                  <CodeBlock
+                    label="cURL"
+                    content={curlExamples[activeCurl]}
+                    lang="bash"
+                  />
+                </CardContent>
+              </Card>
 
-          <Card id="qs-curl" className="mb-4 scroll-mt-20 py-0">
-            <CardContent className="p-6">
-              <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <h3 className="text-base font-semibold text-foreground mb-1">
-                    {t("docs.quickStart.curlTitle")}
-                  </h3>
-                  <p className="text-sm text-muted-foreground">
-                    {t("docs.quickStart.curlDesc")}
-                  </p>
-                </div>
-                <Select
-                  compact
-                  className="w-52"
-                  value={curlModel}
-                  onValueChange={setCurlModel}
-                  options={curlModelOptions}
-                />
-              </div>
-              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                <UnderlineTabs
-                  active={activeCurl}
-                  onChange={setActiveCurl}
-                  tabs={[
-                    {
-                      value: "responses",
-                      label: "Responses",
-                      hint: "/v1/responses",
-                    },
-                    {
-                      value: "chat",
-                      label: "Chat",
-                      hint: "/v1/chat/completions",
-                    },
-                    {
-                      value: "messages",
-                      label: "Messages",
-                      hint: "/v1/messages",
-                    },
-                  ]}
-                />
-                <code className="code-inline text-[11px]">
-                  {activeCurl === "responses"
-                    ? "/v1/responses"
-                    : activeCurl === "chat"
-                      ? "/v1/chat/completions"
-                      : "/v1/messages"}
-                </code>
-              </div>
-              <CodeBlock
-                label="cURL"
-                content={curlExamples[activeCurl]}
-                lang="bash"
+              <p className="docs-callout">
+                {copy(
+                  "看到完整结束事件或成功 JSON 后，在使用统计确认最终模型与用量。健康检查成功仅代表服务在线。",
+                  "After a terminal event or successful JSON response, verify the final model and usage in Usage. A healthy service alone does not prove generation works.",
+                )}{" "}
+                <a href="#connection-check" className="text-primary">
+                  {copy("连接排查 →", "Connection checks →")}
+                </a>
+              </p>
+            </>
+          )}
+          {guides
+            .filter((g) => g.section === activeSection)
+            .map((guide) => (
+              <GuideArticle
+                key={`${guide.id}-${target.id === guide.id ? navigationRevision : 0}`}
+                guide={guide}
+                locale={docsLocale}
+                activeId={target.id}
               />
-            </CardContent>
-          </Card>
-
-          {/* Section 2: Client Config */}
-          <SectionHeader
-            id="client-config"
-            icon={SECTION_ICON["client-config"]}
-            tone={SECTION_TONE["client-config"]}
-            eyebrow={t("docs.section2Eyebrow")}
-            title={t("docs.clientConfig.title")}
-            description={t("docs.clientConfig.description")}
-          />
-
-          <Card id="client-codex" className="mb-4 scroll-mt-20 py-0">
-            <CardContent className="p-6">
-              <h3 className="text-base font-semibold text-foreground mb-1">
-                Codex CLI
-              </h3>
-              <p className="mb-4 text-sm text-muted-foreground">
-                {t("docs.clientConfig.codexDesc")}
-              </p>
-              <OsTabs active={codexOs} onChange={setCodexOs} />
-              <p className="mb-3 flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
-                ⓘ {t("docs.clientConfig.codexConfigHint")}
-              </p>
-              <div className="space-y-4">
-                <CodeBlock
-                  label={codexConfigPath}
-                  content={codexConfigToml}
-                  lang="toml"
-                />
-                <CodeBlock
-                  label={codexAuthPath}
-                  content={codexAuthJson}
-                  lang="json"
-                />
-              </div>
-              <p className="mt-3 text-xs text-muted-foreground">
-                {codexOs === "windows"
-                  ? t("docs.clientConfig.codexNoteWindows")
-                  : t("docs.clientConfig.codexNoteUnix")}
-              </p>
-            </CardContent>
-          </Card>
-
-          <Card id="client-claude" className="mb-4 scroll-mt-20 py-0">
-            <CardContent className="p-6">
-              <h3 className="text-base font-semibold text-foreground mb-1">
-                Claude Code
-              </h3>
-              <p className="mb-4 text-sm text-muted-foreground">
-                {t("docs.clientConfig.claudeDesc")}
-              </p>
-              <OsTabs active={claudeOs} onChange={setClaudeOs} />
-              <div className="space-y-4">
-                <CodeBlock
-                  label={
-                    claudeOs === "unix"
-                      ? t("docs.clientConfig.unixTerminal")
-                      : t("docs.clientConfig.windowsTerminal")
-                  }
-                  content={
-                    claudeOs === "unix" ? claudeEnvUnix : claudeEnvWindows
-                  }
-                  lang="bash"
-                />
-                <p className="text-xs text-muted-foreground">
-                  {t("docs.clientConfig.claudeEnvNote")}
-                </p>
-                <CodeBlock
-                  label={claudeSettingsPath}
-                  content={claudeSettingsJson}
-                  lang="json"
-                />
-                <p className="text-xs text-muted-foreground">
-                  {t("docs.clientConfig.claudeSettingsNote")}
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card id="client-mapping" className="mb-4 scroll-mt-20 py-0">
-            <CardContent className="p-6">
-              <h3 className="text-base font-semibold text-foreground mb-1">
-                {t("docs.clientConfig.mappingTitle")}
-              </h3>
-              <p className="text-sm text-muted-foreground">
-                {t("docs.clientConfig.mappingDesc")}
-              </p>
-            </CardContent>
-          </Card>
-
-          {/* Section 3: Authentication */}
-          <SectionHeader
-            id="authentication"
-            icon={SECTION_ICON["authentication"]}
-            tone={SECTION_TONE["authentication"]}
-            eyebrow={t("docs.section3Eyebrow")}
-            title={t("docs.authentication.title")}
-            description={t("docs.authentication.description")}
-          />
-
-          <Card className="mb-6 scroll-mt-20 py-0">
-            <CardContent className="p-6">
-              <div className="space-y-2.5">
-                <div className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl bg-muted/40 border border-border">
-                  <Badge
-                    variant="outline"
-                    className="text-[10px] font-bold shrink-0"
-                  >
-                    Header
-                  </Badge>
-                  <code className="code-inline">
-                    Authorization: Bearer{" "}
-                    <span className="text-muted-foreground italic">
-                      &lt;key&gt;
-                    </span>
-                  </code>
-                  <span className="ml-auto text-xs text-muted-foreground">
-                    {t("docs.authentication.bearerNote")}
+            ))}
+          {activeSection === "model-api" &&
+            (["text", "media", "advanced"] as const).map((category) => (
+              <section key={category}>
+                <h4 className="docs-group-title">
+                  {category === "text"
+                    ? copy("文本与基础接口", "Text & essentials")
+                    : category === "media"
+                      ? copy("图片与视频", "Images & video")
+                      : copy("进阶与兼容接口", "Advanced & compatibility")}
+                  <span>
+                    {
+                      modelEndpoints.filter((e) => e.category === category)
+                        .length
+                    }
                   </span>
-                </div>
-                <div className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl bg-muted/40 border border-border">
-                  <Badge
-                    variant="outline"
-                    className="text-[10px] font-bold shrink-0"
-                  >
-                    Header
-                  </Badge>
-                  <code className="code-inline">
-                    x-api-key:{" "}
-                    <span className="text-muted-foreground italic">
-                      &lt;key&gt;
-                    </span>
-                  </code>
-                  <span className="ml-auto text-xs text-muted-foreground">
-                    {t("docs.authentication.xApiKeyNote")}
-                  </span>
-                </div>
-                <div className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl bg-muted/40 border border-border">
-                  <Badge
-                    variant="outline"
-                    className="text-[10px] font-bold shrink-0"
-                  >
-                    Header
-                  </Badge>
-                  <code className="code-inline">
-                    X-Admin-Key:{" "}
-                    <span className="text-muted-foreground italic">
-                      &lt;admin_secret&gt;
-                    </span>
-                  </code>
-                  <span className="ml-auto text-xs text-muted-foreground">
-                    {t("docs.authentication.adminNote")}
-                  </span>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Section 4: Model API */}
-          <SectionHeader
-            id="model-api"
-            icon={SECTION_ICON["model-api"]}
-            tone={SECTION_TONE["model-api"]}
-            eyebrow={t("docs.section4Eyebrow")}
-            title={t("docs.modelApi.title")}
-            description={t("docs.modelApi.description")}
-          />
-
-          {modelEndpoints.map((endpoint) => (
-            <EndpointDoc
-              key={endpoint.id}
-              id={endpoint.id}
-              method={endpoint.method}
-              path={endpoint.path}
-              title={endpoint.title}
-              description={endpoint.description}
-              curlExample={endpoint.curl}
-              defaultBody={endpoint.defaultBody}
-              responseExamples={endpoint.responses}
-              apiKey={activeKey}
-              baseUrl={baseUrl}
-              allKeys={allKeys}
-            />
-          ))}
-
-          {/* Section 5: Admin API */}
-          <SectionHeader
-            id="admin-api"
-            icon={SECTION_ICON["admin-api"]}
-            tone={SECTION_TONE["admin-api"]}
-            eyebrow={t("docs.section5Eyebrow")}
-            title={t("docs.adminApi.title")}
-            description={t("docs.adminApi.description")}
-          />
-
-          {adminEndpoints.map((endpoint) => (
-            <EndpointDoc
-              key={endpoint.id}
-              id={endpoint.id}
-              method={endpoint.method}
-              path={endpoint.path}
-              title={endpoint.title}
-              description={endpoint.description}
-              curlExample={endpoint.curl}
-              defaultBody={endpoint.defaultBody}
-              responseExamples={endpoint.responses}
-              apiKey={adminSeed}
-              baseUrl={baseUrl}
-              allKeys={[]}
-            />
-          ))}
+                </h4>
+                {modelEndpoints
+                  .filter((e) => e.category === category)
+                  .map((endpoint) => (
+                    <EndpointDoc
+                      key={`${endpoint.id}-${target.id === endpoint.id ? navigationRevision : 0}`}
+                      endpoint={endpoint}
+                      activeId={target.id}
+                      apiKey={activeKey}
+                      baseUrl={quickBaseUrl}
+                      allKeys={allKeys}
+                    />
+                  ))}
+              </section>
+            ))}
+          {activeSection === "admin-api" && (
+            <>
+              <h4 className="docs-group-title">
+                {copy("常用管理接口", "Common admin endpoints")}
+                <span>{adminEndpoints.length}</span>
+              </h4>
+              {adminEndpoints.map((endpoint) => (
+                <EndpointDoc
+                  key={`${endpoint.id}-${target.id === endpoint.id ? navigationRevision : 0}`}
+                  endpoint={endpoint}
+                  activeId={target.id}
+                  apiKey={adminSeed}
+                  baseUrl={quickBaseUrl}
+                />
+              ))}
+            </>
+          )}
         </div>
-
-        {/*
-          sticky + self-start on the grid item:
-          - self-start: aside height = content (not stretched), required for sticky to pin
-          - sticky top-4: stays in the viewport while the left column scrolls to the end
-        */}
-        <aside className="sticky top-4 z-10 hidden max-h-[calc(100dvh-2rem)] self-start xl:block">
-          <div className="flex h-full max-h-[calc(100dvh-2rem)] flex-col gap-3">
-            <div className="flex shrink-0 justify-end">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void handleCopyMarkdown()}
-                disabled={copyingMd}
-                className="gap-1.5"
-              >
-                {copyingMd ? (
-                  <Check className="size-3.5 text-emerald-500" />
-                ) : (
-                  <Copy className="size-3.5" />
-                )}
-                {t("docs.copyMarkdown")}
-              </Button>
-            </div>
-            <div className="min-h-0 flex-1 overflow-hidden">
-              <DocsTOC items={tocItems} title={t("docs.tocTitle")} />
-            </div>
-          </div>
+        <aside className="docs-sidebar">
+          <DocsTOC
+            items={tocItems}
+            title={copy("本页目录", "On this page")}
+            activeId={target.id}
+          />
         </aside>
       </div>
-    </>
+      <Dialog open={mobileToc} onOpenChange={setMobileToc}>
+        <DialogContent className="max-h-[80dvh]" aria-describedby={undefined}>
+          <DialogTitle>{copy("文档目录", "Contents")}</DialogTitle>
+          <DocsTOC
+            items={tocItems}
+            title={section.label}
+            activeId={target.id}
+            onNavigate={() => setMobileToc(false)}
+          />
+        </DialogContent>
+      </Dialog>
+    </div>
   );
 }

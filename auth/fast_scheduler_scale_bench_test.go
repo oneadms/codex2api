@@ -5,6 +5,9 @@ import (
 	"testing"
 )
 
+func BenchmarkFastSchedulerAcquire10000(b *testing.B) { benchmarkFastSchedulerAcquire(b, 10000) }
+func BenchmarkFastSchedulerAcquire50000(b *testing.B) { benchmarkFastSchedulerAcquire(b, 50000) }
+
 // BenchmarkStoreAddAccount 量化"往已有号池里加一个账号"的代价随号池大小的变化。
 // 这条路径持有 Store 全局写锁，所有请求（调度取号、账号列表）都要排在它后面，
 // 所以它必须与号池大小无关——否则批量导入会把整个网关卡住。

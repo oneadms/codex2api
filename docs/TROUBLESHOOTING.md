@@ -213,7 +213,7 @@ curl -s -H "X-Admin-Key: your-secret" http://localhost:8080/api/admin/accounts |
 # 1. 检查是否配置了 API Key
 curl -s -H "X-Admin-Key: your-secret" http://localhost:8080/api/admin/keys
 
-# 2. 如果没有配置，请求不需要认证
+# 2. 默认仍要求认证；只有未配置任何 Key 且显式开启 CODEX_ALLOW_ANONYMOUS=true 才允许普通公共接口匿名访问
 # 3. 如果配置了，确认请求头格式
 curl -H "Authorization: Bearer sk-your-key" http://localhost:8080/v1/models
 ```
@@ -438,7 +438,7 @@ docker stats codex2api --no-stream
 # 对照进程 RSS、Go heap/GC 和 response-context 逻辑字节
 curl -s -H "X-Admin-Key: your-secret" \
   http://localhost:8080/api/admin/ops/overview |
-  jq '{memory: .memory, response_cache: .response_cache}'
+  jq '{memory: .memory, request_memory: .request_memory, response_cache: .response_cache, response_cache_writer: .response_cache_writer}'
 
 # 查看 Go 内存分析（如启用 pprof）
 curl http://localhost:8080/debug/pprof/heap > heap.prof
@@ -449,8 +449,9 @@ curl http://localhost:8080/debug/pprof/heap > heap.prof
 **优化:**
 
 1. 限制日志保留时间
-2. 如果 L1 逻辑占用和高水位持续接近上限，可在设置页降低 `response_cache_local_max_bytes`；降低后会立即淘汰超出新预算的条目，并可能增加 Memory 模式的 409
-3. 减少并发连接数
+2. 同时对照 L1 的 `current_bytes` 与 `shared_payload_bytes`。多个快照可共享正文，降低逻辑预算可能主要减少可回放的历史响应，并可能增加 Memory 模式的 409，不一定同比降低 RSS。
+3. 检查 `request_memory` 和 `response_cache_writer` 的在途字节、等待数与拒绝数。`CODEX_REQUEST_MEMORY_BUDGET_MB` 控制进程内正文准入；它不包含所有输出、JSON 工作副本或 Go 堆开销。调低会更早返回可重试的 503/1013，调高须结合实际可用内存。
+4. 区分每次累计分配和请求结束后的存活堆。合并流刷新主要降低 flush 频率，不能替代正文生命周期管理；慢 Redis 和慢客户端也可能放大在途内存。
 
 ---
 
@@ -673,3 +674,17 @@ curl -X POST -H "X-Admin-Key: your-secret" http://localhost:8080/api/admin/accou
   -H "Content-Type: application/json" \
   -d '{"ids": [1, 2, 3], "concurrency": 3}'
 ```
+
+### Codex Token 刷新与授权失效
+
+普通模式默认每 2 分钟巡检一次，在 Access Token 剩余有效期不足 5 分钟时使用 Refresh Token 续期。额度冷却中的 Codex 账号仍会续期，但续期不会解除 5h/7d 冷却，也不会发送生成请求。禁用、人工暂停和明确授权失效的账号不会被此机制强行恢复。
+
+惰性模式默认不主动续期。在「设置 → Codex → 探针调度」开启「惰性模式下保持 Codex 授权」，可以单独保留 Codex 凭据续期，仍不启用真实 responses 探针。账号详情显示最近 Token 续期时间及续期失败提示。上游返回的 `expires_in` 是 AT 有效期，不能当作 RT 的固定有效期。
+
+刷新会先登记持久化保护记录，再交换 Token，并在同一数据库事务中更新使用同一 RT 的工作区凭据。只有保存成功后才发布到内存与缓存；短暂写库故障只重试保存，不重新消费 RT。开始交换后，关闭管理页面不会取消关键步骤。
+
+- `refresh_token_expired` / `refresh_token_revoked` / `refresh_token_invalidated`：授权已失效，需要重新登录并导入最新凭据；这不等同于账号被封禁。
+- `refresh_token_reused`：先检查是否有其他实例或客户端轮换了同一份凭据。项目内并发刷新会读取并复用已保存的新凭据；外部程序之间不会自动同步。
+- 「上一次 Token 刷新结果未确认」或「新 Token 保存失败」：上游可能已消费旧 RT，但本地未能确认保存完成。保护记录会跨重启保留，不会因锁超时或重置账号状态而允许再次消费旧 RT。请重新授权后导入新凭据，不要删除保护记录来强制重试。
+
+上游 OAuth 与本地数据库不能组成一个事务；进程崩溃或网络中断发生在交换与保存之间时，仍可能需要人工重新授权。多实例升级时应统一升级后再启用刷新，旧版本不识别新的持久化保护记录。

@@ -12,6 +12,8 @@ test("writable settings payload omits response cache generation regardless of va
       response_cache_reconstruct_max_bytes: 64 * 1024 * 1024,
       response_cache_config_generation: generation,
       future_setting: "preserved",
+      codex_images_main_model: "gpt-5.6-sol",
+      codex_images_default_main_model: "gpt-5.6-luna",
     };
 
     const payload = buildWritableSettingsPayload(settings);
@@ -26,6 +28,7 @@ test("writable settings payload omits response cache generation regardless of va
       response_cache_local_max_entry_bytes: 8 * 1024 * 1024,
       response_cache_reconstruct_max_bytes: 64 * 1024 * 1024,
       future_setting: "preserved",
+      codex_images_main_model: "gpt-5.6-sol",
     });
     assert.equal(
       Object.hasOwn(settings, "response_cache_config_generation"),

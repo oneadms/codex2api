@@ -980,12 +980,12 @@ export default function ApiReference() {
           { code: 200, body: `{
   "object": "list",
   "data": [
+    {"id": "gpt-6-astra", "object": "model", "owned_by": "openai"},
+    {"id": "gpt-5.6-sol", "object": "model", "owned_by": "openai"},
+    {"id": "gpt-5.6-terra", "object": "model", "owned_by": "openai"},
+    {"id": "gpt-5.6-luna", "object": "model", "owned_by": "openai"},
     {"id": "gpt-5.5", "object": "model", "owned_by": "openai"},
-    {"id": "gpt-5.5", "object": "model", "owned_by": "openai"},
-    {"id": "gpt-5.4-mini", "object": "model", "owned_by": "openai"},
-    {"id": "gpt-5.3-codex", "object": "model", "owned_by": "openai"},
     {"id": "gpt-5.3-codex-spark", "object": "model", "owned_by": "openai"},
-    {"id": "gpt-5.2", "object": "model", "owned_by": "openai"},
     {"id": "gpt-image-2", "object": "model", "owned_by": "openai"}
   ]
 }` },

@@ -149,7 +149,7 @@ func TestCustomToolChatNonStreamRebuildsEmptyTerminalOutput(t *testing.T) {
 	})
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5.4","stream":false,"messages":[{"role":"user","content":"run the custom tool"}],"tools":[{"type":"custom","custom":{"name":"exec","format":{"type":"text"}}}]}`))
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5.5","stream":false,"messages":[{"role":"user","content":"run the custom tool"}],"tools":[{"type":"custom","custom":{"name":"exec","format":{"type":"text"}}}]}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	handler.ChatCompletions(ctx)
 	if recorder.Code != http.StatusOK || calls.Load() != 1 {

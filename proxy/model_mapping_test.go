@@ -88,9 +88,9 @@ func TestResolveAnthropicModelUsesWildcardBeforeDefaultFallback(t *testing.T) {
 		t.Fatalf("resolveAnthropicModel wildcard = %q, want gpt-5.5", got)
 	}
 
-	got = resolveAnthropicModel("claude-haiku-4-5", `{}`, []string{"gpt-5.4-mini"})
-	if got != "gpt-5.4-mini" {
-		t.Fatalf("resolveAnthropicModel default = %q, want gpt-5.4-mini", got)
+	got = resolveAnthropicModel("claude-haiku-4-5", `{}`, []string{"gpt-5.6-luna"})
+	if got != "gpt-5.6-luna" {
+		t.Fatalf("resolveAnthropicModel default = %q, want gpt-5.6-luna", got)
 	}
 }
 

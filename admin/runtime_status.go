@@ -196,10 +196,11 @@ func (h *Handler) runtimeCacheStatus(ctx context.Context) runtimeCacheResponse {
 	resp.IdleConns = poolStats.IdleConns
 	resp.StaleConns = poolStats.StaleConns
 	resp.PoolSize = h.cache.PoolSize()
-	active := int(resp.TotalConns) - int(resp.IdleConns) - int(resp.StaleConns)
-	if active < 0 {
-		active = 0
-	}
+	resp.WaitCount = poolStats.WaitCount
+	resp.WaitDurationNs = poolStats.WaitDurationNs
+	resp.Timeouts = poolStats.Timeouts
+	resp.PendingRequests = poolStats.PendingRequests
+	active := poolStats.InUse()
 	if resp.PoolSize > 0 {
 		resp.UsagePercent = float64(active) / float64(resp.PoolSize) * 100
 	}

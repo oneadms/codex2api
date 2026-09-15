@@ -27,7 +27,7 @@ export function formatTestErrorMessage(message: string) {
   }
 }
 
-export const DEFAULT_TEST_MODEL = "gpt-5.4";
+export const DEFAULT_TEST_MODEL = "gpt-5.5";
 
 export function isConnectionTestModel(model: string) {
   const value = model.trim().toLowerCase();

@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
@@ -111,11 +112,59 @@ func ExecuteAntigravityResponsesRequest(ctx context.Context, account *auth.Accou
 	if err != nil {
 		return nil, err
 	}
-	method := "generateContent"
-	query := ""
-	if stream {
-		method, query = "streamGenerateContent", "?alt=sse"
+	payload, err := json.Marshal(gemini)
+	if err != nil {
+		return nil, err
 	}
+	wireModel, _ := gemini["model"].(string)
+	publicModel := model
+	return executeAntigravityOAuthRequest(ctx, account, payload, antigravityOAuthGenerateCall(stream), proxyURL, wireModel, func(resp *http.Response, stream bool, _ string) (*http.Response, error) {
+		if stream {
+			resp.Body = newAntigravitySSEResponseBody(resp.Body, publicModel)
+			resp.Header.Set("Content-Type", "text/event-stream")
+			return resp, nil
+		}
+		converted, convertErr := newAntigravityJSONResponseBody(resp.Body, publicModel)
+		if convertErr != nil {
+			return nil, convertErr
+		}
+		resp.Body = converted
+		return resp, nil
+	})
+}
+
+type antigravityOAuthUpstreamCall struct {
+	Method string
+	Query  string
+}
+
+func antigravityOAuthGenerateCall(stream bool) antigravityOAuthUpstreamCall {
+	if stream {
+		return antigravityOAuthUpstreamCall{Method: "streamGenerateContent", Query: "?alt=sse"}
+	}
+	return antigravityOAuthUpstreamCall{Method: "generateContent", Query: ""}
+}
+
+func antigravityOAuthCountTokensCall() antigravityOAuthUpstreamCall {
+	return antigravityOAuthUpstreamCall{Method: "countTokens", Query: ""}
+}
+
+type antigravityOAuthSuccessTransform func(resp *http.Response, stream bool, publicModel string) (*http.Response, error)
+
+func executeAntigravityOAuthRequest(ctx context.Context, account *auth.Account, payload []byte, call antigravityOAuthUpstreamCall, proxyURL string, wireModel string, transform antigravityOAuthSuccessTransform) (*http.Response, error) {
+	if account == nil {
+		return nil, fmt.Errorf("antigravity account is nil")
+	}
+	project, bearer := account.AntigravityCredentials()
+	if project == "" || bearer == "" {
+		return nil, fmt.Errorf("antigravity account %d has no project_id or access token", account.ID())
+	}
+	method := strings.TrimSpace(call.Method)
+	if method == "" {
+		method = "generateContent"
+	}
+	query := call.Query
+	stream := method == "streamGenerateContent"
 	client, err := antigravityHTTPClient(account.ID(), proxyURL)
 	if err != nil {
 		return nil, err
@@ -130,8 +179,9 @@ func ExecuteAntigravityResponsesRequest(ctx context.Context, account *auth.Accou
 		lastRetryableResponse = nil
 	}
 	useUserProject := antigravityUserProjectHeaderEnabled()
-	payload, _ := json.Marshal(gemini)
 	sameEndpointBudget := &antigravitySameEndpointRetryBudget{}
+	payload = sanitizeAntigravityEnvelopeToolSchemas(payload)
+	publicModel := strings.TrimSpace(wireModel)
 	for headerAttempt := 0; headerAttempt < 2; headerAttempt++ {
 		retryWithoutUserProject := false
 		for _, base := range antigravityOAuthEndpointList() {
@@ -149,7 +199,7 @@ func ExecuteAntigravityResponsesRequest(ctx context.Context, account *auth.Accou
 					req.Header.Set("x-goog-user-project", project)
 				}
 				var doErr error
-				if err := ConsumeAPIKeyModelRequestQuota(ctx, fmt.Sprint(gemini["model"])); err != nil {
+				if err := ConsumeAPIKeyModelRequestQuota(ctx, wireModel); err != nil {
 					discardLastRetryable()
 					return nil, err
 				}
@@ -172,8 +222,6 @@ func ExecuteAntigravityResponsesRequest(ctx context.Context, account *auth.Accou
 				}
 				resp.Body = io.NopCloser(bytes.NewReader(body))
 				resp.ContentLength = int64(len(body))
-				// A sub-second RATE_LIMIT_EXCEEDED or a shared MODEL_CAPACITY_EXHAUSTED
-				// is cheaper to wait out right here than to switch endpoint or account.
 				if wait, retry := sameEndpointBudget.retryDelay(resp.StatusCode, body); retry {
 					if sleepErr := antigravitySleep(ctx, wait); sleepErr == nil {
 						continue
@@ -198,10 +246,6 @@ func ExecuteAntigravityResponsesRequest(ctx context.Context, account *auth.Accou
 				}
 				resp.Body = io.NopCloser(bytes.NewReader(body))
 				resp.ContentLength = int64(len(body))
-				// Antigravity Manager retries every 403 once without the quota
-				// consumer header. Some managed projects can call Cloud Code with
-				// their bearer but are not allowed to use themselves as the billing
-				// project, which otherwise looks exactly like SERVICE_DISABLED.
 				if useUserProject {
 					_ = resp.Body.Close()
 					retryWithoutUserProject = true
@@ -232,9 +276,6 @@ func ExecuteAntigravityResponsesRequest(ctx context.Context, account *auth.Accou
 				resp.Body = io.NopCloser(bytes.NewReader(body))
 				resp.ContentLength = int64(len(body))
 				if readErr == nil && antigravityEndpointLocationUnsupported(body) {
-					// Location eligibility is authoritative for the official daily
-					// route. Return the real 400 instead of hiding it behind a later
-					// production 429/5xx response.
 					discardLastRetryable()
 					return resp, nil
 				}
@@ -245,16 +286,13 @@ func ExecuteAntigravityResponsesRequest(ctx context.Context, account *auth.Accou
 				discardLastRetryable()
 				return resp, nil
 			}
-			if stream {
-				resp.Body = newAntigravitySSEResponseBody(resp.Body, model)
-				resp.Header.Set("Content-Type", "text/event-stream")
-			} else {
-				converted, convertErr := newAntigravityJSONResponseBody(resp.Body, model)
-				if convertErr != nil {
-					last = convertErr
+			if transform != nil {
+				transformed, transformErr := transform(resp, stream, publicModel)
+				if transformErr != nil {
+					last = transformErr
 					continue
 				}
-				resp.Body = converted
+				resp = transformed
 			}
 			discardLastRetryable()
 			return resp, nil
@@ -478,19 +516,23 @@ func responsesToGeminiInternal(raw []byte, project, model string) (map[string]an
 				if role == "" {
 					role = "user"
 				}
-				text, textErr := responseItemText(m["content"])
-				if textErr != nil {
-					return nil, textErr
+				parts, partsErr := responseItemParts(m["content"], role == "user")
+				if partsErr != nil {
+					return nil, partsErr
 				}
 				switch role {
 				case "assistant":
-					add("model", text)
+					addParts("model", parts)
 				case "system", "developer":
-					if strings.TrimSpace(text) != "" {
-						systemParts = append(systemParts, text)
+					for _, p := range parts {
+						if pm, ok := p.(map[string]any); ok {
+							if t, ok := pm["text"].(string); ok && strings.TrimSpace(t) != "" {
+								systemParts = append(systemParts, t)
+							}
+						}
 					}
 				case "user":
-					add("user", text)
+					addParts("user", parts)
 				default:
 					return nil, antigravityOAuthUnsupported("message role " + role)
 				}
@@ -518,13 +560,19 @@ func responsesToGeminiInternal(raw []byte, project, model string) (map[string]an
 				if callID == "" || name == "" {
 					return nil, antigravityOAuthUnsupported("orphan function_call_output")
 				}
-				output, outputErr := antigravityFunctionOutputText(m["output"])
+				output, images, outputErr := antigravityFunctionOutput(m["output"])
 				if outputErr != nil {
 					return nil, outputErr
 				}
-				addParts("user", []any{map[string]any{"functionResponse": map[string]any{
-					"name": name, "response": map[string]any{"result": output}, "id": callID,
-				}}})
+				functionResponse := map[string]any{
+					"name":     name,
+					"response": map[string]any{"result": output},
+					"id":       callID,
+				}
+				if len(images) > 0 {
+					functionResponse["parts"] = images
+				}
+				addParts("user", []any{map[string]any{"functionResponse": functionResponse}})
 			case "reasoning":
 				// Codex and the Anthropic bridge echo previous reasoning items
 				// back as conversation history. Their payload is an opaque
@@ -734,35 +782,46 @@ func antigravityGeminiFunctionArguments(raw any) (any, error) {
 	return raw, nil
 }
 
-func antigravityFunctionOutputText(raw any) (string, error) {
+func antigravityFunctionOutput(raw any) (string, []any, error) {
 	if raw == nil {
-		return "", nil
+		return "", nil, nil
 	}
 	if text, ok := raw.(string); ok {
-		return text, nil
+		return text, nil, nil
 	}
 	if parts, ok := raw.([]any); ok {
 		texts := make([]string, 0, len(parts))
+		images := make([]any, 0)
 		for _, part := range parts {
 			partValue, ok := part.(map[string]any)
 			if !ok {
-				return "", antigravityOAuthUnsupported("non-text function_call_output parts")
+				return "", nil, antigravityOAuthUnsupported("non-map function_call_output parts")
 			}
 			partType := lowerStringField(partValue, "type")
-			if partType != "" && partType != "input_text" && partType != "output_text" && partType != "text" {
-				return "", antigravityOAuthUnsupported("function_call_output part type " + partType)
-			}
-			if text, ok := partValue["text"].(string); ok {
-				texts = append(texts, text)
+			switch partType {
+			case "", "input_text", "output_text", "text":
+				if text, ok := partValue["text"].(string); ok {
+					texts = append(texts, text)
+				} else if text, ok := partValue["content"].(string); ok {
+					texts = append(texts, text)
+				}
+			case "input_image", "image_url":
+				inlinePart, err := antigravityExtractInlineImagePart(partValue)
+				if err != nil {
+					return "", nil, err
+				}
+				images = append(images, inlinePart)
+			default:
+				return "", nil, antigravityOAuthUnsupported("function_call_output part type " + partType)
 			}
 		}
-		return strings.Join(texts, "\n"), nil
+		return strings.Join(texts, "\n"), images, nil
 	}
 	encoded, err := json.Marshal(raw)
 	if err != nil {
-		return "", fmt.Errorf("encode function_call_output: %w", err)
+		return "", nil, fmt.Errorf("encode function_call_output: %w", err)
 	}
-	return string(encoded), nil
+	return string(encoded), nil, nil
 }
 
 func antigravityGeminiNeedsToolSignature(model string) bool {
@@ -992,7 +1051,11 @@ func antigravityGeminiFunctionDeclarations(tools []any) []any {
 		if description, ok := function["description"].(string); ok && strings.TrimSpace(description) != "" {
 			declaration["description"] = description
 		}
-		declaration["parameters"] = antigravityGeminiParameters(function["parameters"])
+		rawParams := function["parameters"]
+		if rawParams == nil {
+			rawParams = function["parametersJsonSchema"]
+		}
+		declaration["parametersJsonSchema"] = antigravityGeminiParameters(rawParams)
 		declarations = append(declarations, declaration)
 	}
 	sort.SliceStable(declarations, func(i, j int) bool {
@@ -1006,7 +1069,12 @@ func antigravityGeminiFunctionDeclarations(tools []any) []any {
 func antigravityGeminiParameters(raw any) map[string]any {
 	root, ok := raw.(map[string]any)
 	if !ok {
-		return map[string]any{"type": "OBJECT", "properties": map[string]any{}}
+		return antigravityFinalizeToolSchema(map[string]any{"type": "OBJECT", "properties": map[string]any{}})
+	}
+	root = antigravityNormalizeMalformedToolSchema(root)
+	root = antigravityInlineLocalSchemaRefs(root)
+	if flattened, ok := antigravityFlattenSchemaUnions(root).(map[string]any); ok && flattened != nil {
+		root = flattened
 	}
 	definitions := map[string]any{}
 	for _, key := range []string{"$defs", "definitions"} {
@@ -1026,7 +1094,90 @@ func antigravityGeminiParameters(raw any) map[string]any {
 	if _, ok := cleaned["properties"]; !ok {
 		cleaned["properties"] = map[string]any{}
 	}
-	return cleaned
+	antigravityCleanupGeminiRequiredFields(cleaned)
+	return antigravityFinalizeToolSchema(cleaned)
+}
+
+// antigravityCleanupGeminiRequiredFields drops required entries that are not
+// declared in the sibling properties map. Gemini rejects such schemas with
+// "property is not defined" before inference starts (issue #655).
+func antigravityCleanupGeminiRequiredFields(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		antigravityFilterRequiredAgainstProperties(typed)
+		for key, item := range typed {
+			if key == "required" {
+				continue
+			}
+			antigravityCleanupGeminiRequiredFields(item)
+		}
+	case []any:
+		for _, item := range typed {
+			antigravityCleanupGeminiRequiredFields(item)
+		}
+	}
+}
+
+func antigravityFilterRequiredAgainstProperties(schema map[string]any) {
+	rawRequired, hasRequired := schema["required"]
+	if !hasRequired {
+		return
+	}
+	props, hasProps := schema["properties"].(map[string]any)
+	if !hasProps {
+		delete(schema, "required")
+		return
+	}
+	requiredNames := antigravityRequiredFieldNames(rawRequired)
+	if len(requiredNames) == 0 {
+		delete(schema, "required")
+		return
+	}
+	valid := make([]any, 0, len(requiredNames))
+	for _, name := range requiredNames {
+		if _, exists := props[name]; exists {
+			valid = append(valid, name)
+		}
+	}
+	if len(valid) == 0 {
+		delete(schema, "required")
+	} else {
+		schema["required"] = valid
+	}
+}
+
+func antigravityRequiredFieldNames(raw any) []string {
+	switch typed := raw.(type) {
+	case []any:
+		names := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if name, ok := item.(string); ok && strings.TrimSpace(name) != "" {
+				names = append(names, name)
+			}
+		}
+		return names
+	case []string:
+		names := make([]string, 0, len(typed))
+		for _, name := range typed {
+			if strings.TrimSpace(name) != "" {
+				names = append(names, name)
+			}
+		}
+		return names
+	default:
+		return nil
+	}
+}
+
+// decodeJSONPointerToken 把 $ref 里的 JSON Pointer 引用 token 还原成定义键:
+// 片段里先做百分号解码,再按 RFC 6901 把 ~1 还原成 /、~0 还原成 ~(顺序不能反)。
+// 不解码时 "#/$defs/A~1B" 会按字面量找不到 "A/B",引用被清成 {} 丢掉约束。
+func decodeJSONPointerToken(token string) string {
+	if unescaped, err := url.PathUnescape(token); err == nil {
+		token = unescaped
+	}
+	token = strings.ReplaceAll(token, "~1", "/")
+	return strings.ReplaceAll(token, "~0", "~")
 }
 
 func antigravityCleanGeminiSchema(value any, definitions map[string]any, resolving map[string]bool, depth int) any {
@@ -1046,6 +1197,7 @@ func antigravityCleanGeminiSchema(value any, definitions map[string]any, resolvi
 			case strings.HasPrefix(ref, definitionsPrefix):
 				name = strings.TrimPrefix(ref, definitionsPrefix)
 			}
+			name = decodeJSONPointerToken(name)
 			if definition, ok := definitions[name]; ok && name != "" && !resolving[name] {
 				resolving[name] = true
 				if expanded, ok := antigravityCleanGeminiSchema(definition, definitions, resolving, depth+1).(map[string]any); ok {
@@ -1127,6 +1279,85 @@ func antigravityOAuthUnsupported(feature string) error {
 		Type:       ErrorTypeInvalidRequest,
 		HTTPStatus: http.StatusBadRequest,
 	}
+}
+
+func responseItemParts(v any, allowImages bool) ([]any, error) {
+	if s, ok := v.(string); ok {
+		if strings.TrimSpace(s) == "" {
+			return nil, nil
+		}
+		return []any{map[string]any{"text": s}}, nil
+	}
+	arr, _ := v.([]any)
+	var parts []any
+	for _, x := range arr {
+		m, ok := x.(map[string]any)
+		if !ok {
+			return nil, antigravityOAuthUnsupported("non-map content parts")
+		}
+		partType := lowerStringField(m, "type")
+		switch partType {
+		case "", "input_text", "output_text", "text":
+			text := ""
+			if s, ok := m["text"].(string); ok {
+				text = s
+			} else if s, ok := m["content"].(string); ok {
+				text = s
+			}
+			if strings.TrimSpace(text) != "" {
+				parts = append(parts, map[string]any{"text": text})
+			}
+		case "input_image", "image_url":
+			if !allowImages {
+				return nil, antigravityOAuthUnsupported("images in non-user messages")
+			}
+			inlinePart, err := antigravityExtractInlineImagePart(m)
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, inlinePart)
+		default:
+			return nil, antigravityOAuthUnsupported("content part type " + partType)
+		}
+	}
+	return parts, nil
+}
+
+func antigravityExtractInlineImagePart(m map[string]any) (map[string]any, error) {
+	var rawURL string
+	if u, ok := m["image_url"].(string); ok {
+		rawURL = strings.TrimSpace(u)
+	} else if obj, ok := m["image_url"].(map[string]any); ok {
+		if u, ok := obj["url"].(string); ok {
+			rawURL = strings.TrimSpace(u)
+		}
+	}
+	if rawURL == "" {
+		if u, ok := m["url"].(string); ok {
+			rawURL = strings.TrimSpace(u)
+		}
+	}
+	if rawURL == "" {
+		return nil, antigravityOAuthUnsupported("image part without image_url")
+	}
+	if strings.HasPrefix(rawURL, "data:") {
+		rest := strings.TrimPrefix(rawURL, "data:")
+		mediaType, data, ok := strings.Cut(rest, ";base64,")
+		if !ok || strings.TrimSpace(data) == "" {
+			return nil, antigravityOAuthUnsupported("invalid base64 image data URI")
+		}
+		mimeType := strings.TrimSpace(mediaType)
+		if mimeType == "" {
+			mimeType = "image/png"
+		}
+		return map[string]any{
+			"inlineData": map[string]any{
+				"mimeType": mimeType,
+				"data":     data,
+			},
+		}, nil
+	}
+	return nil, antigravityOAuthUnsupported("remote image URLs in Antigravity OAuth adapter; use data URI")
 }
 
 func responseItemText(v any) (string, error) {

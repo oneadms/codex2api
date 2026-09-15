@@ -632,3 +632,37 @@ func TestPrepareWebsocketHeadersConvergesForwardedClientRequestID(t *testing.T) 
 		}
 	}
 }
+
+func TestPrepareWebsocketHeadersGeneratedDesktopClientSendsMatchingOriginator(t *testing.T) {
+	// issue #653：WS 握手与 HTTP 路径同规则，生成 UA 时 Originator 跟随生成的客户端前缀。
+	t.Setenv("CODEX_WS_SEND_USER_AGENT", "true")
+	prev := proxy.CurrentRuntimeSettings()
+	normalized, err := proxy.NormalizeCodexUserAgentConfigJSON(`{"client_name":"Codex Desktop","client_version":"0.153.3","os_name":"Windows","os_version":"10.0.26100","arch":"x86_64","terminal":"unknown"}`)
+	if err != nil {
+		t.Fatalf("NormalizeCodexUserAgentConfigJSON() error = %v", err)
+	}
+	proxy.ApplyRuntimeSettings(proxy.RuntimeSettings{
+		ClientCompatMode:     proxy.ClientCompatModeForce,
+		CodexUserAgentConfig: normalized,
+	})
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(prev) })
+
+	exec := NewExecutor()
+	ginHeaders := http.Header{
+		"User-Agent": []string{"codex-tui/0.153.3 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.153.3)"},
+		"Originator": []string{"codex-tui"},
+	}
+
+	headers := exec.prepareWebsocketHeaders("token-123", &auth.Account{DBID: 42, AccountID: "42"}, "42", "session-123", "api-key-1", nil, ginHeaders, nil)
+
+	wantUA := "Codex Desktop/0.153.3 (Windows 10.0.26100; x86_64) unknown (Codex Desktop; 26.901.41123)"
+	if got := headers.Get("User-Agent"); got != wantUA {
+		t.Fatalf("User-Agent = %q, want %q", got, wantUA)
+	}
+	if got := headers.Get("Originator"); got != "Codex Desktop" {
+		t.Fatalf("Originator = %q, want Codex Desktop to match generated User-Agent", got)
+	}
+	if got := headers.Get("Version"); got != "0.153.3" {
+		t.Fatalf("Version = %q, want 0.153.3", got)
+	}
+}

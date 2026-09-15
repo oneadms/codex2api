@@ -505,30 +505,26 @@ CREATE TABLE account_events (
 
 ### 缓存策略
 
-```go
-// Redis 缓存结构
-const (
-    // 限流计数器
-    KeyRateLimit = "ratelimit:{window}"
+| 数据 | 缓存策略 |
+| --- | --- |
+| API Key 鉴权配置 | 默认 L1 15 秒 / Redis L2 5 分钟，按数据库作用域和事务修订号隔离；关闭两级缓存后使用旧 `api-key` 策略 |
+| API Key 请求数、费用、Token 窗口统计 | 数据库聚合后写入 `api-key-limits`，TTL 60 秒；多个窗口批量读取 |
+| Key × 账号的共享用量增量 | `api-key-scope-delta` 分钟桶，TTL 5 分钟；最近三个桶共用 5 秒本地读取快照 |
+| Access Token | 专用 Token 缓存；写入 TTL 根据凭证有效期确定 |
+| 会话亲和关系 | 本地绑定及共享缓存；受会话 TTL 和账号可用性控制 |
+| 账号、模型冷却 | 运行态缓存；TTL 与冷却结束时间对应 |
 
-    // 会话缓存
-    KeySession = "session:{session_id}"
+运行态 Redis key 使用命名空间和摘要构造，业务 key 不直接作为 Redis key 输出。API Key 的 RPM/RPD 当前读取用量聚合快照；严格模型周预算由数据库事务和请求幂等记录控制。
 
-    // 用量统计缓存
-    KeyUsageStats = "usage:stats:{date}"
+API Key 运行态读取提供两个可选批量接口：`RuntimeBatchReader` 用于 JSON 窗口快照（Redis `MGET`），`RuntimeCounterBatchReader` 用于共享用量哈希（Redis Pipeline `HGETALL`）。每个 Redis 批次最多 128 个键；旧 `TokenCache` 适配器可以继续使用逐项读取。Memory 驱动在锁内复制快照，调用方不会拿到可修改底层缓存的引用。
 
-    // 账号 Token 缓存
-    KeyAccessToken = "token:{account_id}"
-)
+鉴权配置读取先复核数据库修订号（每进程最多复用 250 毫秒），再依次查询 L1、Redis L2 和数据库。配置回源按 Key/本地代际合并；L1 结果给每个调用者复制可变字段。累计 `quota_used` 不进入快照，有累计额度的 Key 仍逐次查询数据库；模型周预算保留转发前的权威事务。
 
-// 缓存 TTL
-type CacheTTL struct {
-    RateLimit    time.Duration = 1 * time.Minute
-    Session      time.Duration = 1 * time.Hour
-    UsageStats   time.Duration = 5 * time.Minute
-    AccessToken  time.Duration = 30 * time.Minute
-}
-```
+`api_key_auth_cache_state` 的全局修订号与 Key 配置变更在同一事务提交，使用行更新保证提交顺序；不以可能乱序提交的 outbox 自增 ID 最大值作为版本。用量更新不推进版本。Redis key 包含数据库作用域、修订号和 Key 摘要，旧请求延迟回填只能写入旧版本。本地代际在失效时同步推进，阻止在途查询重新放入 L1。管理操作同步失效并发送 Pub/Sub；定期复核持久修订号覆盖通知断连、丢失和旧版本写入。
+
+L1 受 4,096 条、16 MiB 逻辑 JSON 字节和单条 64 KiB 预算限制；大条目仍可从数据库服务当前请求，但不入缓存。Memory 模式不复制第二份 L2。配置回源与修订查询都可由服务关闭取消并等待退出；单个请求取消不会中断其他调用者共享的读取。鉴权 Redis 读写有 300 毫秒 socket/上下文预算，故障回源数据库；无法复核数据库修订号时返回 503。
+
+分组/账号预算使用独立的回源合并，同一批读取不因首个调用者取消而中断其他请求；共享读取仍有两秒上限。后台共享增量写入限制为 16 个槽位，饱和时同步回退。
 
 #### Responses 上下文缓存
 

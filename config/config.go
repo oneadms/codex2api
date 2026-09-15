@@ -90,16 +90,20 @@ func (c *CacheConfig) Label() string {
 // Config 全局核心环境配置（物理隔离的服务器参数）
 // 业务逻辑参数（如 ProxyURL，APIKeys，MaxConcurrency）已全部移至数据库 SystemSettings 进行化
 type Config struct {
-	Port                   int
-	BindAddress            string // 监听地址，默认 0.0.0.0（兼容 Docker / 反代 / 公网）；如需仅本机访问可设为 127.0.0.1
-	AdminSecret            string
-	AllowAnonymousV1       bool // 显式允许 /v1/* 在未配置 API Key 时无鉴权放行（默认禁止）
-	MaxRequestBodySize     int
-	Database               DatabaseConfig
-	Cache                  CacheConfig
-	UseWebsocket           bool     // 是否启用 WebSocket 传输
-	CodexUpstreamTransport string   // http|auto|ws，默认 http；USE_WEBSOCKET 作为旧开关兼容
-	TrustedProxies         []string // Gin 可信反向代理 CIDR/IP；默认信任回环与私有网段以兼容 Docker 反代，none/off/false/0 表示禁用
+	Port                      int
+	BindAddress               string // 监听地址，默认 0.0.0.0（兼容 Docker / 反代 / 公网）；如需仅本机访问可设为 127.0.0.1
+	AdminSecret               string
+	AllowAnonymousV1          bool // 显式允许 /v1/* 在未配置 API Key 时无鉴权放行（默认禁止）
+	APIKeyAuthCacheEnabled    bool
+	MaxRequestBodySize        int
+	RequestMemoryBudgetBytes  int64 // Process-local retained HTTP/WS request body budget.
+	SchedulerMaxWaiters       int   // Process-local waiting request budget.
+	SchedulerMaxWaitersPerKey int
+	Database                  DatabaseConfig
+	Cache                     CacheConfig
+	UseWebsocket              bool     // 是否启用 WebSocket 传输
+	CodexUpstreamTransport    string   // http|auto|ws，默认 http；USE_WEBSOCKET 作为旧开关兼容
+	TrustedProxies            []string // Gin 可信反向代理 CIDR/IP；默认信任回环与私有网段以兼容 Docker 反代，none/off/false/0 表示禁用
 }
 
 // applyTimezone 让 TZ 环境变量(含 .env 里的)真正作用于自然日限额等本地时间语义。
@@ -141,6 +145,14 @@ func Load(envPath string) (*Config, error) {
 	}
 	cfg.AdminSecret = strings.TrimSpace(os.Getenv("ADMIN_SECRET"))
 	cfg.AllowAnonymousV1 = parseBoolEnv(os.Getenv("CODEX_ALLOW_ANONYMOUS"))
+	cfg.APIKeyAuthCacheEnabled = true
+	if value := strings.TrimSpace(os.Getenv("CODEX_API_KEY_AUTH_CACHE_ENABLED")); value != "" {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return nil, fmt.Errorf("CODEX_API_KEY_AUTH_CACHE_ENABLED must be a boolean")
+		}
+		cfg.APIKeyAuthCacheEnabled = enabled
+	}
 	// 默认绑 0.0.0.0 以兼容 Docker 端口映射、反向代理、生产服务器等常规部署。
 	// 安全防护由 fail-closed 中间件 + 首启自助初始化 (/api/admin/bootstrap) + 启动 banner 共同保证；
 	// 想要严格仅本机访问的用户可设 CODEX_BIND=127.0.0.1。
@@ -153,7 +165,33 @@ func Load(envPath string) (*Config, error) {
 			cfg.MaxRequestBodySize = mb * 1024 * 1024
 		}
 	}
+	cfg.RequestMemoryBudgetBytes = max(int64(128<<20), int64(cfg.MaxRequestBodySize))
+	if value := strings.TrimSpace(os.Getenv("CODEX_REQUEST_MEMORY_BUDGET_MB")); value != "" {
+		mb, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || mb <= 0 || mb > (1<<63-1)/(1<<20) {
+			return nil, fmt.Errorf("CODEX_REQUEST_MEMORY_BUDGET_MB must be a positive MiB value")
+		}
+		cfg.RequestMemoryBudgetBytes = mb << 20
+		if cfg.RequestMemoryBudgetBytes < int64(cfg.MaxRequestBodySize) {
+			return nil, fmt.Errorf("CODEX_REQUEST_MEMORY_BUDGET_MB must be at least CODEX_MAX_REQUEST_BODY_SIZE_MB")
+		}
+	}
 	cfg.TrustedProxies = parseTrustedProxiesEnv(os.Getenv("CODEX_TRUSTED_PROXIES"))
+	for _, setting := range []struct {
+		name   string
+		target *int
+	}{
+		{"CODEX_SCHEDULER_MAX_WAITERS", &cfg.SchedulerMaxWaiters},
+		{"CODEX_SCHEDULER_MAX_WAITERS_PER_KEY", &cfg.SchedulerMaxWaitersPerKey},
+	} {
+		if value := strings.TrimSpace(os.Getenv(setting.name)); value != "" {
+			n, err := strconv.Atoi(value)
+			if err != nil || n <= 0 {
+				return nil, fmt.Errorf("%s must be a positive integer", setting.name)
+			}
+			*setting.target = n
+		}
+	}
 
 	// Codex 上游传输配置。CODEX_UPSTREAM_TRANSPORT 优先；USE_WEBSOCKET 保留为旧开关。
 	cfg.CodexUpstreamTransport = normalizeCodexUpstreamTransport(os.Getenv("CODEX_UPSTREAM_TRANSPORT"))

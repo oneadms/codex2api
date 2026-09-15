@@ -974,6 +974,102 @@ func TestFastSchedulerRemainingQuotaSortOrder(t *testing.T) {
 	}
 }
 
+func TestFastSchedulerPrefersLowerOccupiedWhenUsageTied(t *testing.T) {
+	busy := &Account{
+		DBID:                     1,
+		AccessToken:              "token",
+		Status:                   StatusReady,
+		HealthTier:               HealthTierHealthy,
+		UsagePercent7d:           40,
+		UsagePercent7dValid:      true,
+		BaseConcurrencyEffective: 4,
+		DynamicConcurrencyLimit:  4,
+	}
+	idle := &Account{
+		DBID:                     2,
+		AccessToken:              "token",
+		Status:                   StatusReady,
+		HealthTier:               HealthTierHealthy,
+		UsagePercent7d:           40,
+		UsagePercent7dValid:      true,
+		BaseConcurrencyEffective: 4,
+		DynamicConcurrencyLimit:  4,
+	}
+	atomic.StoreInt64(&busy.ActiveRequests, 2)
+	atomic.StoreInt64(&busy.OccupiedRequests, 2)
+
+	scheduler := NewFastScheduler(4, "remaining_quota")
+	scheduler.Rebuild([]*Account{busy, idle})
+
+	got := scheduler.Acquire()
+	if got == nil {
+		t.Fatal("Acquire() returned nil")
+	}
+	defer scheduler.Release(got)
+	if got.DBID != idle.DBID {
+		t.Fatalf("Acquire() picked dbID=%d, want lower-occupied account %d", got.DBID, idle.DBID)
+	}
+}
+
+func TestFastSchedulerRemainingQuotaStillPrefersLowerUsageDespiteOccupancy(t *testing.T) {
+	lowUsageBusy := &Account{
+		DBID:                     1,
+		AccessToken:              "token",
+		Status:                   StatusReady,
+		HealthTier:               HealthTierHealthy,
+		UsagePercent7d:           10,
+		UsagePercent7dValid:      true,
+		BaseConcurrencyEffective: 4,
+		DynamicConcurrencyLimit:  4,
+	}
+	highUsageIdle := &Account{
+		DBID:                     2,
+		AccessToken:              "token",
+		Status:                   StatusReady,
+		HealthTier:               HealthTierHealthy,
+		UsagePercent7d:           80,
+		UsagePercent7dValid:      true,
+		BaseConcurrencyEffective: 4,
+		DynamicConcurrencyLimit:  4,
+	}
+	atomic.StoreInt64(&lowUsageBusy.ActiveRequests, 2)
+	atomic.StoreInt64(&lowUsageBusy.OccupiedRequests, 2)
+
+	scheduler := NewFastScheduler(4, "remaining_quota")
+	scheduler.Rebuild([]*Account{lowUsageBusy, highUsageIdle})
+
+	got := scheduler.Acquire()
+	if got == nil {
+		t.Fatal("Acquire() returned nil")
+	}
+	defer scheduler.Release(got)
+	if got.DBID != lowUsageBusy.DBID {
+		t.Fatalf("Acquire() picked dbID=%d, want lower-usage account %d", got.DBID, lowUsageBusy.DBID)
+	}
+}
+
+func TestFastSchedulerRoundRobinPrefersLowerOccupiedUnderBurst(t *testing.T) {
+	a1 := newFastSchedulerTestAccount(1, HealthTierHealthy, 100, 4)
+	a2 := newFastSchedulerTestAccount(2, HealthTierHealthy, 100, 4)
+	a3 := newFastSchedulerTestAccount(3, HealthTierHealthy, 100, 4)
+	atomic.StoreInt64(&a1.ActiveRequests, 2)
+	atomic.StoreInt64(&a1.OccupiedRequests, 2)
+	atomic.StoreInt64(&a2.ActiveRequests, 1)
+	atomic.StoreInt64(&a2.OccupiedRequests, 1)
+
+	scheduler := NewFastScheduler(4, "round_robin")
+	scheduler.Rebuild([]*Account{a1, a2, a3})
+
+	got := scheduler.Acquire()
+	if got == nil {
+		t.Fatal("Acquire() returned nil")
+	}
+	defer scheduler.Release(got)
+	if got.DBID != a3.DBID {
+		t.Fatalf("Acquire() picked dbID=%d, want idle account %d", got.DBID, a3.DBID)
+	}
+}
+
 func TestFastSchedulerRemainingQuotaTieBreakProvenThenDBID(t *testing.T) {
 	unproven := &Account{
 		DBID:                     1,

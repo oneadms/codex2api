@@ -355,8 +355,9 @@ func defaultBootstrapSettings() *database.SystemSettings {
 	return &database.SystemSettings{
 		SiteName:                          database.DefaultSiteName,
 		MaxConcurrency:                    2,
+		CodexTelemetryEnabled:             false, // 实验性:模拟遥测默认不外发,由部署者显式开启
 		GlobalRPM:                         0,
-		TestModel:                         "gpt-5.4",
+		TestModel:                         auth.DefaultTestModel,
 		TestContent:                       auth.DefaultTestContent,
 		TestConcurrency:                   50,
 		BackgroundRefreshIntervalMinutes:  2,
@@ -381,7 +382,7 @@ func defaultBootstrapSettings() *database.SystemSettings {
 		UsageLogFlushIntervalSeconds:      5,
 		StreamFlushPolicy:                 proxy.StreamFlushPolicyImmediate,
 		StreamFlushIntervalMS:             20,
-		FirstTokenMode:                    proxy.FirstTokenModeStrict,
+		FirstTokenMode:                    proxy.FirstTokenModeLoose,
 		FirstTokenTimeoutSeconds:          0,
 		BillingTierPolicy:                 proxy.BillingTierPolicyActual,
 		AffinityMode:                      "bounded",

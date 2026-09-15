@@ -169,7 +169,7 @@ func TestReviewWSFailOpenDoesNotPoisonLaterFailClosed(t *testing.T) {
 				if i == 1 {
 					t.Setenv("CODEX_WS_CONTINUATION_FAIL_OPEN", "false")
 				}
-				if err := conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.create","model":"gpt-5.4","previous_response_id":%q,"input":[{"type":"message","role":"user","content":"increment"}]}`, id))); err != nil {
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.create","model":"gpt-5.5","previous_response_id":%q,"input":[{"type":"message","role":"user","content":"increment"}]}`, id))); err != nil {
 					t.Fatal(err)
 				}
 				conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -258,7 +258,7 @@ func newReviewWSClient(t *testing.T, execute func(context.Context, *auth.Account
 		resetResponseCacheForTest()
 	})
 	globalWSSizeRouter = websocketSizeRouter{}
-	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.5"})
 	t.Cleanup(store.Stop)
 	account := &auth.Account{DBID: 1, AccessToken: "test", AccountID: "test", PlanType: "plus"}
 	store.AddAccount(account)
@@ -280,7 +280,7 @@ func TestReviewWSHTTPFallbackMissingContextReleasesLease(t *testing.T) {
 	conn, account := newReviewWSClient(t, func(context.Context, *auth.Account, []byte, string, string, string, *DeviceProfileConfig, http.Header, string) (*http.Response, error) {
 		return nil, errors.New("websocket: close 1009 (message too big)")
 	})
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5.4","previous_response_id":"missing","input":[{"type":"message","role":"user","content":"next"}]}`)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5.5","previous_response_id":"missing","input":[{"type":"message","role":"user","content":"next"}]}`)); err != nil {
 		t.Fatal(err)
 	}
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -304,7 +304,7 @@ func TestReviewWSStoreFalseSkipsAlwaysCache(t *testing.T) {
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(wsContextTestSSE(fmt.Sprintf("r%d", calls.Add(1)), `{"type":"message","role":"assistant","content":"ok"}`)))}, nil
 	})
 	for i := 0; i < 2; i++ {
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5.4","store":false,"input":[{"type":"message","role":"user","content":"root"}]}`)); err != nil {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5.5","store":false,"input":[{"type":"message","role":"user","content":"root"}]}`)); err != nil {
 			t.Fatal(err)
 		}
 		conn.SetReadDeadline(time.Now().Add(5 * time.Second))

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -40,10 +41,13 @@ func runStoreSchedulerLockOrderRace(
 	filterEntered := make(chan struct{})
 	allowStoreRead := make(chan struct{})
 	acquireDone := make(chan struct{})
+	var enteredOnce sync.Once
 	go func() {
 		defer close(acquireDone)
 		scheduler.AcquireExcludingWithFilter(0, nil, func(*Account) bool {
-			close(filterEntered)
+			// An unlocked filter may be retried when the concurrent mutation
+			// invalidates the candidate window.
+			enteredOnce.Do(func() { close(filterEntered) })
 			<-allowStoreRead
 			store.mu.RLock()
 			store.mu.RUnlock()

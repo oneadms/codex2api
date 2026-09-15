@@ -3,6 +3,22 @@ import {
   type DocsLocale,
   type QuickTool,
 } from "./quickStartTools";
+import { addEndpointDetails, buildExtraEndpoints } from "./endpointDetails";
+import { buildGuides, guideToMarkdown } from "./docsGuides";
+
+export type ParameterSpec = {
+  name: string;
+  type: string;
+  required: boolean;
+  description: string;
+  defaultValue?: string;
+};
+export type ResponseExample = {
+  code: number;
+  body: string;
+  label?: string;
+  lang?: string;
+};
 
 export type EndpointSpec = {
   id: string;
@@ -12,7 +28,11 @@ export type EndpointSpec = {
   description: string;
   curl: string;
   defaultBody?: string;
-  responses: { code: number; body: string }[];
+  responses: ResponseExample[];
+  category?: "text" | "media" | "advanced";
+  transport?: "websocket";
+  parameters?: ParameterSpec[];
+  requestExamples?: { label: string; lang: string; content: string }[];
 };
 
 function copy(locale: DocsLocale, zh: string, en: string) {
@@ -23,7 +43,7 @@ export function buildEndpointSpecs(
   baseUrl: string,
   locale: DocsLocale = "zh",
 ): EndpointSpec[] {
-  return [
+  const endpoints: EndpointSpec[] = [
     {
       id: "api-responses",
       method: "POST",
@@ -48,7 +68,7 @@ export function buildEndpointSpecs(
   "input": [
     {"role": "user", "content": [{"type": "input_text", "text": "Hello, what can you do?"}]}
   ],
-  "stream": true,
+  "stream": false,
   "reasoning": {"effort": "high"}
 }'`,
       responses: [
@@ -84,7 +104,8 @@ export function buildEndpointSpecs(
 }`,
         },
         {
-          code: 429,
+          code: 503,
+          label: copy(locale, "额度耗尽", "Quota exhausted"),
           body: `{
   "error": {"message": "Rate limit exceeded", "type": "server_error", "code": "account_pool_usage_limit_reached", "resets_in_seconds": 18000}
 }`,
@@ -120,7 +141,7 @@ export function buildEndpointSpecs(
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "Hello!"}
   ],
-  "stream": true,
+  "stream": false,
   "reasoning_effort": "high"
 }'`,
       responses: [
@@ -157,8 +178,8 @@ export function buildEndpointSpecs(
       title: copy(locale, "创建 Messages 响应", "Create Messages output"),
       description: copy(
         locale,
-        "Anthropic Messages API 兼容端点。Claude OAuth 账号可走原生 Messages 透传；没有可用 Claude 账号时自动回退到 Codex Responses 转换，模型名按系统设置映射。",
-        "Anthropic Messages compatible endpoint. Claude OAuth accounts use native Messages passthrough; when no eligible Claude account is available, the gateway falls back to Codex Responses translation with the configured model mapping.",
+        "Anthropic Messages 兼容端点。支持 Claude OAuth、Setup Token 和 API Key + Base URL 原生路径；Codex 转换回退受密钥渠道、账号与路由设置约束，模型按系统设置映射。",
+        "Anthropic Messages compatible endpoint with native Claude OAuth, Setup Token and API Key + Base URL paths. Codex translation fallback depends on key channel, account and routing settings, with configured model mappings.",
       ),
       defaultBody: `{
   "model": "claude-sonnet-4-5",
@@ -219,8 +240,8 @@ export function buildEndpointSpecs(
       title: copy(locale, "生成图片", "Generate images"),
       description: copy(
         locale,
-        "OpenAI Images 兼容端点，底层使用 Codex Responses 的 image_generation 能力。response_format 默认 b64_json；当系统设置里配置了 S3 兼容云存储后，传 response_format=\"url\" 会把图片上传到对象存储并返回限时（1 小时）预签名直链，否则 url 退回为 base64 data URL。",
-        "OpenAI Images compatible endpoint backed by Codex Responses image_generation. response_format defaults to b64_json; once an S3-compatible cloud storage is configured in system settings, response_format=\"url\" uploads the image to object storage and returns a time-limited (1h) presigned link, otherwise url falls back to a base64 data URL.",
+        "支持 GPT Image 2 / 2.5 及可用 Grok Imagine 模型，按模型选择上游。GPT Image 路径的 response_format 默认 b64_json；配置 S3 兼容存储后，url 返回 1 小时预签名链接，否则返回 base64 data URL。",
+        "Supports GPT Image 2 / 2.5 and available Grok Imagine models, routed by model name. On the GPT Image path, response_format defaults to b64_json; with S3-compatible storage, url returns a 1-hour signed link, otherwise a base64 data URL.",
       ),
       defaultBody: `{
   "model": "gpt-image-2",
@@ -240,6 +261,7 @@ export function buildEndpointSpecs(
       responses: [
         {
           code: 200,
+          label: "Base64",
           body: `{
   "created": 1710000000,
   "model": "gpt-image-2",
@@ -249,8 +271,8 @@ export function buildEndpointSpecs(
         },
         {
           code: 200,
-          body: `// response_format="url" + 已配置云存储
-{
+          label: "URL",
+          body: `{
   "created": 1710000000,
   "model": "gpt-image-2",
   "data": [{"url": "https://<bucket-endpoint>/images/api/...png?X-Amz-Expires=3600&X-Amz-Signature=..."}],
@@ -284,6 +306,18 @@ export function buildEndpointSpecs(
   "prompt": "Replace the background with aurora lights",
   "images": [{"image_url": "https://example.com/source.png"}]
 }'`,
+      requestExamples: [
+        {
+          label: "multipart",
+          lang: "bash",
+          content: `curl '${baseUrl}/v1/images/edits' \\
+  -H 'Authorization: Bearer YOUR_API_KEY' \\
+  -F 'model=gpt-image-2.5-flare' \\
+  -F 'prompt=Replace the background with aurora lights' \\
+  -F 'image=@source.png' \\
+  -F 'mask=@mask.png'`,
+        },
+      ],
       responses: [
         {
           code: 200,
@@ -314,12 +348,12 @@ export function buildEndpointSpecs(
           body: `{
   "object": "list",
   "data": [
+    {"id": "gpt-6-astra", "object": "model", "owned_by": "openai"},
+    {"id": "gpt-5.6-sol", "object": "model", "owned_by": "openai"},
+    {"id": "gpt-5.6-terra", "object": "model", "owned_by": "openai"},
+    {"id": "gpt-5.6-luna", "object": "model", "owned_by": "openai"},
     {"id": "gpt-5.5", "object": "model", "owned_by": "openai"},
-    {"id": "gpt-5.5", "object": "model", "owned_by": "openai"},
-    {"id": "gpt-5.4-mini", "object": "model", "owned_by": "openai"},
-    {"id": "gpt-5.3-codex", "object": "model", "owned_by": "openai"},
     {"id": "gpt-5.3-codex-spark", "object": "model", "owned_by": "openai"},
-    {"id": "gpt-5.2", "object": "model", "owned_by": "openai"},
     {"id": "gpt-image-2", "object": "model", "owned_by": "openai"}
   ]
 }`,
@@ -356,6 +390,9 @@ export function buildEndpointSpecs(
       ],
     },
   ];
+  return [...endpoints, ...buildExtraEndpoints(baseUrl, locale)].map(
+    (endpoint) => addEndpointDetails(endpoint, locale),
+  );
 }
 
 export function buildAdminSpecs(
@@ -835,9 +872,23 @@ curl --request GET \\
 
 function endpointToMd(e: EndpointSpec): string {
   const responses = e.responses
-    .map((r) => `**${r.code}**\n\n\`\`\`json\n${r.body}\n\`\`\``)
+    .map(
+      (r) =>
+        `**${r.code}${r.label ? ` · ${r.label}` : ""}**\n\n\`\`\`${r.lang || "json"}\n${r.body}\n\`\`\``,
+    )
     .join("\n\n");
-  return `### ${e.method} ${e.path} — ${e.title}\n\n${e.description}\n\n\`\`\`bash\n${e.curl}\n\`\`\`\n\n${responses}`;
+  const parameters =
+    e.parameters
+      ?.map(
+        (p) =>
+          `- \`${p.name}\` (${p.type}${p.required ? ", required" : ""})${p.defaultValue ? ` [${p.defaultValue}]` : ""}: ${p.description}`,
+      )
+      .join("\n") || "";
+  const examples =
+    e.requestExamples
+      ?.map((e) => `**${e.label}**\n\n\`\`\`${e.lang}\n${e.content}\n\`\`\``)
+      .join("\n\n") || "";
+  return `<a id="${e.id}"></a>\n\n### ${e.method} ${e.path} — ${e.title}\n\n${e.description}\n\n${parameters}\n\n\`\`\`bash\n${e.curl}\n\`\`\`\n\n${examples}\n\n${responses}`;
 }
 
 export function buildDocsMarkdown(args: {
@@ -845,117 +896,48 @@ export function buildDocsMarkdown(args: {
   quickTools: QuickTool[];
   apiKeyExample: string;
   locale?: DocsLocale;
+  clientConfigs?: { label: string; lang: string; content: string }[];
 }): string {
-  const { baseUrl, quickTools, apiKeyExample, locale = "zh" } = args;
-  const modelEndpoints = buildEndpointSpecs(baseUrl, locale);
-  const adminEndpoints = buildAdminSpecs(baseUrl, locale);
-
-  const quickToolLines = quickTools
-    .map((tool) => {
-      const resolved = resolveTemplate(tool, baseUrl, apiKeyExample);
-      if (tool.kind === "protocol") {
-        return `- **${tool.name}** (${tool.badge}) — ${tool.blurb}\n\n  \`${resolved}\``;
-      }
-      return `- **${tool.name}** (${tool.badge}) — ${tool.blurb}\n\n  \`\`\`${tool.templateLang}\n${resolved}\n\`\`\``;
-    })
-    .join("\n\n");
-
-  return `# ${copy(locale, "Codex2API 使用文档", "Codex2API Documentation")}
-
-> ${copy(locale, "基础地址", "Base URL")}：\`${baseUrl}\`
-> ${copy(locale, "默认认证", "Default authentication")}：\`Authorization: Bearer <api-key>\`
-
----
-
-## 1. ${copy(locale, "快速接入", "Quick Start")}
-
-${copy(locale, "挑选你常用的 AI 客户端，复制配置或一键唤起：", "Pick your preferred AI client, then copy its config or launch it directly:")}
-
-${quickToolLines}
-
-### ${copy(locale, "cURL 快速验证", "cURL Quick Check")}
-
-\`\`\`bash
-curl -X POST ${baseUrl}/v1/responses \\
-  -H "Authorization: Bearer ${apiKeyExample}" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model":"gpt-5.5","input":[{"role":"user","content":[{"type":"input_text","text":"Hello"}]}]}'
-\`\`\`
-
----
-
-## 2. ${copy(locale, "客户端配置", "Client Configuration")}
-
-### Codex CLI
-
-${copy(locale, "写入", "Write to")} \`~/.codex/config.toml\`：
-
-\`\`\`toml
-model_provider = "OpenAI"
-model = "gpt-5.5"
-
-[model_providers.OpenAI]
-name = "OpenAI"
-base_url = "${baseUrl}"
-wire_api = "responses"
-requires_openai_auth = true
-
-[features]
-goals = true
-\`\`\`
-
-\`~/.codex/auth.json\`：
-
-\`\`\`json
-{ "OPENAI_API_KEY": "${apiKeyExample}" }
-\`\`\`
-
-### Claude Code
-
-${copy(locale, "环境变量", "Environment variables")}（\`~/.bashrc\` / \`~/.zshrc\`）：
-
-\`\`\`bash
-export ANTHROPIC_BASE_URL="${baseUrl}"
-export ANTHROPIC_AUTH_TOKEN="${apiKeyExample}"
-export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-\`\`\`
-
-${copy(locale, "或", "Or")} \`~/.claude/settings.json\`：
-
-\`\`\`json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "${baseUrl}",
-    "ANTHROPIC_AUTH_TOKEN": "${apiKeyExample}",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
-  }
-}
-\`\`\`
-
----
-
-## 3. ${copy(locale, "认证方式", "Authentication")}
-
-${copy(locale, "所有端点（除 `/health` 外）需要密钥，按以下任一方式传入：", "All endpoints except `/health` require a key, supplied through one of the following methods:")}
-
-- \`Authorization: Bearer <key>\` — ${copy(locale, "标准方式（推荐）", "standard method (recommended)")}
-- \`x-api-key: <key>\` — ${copy(locale, "Anthropic SDK 默认", "Anthropic SDK default")}
-- \`anthropic-auth-token: <key>\` — ${copy(locale, "备用兼容", "compatibility fallback")}
-
-${copy(locale, "管理接口需要", "Admin endpoints require")} \`X-Admin-Key: <admin_secret>\`。
-
----
-
-## 4. ${copy(locale, "模型 API", "Model API")}
-
-${modelEndpoints.map(endpointToMd).join("\n\n")}
-
----
-
-## 5. ${copy(locale, "账号管理 API", "Account Management API")}
-
-> ${copy(locale, "所有管理接口需要 `X-Admin-Key` 请求头。", "All admin endpoints require the `X-Admin-Key` request header.")}
-
-${adminEndpoints.map(endpointToMd).join("\n\n")}
-`;
+  const {
+    baseUrl,
+    quickTools,
+    apiKeyExample,
+    locale = "zh",
+    clientConfigs,
+  } = args;
+  const c = (zh: string, en: string) => copy(locale, zh, en);
+  const guides = buildGuides(baseUrl, locale);
+  const clients =
+    clientConfigs ||
+    quickTools
+      .filter((tool) => tool.kind !== "protocol")
+      .map((tool) => ({
+        label: tool.name,
+        lang: tool.templateLang || "text",
+        content: resolveTemplate(tool, baseUrl, apiKeyExample),
+      }));
+  const block = (label: string, lang: string, content: string) =>
+    `### ${label}\n\n\`\`\`${lang}\n${content}\n\`\`\``;
+  return [
+    `# ${c("Codex2API 使用文档", "Codex2API documentation")}`,
+    `> ${c("服务地址", "Service URL")}: ${baseUrl}`,
+    `## ${c("快速接入", "Quick start")}`,
+    c(
+      "1. 在账号管理中启用可用账号。\n2. 在 API 密钥中创建客户端密钥。\n3. 配置客户端并发送最小请求。\n4. 在使用统计核对结果与用量。",
+      "1. Enable an eligible account.\n2. Create a client API key.\n3. Configure the client and send a minimal request.\n4. Check the result and usage in the dashboard.",
+    ),
+    ...clients.map((e) => block(e.label, e.lang, e.content)),
+    `## ${c("开发指南", "Development")}`,
+    ...guides.filter((g) => g.section === "development").map(guideToMarkdown),
+    `## ${c("接口参考", "API reference")}`,
+    ...guides.filter((g) => g.section === "model-api").map(guideToMarkdown),
+    ...buildEndpointSpecs(baseUrl, locale).map(endpointToMd),
+    `## ${c("故障排查", "Troubleshooting")}`,
+    ...guides
+      .filter((g) => g.section === "troubleshooting")
+      .map(guideToMarkdown),
+    `## ${c("管理与进阶", "Administration")}`,
+    ...guides.filter((g) => g.section === "admin-api").map(guideToMarkdown),
+    ...buildAdminSpecs(baseUrl, locale).map(endpointToMd),
+  ].join("\n\n");
 }

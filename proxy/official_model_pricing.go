@@ -210,10 +210,11 @@ func fetchOfficialPricingMarkdown(ctx context.Context, client *http.Client, sour
 func ParseOpenAIOfficialPricingMarkdown(body []byte) (map[string]database.ModelPricingOverride, error) {
 	standard := parseOfficialPricingTable(body, "### Standard pricing data")
 	fast := parseOfficialPricingTable(body, "### Fast pricing data")
-	if len(standard) == 0 {
+	images := parseGPTImage25Pricing(body)
+	if len(standard) == 0 && len(images) == 0 {
 		return nil, fmt.Errorf("未找到 Standard pricing data 表")
 	}
-	out := make(map[string]database.ModelPricingOverride, len(standard))
+	out := images
 	for model, cells := range standard {
 		if len(cells) < 9 {
 			continue
