@@ -121,6 +121,7 @@ type Handler struct {
 	// 余额查询短缓存避免账号列表重新渲染或多管理员同时打开页面时重复探测上游。
 	openAIResponsesBalanceMu    sync.RWMutex
 	openAIResponsesBalanceCache map[int64]openAIResponsesBalanceCacheEntry
+	traeCNCredits               traeCNCreditsCache
 
 	// 账号请求统计缓存,按渠道分键(codex/grok 各自刷新互不牵连;旧全量路径
 	// 用 "all" 键)。分页路径 stale-while-revalidate,TTL 见 requestCountCacheTTL。
@@ -1134,6 +1135,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/accounts/traecn/export", h.ExportTraeCNAccounts)
 	api.POST("/accounts/:id/traecn/refresh", h.RefreshTraeCNAccount)
 	api.POST("/accounts/:id/traecn/checkin", h.TriggerTraeCNCheckin)
+	api.GET("/accounts/:id/traecn/credits", h.GetTraeCNCredits)
 	api.PATCH("/accounts/:id/traecn", h.UpdateTraeCNAccount)
 	api.PATCH("/accounts/:id/grok", h.UpdateGrokAccount)
 	api.GET("/accounts/:id/grok/state", h.GetGrokAccountState)

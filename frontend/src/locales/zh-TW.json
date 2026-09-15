@@ -138,7 +138,17 @@
     "modelsCopyOne": "複製 {{model}}",
     "checkin": "立即簽到",
     "checkinSuccess": "簽到成功",
-    "checkinLast": "{{date}} 已簽 · 積分 {{credits}}"
+    "checkinLast": "{{date}} 已簽 · 積分 {{credits}}",
+    "columnCredits": "積分用量",
+    "creditsTotal": "積分總量",
+    "creditsUsed": "已消耗",
+    "creditsRemaining": "剩餘 {{value}}",
+    "creditsRefresh": "重新整理積分",
+    "creditsUnavailable": "積分查詢失敗",
+    "creditsStale": "資料已過期",
+    "creditsUpdatedAt": "更新於 {{time}}",
+    "creditsProgress": "已消耗 {{used}} / {{total}} 積分",
+    "creditsScope": "上游目前權益積分彙總；每分鐘自動更新，支援手動重新整理。"
   },
   "antigravity": {
     "authKind": "憑證類型",

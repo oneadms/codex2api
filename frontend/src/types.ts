@@ -982,6 +982,20 @@ export interface UpdateTraeCNAccountRequest {
   group_ids?: number[]
 }
 
+export interface TraeCNCreditsSnapshot {
+  total: number
+  used: number
+  remaining: number
+  used_percent: number
+  updated_at: string
+}
+
+export interface TraeCNCreditsResponse {
+  credits: TraeCNCreditsSnapshot
+  stale: boolean
+  error?: string
+}
+
 export interface TraeCNModelSyncResponse {
   models: string[]
   effective_models?: string[]

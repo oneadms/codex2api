@@ -314,7 +314,17 @@
     "modelsCopyOne": "Copy {{model}}",
     "checkin": "Check in now",
     "checkinSuccess": "Check-in succeeded",
-    "checkinLast": "Checked in {{date}} · {{credits}} credits"
+    "checkinLast": "Checked in {{date}} · {{credits}} credits",
+    "columnCredits": "Credit usage",
+    "creditsTotal": "Total credits",
+    "creditsUsed": "Consumed",
+    "creditsRemaining": "{{value}} remaining",
+    "creditsRefresh": "Refresh credits",
+    "creditsUnavailable": "Credit query failed",
+    "creditsStale": "Out of date",
+    "creditsUpdatedAt": "Updated at {{time}}",
+    "creditsProgress": "{{used}} of {{total}} credits consumed",
+    "creditsScope": "Current entitlement summary from the provider. Updates every minute; manual refresh is available."
   },
   "grok": {
     "pageTitle": "Grok Accounts",

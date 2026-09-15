@@ -111,8 +111,8 @@ func (a *Account) ApplyTraeCNCheckinForTest(snapshot TraeCNCheckinSnapshot) {
 	a.mu.Unlock()
 }
 
-// TraeCNCheckinHeaders 在标准桌面指纹之上补市场客户端标识：积分签到接口
-// (api.trae.cn/trae/api/v2/ug/*) 要求 x-market-* 系列头，缺了就会被判定为非客户端。
+// TraeCNCheckinHeaders 构造市场客户端身份，供积分签到（ug）与权益查询（pay）共用。
+// 这些接口要求 x-market-* 系列头，与推理接口的身份头不同。
 func TraeCNCheckinHeaders(account *Account, accessToken, requestID string) http.Header {
 	// 市场接口（api.trae.cn/trae/api/v2/ug/*）是另一套客户端身份，逐项对齐抓包：
 	//   user-agent: VSCode 1.107.1 (Trae CN)、accept-language: zh-CN、

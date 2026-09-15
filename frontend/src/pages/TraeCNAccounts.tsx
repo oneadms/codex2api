@@ -43,6 +43,8 @@ import PageHeader from "../components/PageHeader";
 import StateShell from "../components/StateShell";
 import Pagination from "../components/Pagination";
 import StatusBadge from "../components/StatusBadge";
+import TraeCNCreditsCell from "../components/TraeCNCreditsCell";
+import { useTraeCNCredits } from "../hooks/useTraeCNCredits";
 import AccountGroupMultiSelect from "../components/AccountGroupMultiSelect";
 import ModelLogo from "../components/ModelLogo";
 import Modal from "../components/Modal";
@@ -671,6 +673,8 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const { confirm, confirmDialog } = useConfirmDialog();
   const requestAbortRef = useRef<AbortController | null>(null);
   const [accounts, setAccounts] = useState<AccountRow[]>([]);
+  const creditAccountIDs = useMemo(() => accounts.map(account => account.id), [accounts]);
+  const { states: creditStates, refresh: refreshCredits } = useTraeCNCredits(creditAccountIDs);
   const [groups, setGroups] = useState<AccountGroup[]>([]);
   const traeGroups = useMemo(() => groups.filter((group) => group.channel === "traecn"), [groups]);
   const [models, setModels] = useState<string[]>(DEFAULT_TRAE_MODELS);
@@ -1093,11 +1097,15 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
     }
     setBusy({ id: account.id, action });
     try {
-      if (action === "refresh") await api.refreshTraeCNAccount(account.id);
+      if (action === "refresh") {
+        await api.refreshTraeCNAccount(account.id);
+        await refreshCredits(account.id);
+      }
       else if (action === "syncModels") await api.syncAccountModelsUpstream(account.id);
       else if (action === "checkin") {
         const result = await api.checkinTraeCNAccount(account.id);
         showToast(result.message || t("traecn.checkinSuccess"), "success");
+        await refreshCredits(account.id);
         await reload(true);
         return;
       }
@@ -1288,6 +1296,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
                   </th>
                   <th className="px-3 py-3">{t("traecn.columnAccount")}</th>
                   <th className="px-3 py-3">{t("traecn.columnModels")}</th>
+                  <th className="px-3 py-3">{t("traecn.columnCredits")}</th>
                   <th className="px-3 py-3">{t("traecn.columnEndpoint")}</th>
                   <th className="px-3 py-3">{t("traecn.columnGroups")}</th>
                   <th className="px-3 py-3">{t("traecn.columnStatus")}</th>
@@ -1340,6 +1349,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
                       <td className="px-3 py-3 align-top">
                         <TraeCNModelsCell account={account} catalog={models} onOpen={() => setModelsAccount(account)} />
                       </td>
+                      <td className="px-3 py-3"><TraeCNCreditsCell state={creditStates[account.id]} onRefresh={() => void refreshCredits(account.id)} /></td>
                       <td className="max-w-[240px] px-3 py-3">
                         <div className="truncate font-mono text-xs" title={account.traecn_host || DEFAULT_HOST}>{account.traecn_host || DEFAULT_HOST}</div>
                         {account.proxy_url ? <div className="mt-0.5 truncate text-[11px] text-muted-foreground" title={account.proxy_url}>{account.proxy_url}</div> : <div className="mt-0.5 text-[11px] text-muted-foreground">{t("traecn.noProxy")}</div>}

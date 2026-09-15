@@ -314,7 +314,17 @@
     "modelsCopyOne": "复制 {{model}}",
     "checkin": "立即签到",
     "checkinSuccess": "签到成功",
-    "checkinLast": "{{date}} 已签 · 积分 {{credits}}"
+    "checkinLast": "{{date}} 已签 · 积分 {{credits}}",
+    "columnCredits": "积分用量",
+    "creditsTotal": "积分总量",
+    "creditsUsed": "已消耗",
+    "creditsRemaining": "剩余 {{value}}",
+    "creditsRefresh": "刷新积分",
+    "creditsUnavailable": "积分查询失败",
+    "creditsStale": "数据已过期",
+    "creditsUpdatedAt": "更新于 {{time}}",
+    "creditsProgress": "已消耗 {{used}} / {{total}} 积分",
+    "creditsScope": "上游当前权益积分汇总；每分钟自动更新，支持手动刷新。"
   },
   "grok": {
     "pageTitle": "Grok 账号",

@@ -18,6 +18,7 @@ import type {
   AddTraeCNAccountsResponse,
   UpdateTraeCNAccountRequest,
   TraeCNModelSyncResponse,
+  TraeCNCreditsResponse,
   TraeCNOAuthStartResponse,
   TraeCNOAuthStatusResponse,
   TraeCNOAuthCompleteResponse,
@@ -737,6 +738,11 @@ export const api = {
     request<MessageResponse>(`/accounts/${id}/traecn/refresh`, {
       method: 'POST',
       timeoutMs: 45_000,
+    }),
+  getTraeCNCredits: (id: number, signal?: AbortSignal, force = false) =>
+    request<TraeCNCreditsResponse>(`/accounts/${id}/traecn/credits${force ? '?refresh=1' : ''}`, {
+      signal,
+      timeoutMs: 50_000,
     }),
   checkinTraeCNAccount: (id: number) =>
     request<{ message: string; checked_in: boolean; claimed: boolean; skipped?: string; credits?: number; extra?: number; date?: string }>(`/accounts/${id}/traecn/checkin`, {
