@@ -17,6 +17,15 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// traeCNCreditsTestSnapshot 造一份 Code + Work 双池快照，两个池的数字必须不同，
+// 免得前端或缓存把两池当一个余额。
+func traeCNCreditsTestSnapshot(total, used float64) proxy.TraeCNCreditsSnapshot {
+	return proxy.TraeCNCreditsSnapshot{Pools: []proxy.TraeCNCreditsPool{
+		{Kind: proxy.TraeCNCreditsPoolCode, Total: total, Used: used, Remaining: total - used, UpdatedAt: time.Now()},
+		{Kind: proxy.TraeCNCreditsPoolWork, Total: 300, Used: 120, Remaining: 180, UpdatedAt: time.Now()},
+	}}
+}
+
 func TestTraeCNCreditsCacheRefreshAndFailure(t *testing.T) {
 	var cache traeCNCreditsCache
 	account := &auth.Account{DBID: 1}
@@ -27,7 +36,7 @@ func TestTraeCNCreditsCacheRefreshAndFailure(t *testing.T) {
 		if fail {
 			return proxy.TraeCNCreditsSnapshot{}, errors.New("upstream unavailable")
 		}
-		return proxy.TraeCNCreditsSnapshot{Total: 1100, Used: 611.42, UpdatedAt: time.Now()}, nil
+		return traeCNCreditsTestSnapshot(1100, 611.42), nil
 	}
 	first, err := cache.get(t.Context(), account, false, query)
 	if err != nil || first.Credits == nil || first.Stale {
@@ -77,7 +86,7 @@ func TestTraeCNCreditsCacheSingleflightAndCancellation(t *testing.T) {
 		case <-ctx.Done():
 			return proxy.TraeCNCreditsSnapshot{}, ctx.Err()
 		}
-		return proxy.TraeCNCreditsSnapshot{Total: 100}, nil
+		return traeCNCreditsTestSnapshot(100, 40), nil
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
@@ -93,8 +102,17 @@ func TestTraeCNCreditsCacheSingleflightAndCancellation(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			result, err := cache.get(t.Context(), account, false, query)
-			if err != nil || result.Credits == nil || result.Credits.Total != 100 {
+			if err != nil || result.Credits == nil {
 				t.Errorf("shared query lost: %+v, %v", result, err)
+				return
+			}
+			code, ok := result.Credits.Pool(proxy.TraeCNCreditsPoolCode)
+			if !ok || code.Total != 100 {
+				t.Errorf("shared query lost the Code pool: %+v", result.Credits.Pools)
+			}
+			work, ok := result.Credits.Pool(proxy.TraeCNCreditsPoolWork)
+			if !ok || work.Total != 300 {
+				t.Errorf("shared query lost the Work pool: %+v", result.Credits.Pools)
 			}
 		}()
 	}
@@ -129,7 +147,10 @@ func TestGetTraeCNCreditsServesSummaryWithoutCredentials(t *testing.T) {
 	store.AddAccount(account)
 	handler := &Handler{store: store}
 	_, err := handler.traeCNCredits.get(t.Context(), account, false, func(context.Context) (proxy.TraeCNCreditsSnapshot, error) {
-		return proxy.TraeCNCreditsSnapshot{Total: 1100, Used: 611.42, Remaining: 488.58, UsedPercent: 55.58, UpdatedAt: time.Now()}, nil
+		return proxy.TraeCNCreditsSnapshot{Pools: []proxy.TraeCNCreditsPool{
+			{Kind: proxy.TraeCNCreditsPoolCode, Total: 1100, Used: 611.42, Remaining: 488.58, UsedPercent: 55.58, UpdatedAt: time.Now()},
+			{Kind: proxy.TraeCNCreditsPoolWork, Total: 300, Used: 120, Remaining: 180, UsedPercent: 40, UpdatedAt: time.Now()},
+		}}, nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -146,7 +167,8 @@ func TestGetTraeCNCreditsServesSummaryWithoutCredentials(t *testing.T) {
 		if recorder.Code != tc.status || strings.Contains(recorder.Body.String(), "private-token") {
 			t.Fatalf("response = %d %s", recorder.Code, recorder.Body.String())
 		}
-		if tc.status == 200 && !strings.Contains(recorder.Body.String(), `"remaining":488.58`) {
+		if tc.status == 200 && (!strings.Contains(recorder.Body.String(), `"remaining":488.58`) ||
+			!strings.Contains(recorder.Body.String(), `"kind":"code"`) || !strings.Contains(recorder.Body.String(), `"kind":"work"`)) {
 			t.Fatalf("missing credits: %s", recorder.Body.String())
 		}
 	}

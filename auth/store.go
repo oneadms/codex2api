@@ -174,10 +174,14 @@ type Account struct {
 	// TraeCNUpstreamModels is the last model catalog fetched from the Trae
 	// upstream. TraeCNModelAllowlist is an optional per-account narrowing list;
 	// Models is kept as the effective (routable) projection for legacy callers.
-	TraeCNUpstreamModelCatalog      []string
-	traeCNCheckin                   TraeCNCheckinSnapshot
-	TraeCNModelAllowlist            []string
-	TraeCNModelAllowlistSet         bool
+	TraeCNUpstreamModelCatalog []string
+	traeCNCheckin              TraeCNCheckinSnapshot
+	TraeCNModelAllowlist       []string
+	TraeCNModelAllowlistSet    bool
+	// TraeCNCreditsPool 是账号级积分池设置（auto/code/work），
+	// traeCNCreditsBalance 是最近一次观测到的 IDE/Work 两端余额。
+	TraeCNCreditsPool               string
+	traeCNCreditsBalance            TraeCNCreditsBalance
 	TraeCNModelCatalogSyncedAtValue time.Time
 	traeRefreshMu                   sync.Mutex
 	// CredentialGeneration fences every asynchronous Grok observation and OAuth
@@ -5227,6 +5231,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		TraeCNDeviceMachineID:        strings.TrimSpace(row.GetCredential(TraeCNMachineIDCredentialKey)),
 		TraeCNDeviceID:               strings.TrimSpace(row.GetCredential(TraeCNDeviceIDCredentialKey)),
 		TraeCNDeviceMarketUserID:     strings.TrimSpace(row.GetCredential(TraeCNMarketUserIDCredentialKey)),
+		TraeCNCreditsPool:            NormalizeTraeCNCreditsPoolMode(row.GetCredential(TraeCNCreditsPoolCredentialKey)),
 		BaseURL:                      strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		APIKey:                       strings.TrimSpace(apiKey),
 		Models:                       models,

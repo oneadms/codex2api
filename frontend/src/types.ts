@@ -288,6 +288,8 @@ export interface AccountRow {
   traecn_upstream_models?: string[]
   traecn_model_allowlist?: string[]
   traecn_models_synced_at?: string
+  /** 账号级积分池：auto（默认，IDE 池见底时切 Work）/ code / work。 */
+  traecn_credits_pool?: TraeCNCreditsPoolMode
   /** 账号绑定的设备码（一账号一份，Trae 风控按它识别设备）。 */
   traecn_device_id?: string
   traecn_machine_id?: string
@@ -980,14 +982,29 @@ export interface UpdateTraeCNAccountRequest {
   models?: string[]
   proxy_url?: string
   group_ids?: number[]
+  /** 空字符串表示不改动账号当前的积分池设置。 */
+  credits_pool?: TraeCNCreditsPoolMode | ''
 }
 
-export interface TraeCNCreditsSnapshot {
+/** Trae CN 的积分按客户端分池：code 走 IDE，work 走 Work 端，两个池各自消耗、互不通用。 */
+export type TraeCNCreditsPoolKind = 'code' | 'work'
+
+/** 账号级积分池设置：auto 在 IDE 池见底且 Work 池有额度时自动切到 Work 端点。 */
+export type TraeCNCreditsPoolMode = 'auto' | 'code' | 'work'
+
+export interface TraeCNCreditsPool {
+  kind: TraeCNCreditsPoolKind
   total: number
   used: number
   remaining: number
   used_percent: number
-  updated_at: string
+  updated_at?: string
+  /** 单个池查询失败的原因；有值时 total/used 不代表真实余额。 */
+  error?: string
+}
+
+export interface TraeCNCreditsSnapshot {
+  pools: TraeCNCreditsPool[]
 }
 
 export interface TraeCNCreditsResponse {

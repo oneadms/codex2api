@@ -148,7 +148,17 @@
     "creditsStale": "資料已過期",
     "creditsUpdatedAt": "更新於 {{time}}",
     "creditsProgress": "已消耗 {{used}} / {{total}} 積分",
-    "creditsScope": "上游目前權益積分彙總；每分鐘自動更新，支援手動重新整理。"
+    "creditsPoolCode": "Code",
+    "creditsPoolWork": "Work",
+    "creditsPoolUnavailable": "該池查詢失敗",
+    "creditsPoolProgress": "{{pool}} 積分消耗進度",
+    "creditsPoolProgressValue": "{{pool}} 已消耗 {{used}} / {{total}} 積分",
+    "creditsScope": "積分依端點分池：Code 是 IDE 側可用額度，Work 是 Work 專屬額度，兩者分開消耗。auto 模式下 IDE 池用盡、Work 池還有額度時，閘道會自動改用 Work 端點；數值每分鐘自動更新，支援手動重新整理。",
+    "creditsPoolLabel": "積分池",
+    "creditsPoolAuto": "自動（IDE 用盡後轉 Work）",
+    "creditsPoolCodeOnly": "只用 Code（IDE）池",
+    "creditsPoolWorkOnly": "強制走 Work 池",
+    "creditsPoolHint": "自動模式只在確定 IDE 池用盡時切到 Work 端點，避免上游補額度後繼續扣錯池。"
   },
   "antigravity": {
     "authKind": "憑證類型",

@@ -30,6 +30,7 @@ import type {
   AccountGroup,
   AccountRow,
   AddTraeCNAccountsResponse,
+  TraeCNCreditsPoolMode,
   TraeCNImportItem,
   TraeCNOAuthStatusResponse,
 } from "../types";
@@ -718,7 +719,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const [jsonText, setJsonText] = useState("");
   const jsonFileRef = useRef<HTMLInputElement | null>(null);
   const [editing, setEditing] = useState<AccountRow | null>(null);
-  const [editForm, setEditForm] = useState({ name: "", host: DEFAULT_HOST, proxyURL: "", groupIDs: [] as number[] });
+  const [editForm, setEditForm] = useState({ name: "", host: DEFAULT_HOST, proxyURL: "", groupIDs: [] as number[], creditsPool: "auto" as TraeCNCreditsPoolMode });
   const [saving, setSaving] = useState(false);
 
   const reloadGroups = useCallback(async () => {
@@ -1070,6 +1071,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
       host: account.traecn_host || DEFAULT_HOST,
       proxyURL: account.proxy_url ?? "",
       groupIDs: account.group_ids ?? [],
+      creditsPool: account.traecn_credits_pool ?? "auto",
     });
   };
 
@@ -1082,6 +1084,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
         host: editForm.host.trim() || DEFAULT_HOST,
         proxy_url: editForm.proxyURL.trim(),
         group_ids: editForm.groupIDs,
+        credits_pool: editForm.creditsPool,
       });
       showToast(t("traecn.editSuccess"), "success");
       setEditing(null);
@@ -1545,6 +1548,19 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
           <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("traecn.nameLabel")}</span><Input value={editForm.name} onChange={(event) => setEditForm((form) => ({ ...form, name: event.target.value }))} /></label>
           <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("traecn.hostLabel")}</span><Input value={editForm.host} onChange={(event) => setEditForm((form) => ({ ...form, host: event.target.value }))} /></label>
           <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("traecn.proxyLabel")}</span><Input value={editForm.proxyURL} onChange={(event) => setEditForm((form) => ({ ...form, proxyURL: event.target.value }))} /></label>
+          <div className="space-y-1.5">
+            <span className="text-xs font-semibold text-muted-foreground">{t("traecn.creditsPoolLabel")}</span>
+            <Select
+              value={editForm.creditsPool}
+              options={[
+                { value: "auto", label: t("traecn.creditsPoolAuto") },
+                { value: "code", label: t("traecn.creditsPoolCodeOnly") },
+                { value: "work", label: t("traecn.creditsPoolWorkOnly") },
+              ]}
+              onValueChange={(value) => setEditForm((form) => ({ ...form, creditsPool: value as TraeCNCreditsPoolMode }))}
+            />
+            <span className="block text-[11px] text-muted-foreground">{t("traecn.creditsPoolHint")}</span>
+          </div>
           <div className="rounded-lg border border-border bg-muted/25 px-3 py-2 text-xs leading-relaxed text-muted-foreground">{t("traecn.modelsFromUpstreamHint")}</div>
           <div className="space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("accounts.groupsLabel")}</span><AccountGroupMultiSelect groups={traeGroups} value={editForm.groupIDs} onChange={(value) => setEditForm((form) => ({ ...form, groupIDs: value }))} placeholder={t("accounts.groupsPlaceholder")} emptyLabel={t("accounts.groupsNone")} selectedLabel={t("accounts.groupsSelected", { count: editForm.groupIDs.length })} /></div>
         </div>

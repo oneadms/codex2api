@@ -495,6 +495,7 @@ func (s *Store) applyPersistentAccountSnapshot(dst, src *Account, enabled bool) 
 	dst.TraeCNUpstreamModelCatalog = cloneStringSlice(src.TraeCNUpstreamModelCatalog)
 	dst.TraeCNModelAllowlist = cloneStringSlice(src.TraeCNModelAllowlist)
 	dst.TraeCNModelAllowlistSet = src.TraeCNModelAllowlistSet
+	dst.TraeCNCreditsPool = src.TraeCNCreditsPool
 	dst.TraeCNModelCatalogSyncedAtValue = src.TraeCNModelCatalogSyncedAtValue
 	dst.ModelMapping = src.ModelMapping
 	dst.CodexClientMetadataMode = src.CodexClientMetadataMode

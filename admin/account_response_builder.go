@@ -269,6 +269,7 @@ func (h *Handler) buildAccountResponse(
 		TraeCNUpstreamModels:   traeCNUpstreamModels,
 		TraeCNModelAllowlist:   traeCNModelAllowlist,
 		TraeCNModelsSyncedAt:   row.GetCredential(auth.TraeCNModelsSyncedAtCredentialKey),
+		TraeCNCreditsPool:      auth.NormalizeTraeCNCreditsPoolMode(row.GetCredential(auth.TraeCNCreditsPoolCredentialKey)),
 		// 未显式绑定的老账号返回它实际生效的设备码（与出站请求同一算法），
 		// 否则列表里看不到设备码，也就无法核对"一账号一设备"。
 		TraeCNDeviceID:               traeCNDeviceIdentity.DeviceID,

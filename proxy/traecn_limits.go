@@ -102,9 +102,16 @@ func normalizeTraeCNLimitHTTPResponse(resp *http.Response) {
 // 未给出恢复时间时采用短期冷却；该时长不代表上游额度的实际重置周期。
 func applyTraeCNLimitCooldown(store *auth.Store, account *auth.Account, payload []byte, resp *http.Response) codex429Decision {
 	now := time.Now()
+	// 额度不足的报错里带着分池余额：记下来，下一次请求就能切到 Work 池。
+	recordTraeCNCreditsRemainFromPayload(account, payload)
 	reason, duration := "rate_limited", time.Minute
 	if IsTraeCNQuotaError(payload) {
 		reason, duration = "usage_limit", 5*time.Minute
+		// Code 池见底但 Work 池还有额度时，账号仍然可用：只做短冷却，让紧接着的
+		// 重试（此时已切到 access_type=1）先把 Work 池用起来。
+		if account != nil && account.TraeCNShouldUseWorkPool() {
+			reason, duration = "usage_limit", traeCNWorkPoolSwitchCooldown
+		}
 	}
 	hint := parseRetryAfterHeaderAt(firstGJSONString(payload, "error.retry_after", "response.error.retry_after", "response.status_details.error.retry_after", "retry_after"), now)
 	if resetAt, ok := parseRetryAfterResetAt(responseFailedErrorBody(payload), now); ok {
@@ -130,3 +137,7 @@ func applyTraeCNLimitCooldown(store *auth.Store, account *auth.Account, payload 
 	}
 	return decision
 }
+
+// traeCNWorkPoolSwitchCooldown 是「换池」用的短冷却：IDE 池刚报额度不足、Work 池还
+// 有积分时只挡一下，让重试尽快用 Work 端点，而不是把账号整整停 5 分钟。
+const traeCNWorkPoolSwitchCooldown = 5 * time.Second

@@ -1824,6 +1824,8 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 	if err != nil {
 		return nil, ErrBadRequest("Trae CN request conversion failed: " + err.Error())
 	}
+	// Code 池见底、Work 池还有额度时切到 Work 端点（access_type=1），两个池分开消耗。
+	body = applyTraeCNAccessType(body, traeCNAccessTypeForAccount(account))
 	proxyURL := strings.TrimSpace(proxyOverride)
 	if proxyURL == "" {
 		account.Mu().RLock()
@@ -1906,7 +1908,7 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 		normalizeTraeCNLimitHTTPResponse(resp)
 		return resp, nil
 	}
-	upstreamBody := wrapTraeCNResumeUpstream(ctx, client, req, resp.Body)
+	upstreamBody := wrapTraeCNCreditsRemainScanner(wrapTraeCNResumeUpstream(ctx, client, req, resp.Body), account)
 	canonicalStream := traeCNCanonicalStreamForTools(upstreamBody, model, bridges, contracts)
 	// Chat and Messages handlers deliberately aggregate canonical SSE for their
 	// non-stream response types. Native Responses non-stream instead expects one

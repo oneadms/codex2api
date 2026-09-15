@@ -40,6 +40,9 @@ type updateTraeCNAccountRequest struct {
 	Models   *[]string       `json:"models"`
 	ProxyURL string          `json:"proxy_url"`
 	GroupIDs json.RawMessage `json:"group_ids"`
+	// CreditsPool 是账号级积分池设置：空 = 不改，code 只用 IDE 侧额度，
+	// work 强制走 Work 端点，auto 在 IDE 池见底、Work 池还有额度时自动切换。
+	CreditsPool string `json:"credits_pool"`
 }
 
 type traeCNImportItem struct {
@@ -347,6 +350,13 @@ func (h *Handler) UpdateTraeCNAccount(c *gin.Context) {
 	}
 	name := security.SanitizeInput(strings.TrimSpace(req.Name))
 	proxyURL := security.SanitizeInput(strings.TrimSpace(req.ProxyURL))
+	creditsPool := strings.ToLower(strings.TrimSpace(req.CreditsPool))
+	switch creditsPool {
+	case "", auth.TraeCNCreditsPoolAuto, auth.TraeCNCreditsPoolCode, auth.TraeCNCreditsPoolWork:
+	default:
+		writeError(c, http.StatusBadRequest, "积分池只能是 auto、code 或 work")
+		return
+	}
 	if security.ContainsXSS(name) || security.ContainsSQLInjection(name) || utf8.RuneCountInString(name) > 100 {
 		writeError(c, http.StatusBadRequest, "名称包含非法字符或长度超过100字符")
 		return
@@ -426,6 +436,10 @@ func (h *Handler) UpdateTraeCNAccount(c *gin.Context) {
 		"models":                                  effectiveModels,
 		auth.TraeCNModelAllowlistCredentialKey:    models,
 		auth.TraeCNModelAllowlistSetCredentialKey: true,
+	}
+	// 空值保持原样，避免只想改名字的客户端把积分池设置清掉。
+	if creditsPool != "" {
+		credentials[auth.TraeCNCreditsPoolCredentialKey] = creditsPool
 	}
 	if err := h.db.UpdateCredentials(ctx, id, credentials); err != nil {
 		writeInternalError(c, err)

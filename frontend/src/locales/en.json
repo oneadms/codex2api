@@ -324,7 +324,17 @@
     "creditsStale": "Out of date",
     "creditsUpdatedAt": "Updated at {{time}}",
     "creditsProgress": "{{used}} of {{total}} credits consumed",
-    "creditsScope": "Current entitlement summary from the provider. Updates every minute; manual refresh is available."
+    "creditsPoolCode": "Code",
+    "creditsPoolWork": "Work",
+    "creditsPoolUnavailable": "Pool query failed",
+    "creditsPoolProgress": "{{pool}} credit consumption",
+    "creditsPoolProgressValue": "{{pool}}: {{used}} of {{total}} credits consumed",
+    "creditsScope": "Credits are pooled per endpoint: Code covers the IDE pool, Work covers the Work-only pool, and they are spent separately. In auto mode the gateway switches to the Work endpoint once the IDE pool is drained and Work credits remain. Updated every minute with manual refresh.",
+    "creditsPoolLabel": "Credit pool",
+    "creditsPoolAuto": "Auto (switch to Work when IDE is drained)",
+    "creditsPoolCodeOnly": "Code (IDE) pool only",
+    "creditsPoolWorkOnly": "Always use the Work pool",
+    "creditsPoolHint": "Auto only switches after the IDE pool is known to be drained, so a topped-up IDE pool is never charged to Work credits."
   },
   "grok": {
     "pageTitle": "Grok Accounts",

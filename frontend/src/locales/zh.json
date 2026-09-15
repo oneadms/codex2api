@@ -324,7 +324,17 @@
     "creditsStale": "数据已过期",
     "creditsUpdatedAt": "更新于 {{time}}",
     "creditsProgress": "已消耗 {{used}} / {{total}} 积分",
-    "creditsScope": "上游当前权益积分汇总；每分钟自动更新，支持手动刷新。"
+    "creditsPoolCode": "Code",
+    "creditsPoolWork": "Work",
+    "creditsPoolUnavailable": "该池查询失败",
+    "creditsPoolProgress": "{{pool}} 积分消耗进度",
+    "creditsPoolProgressValue": "{{pool}} 已消耗 {{used}} / {{total}} 积分",
+    "creditsScope": "积分按端点分池：Code 是 IDE 侧可用额度，Work 是 Work 专属额度，两者分开消耗。auto 模式下 IDE 池见底、Work 池还有额度时，网关会自动改用 Work 端点；数值每分钟自动更新，支持手动刷新。",
+    "creditsPoolLabel": "积分池",
+    "creditsPoolAuto": "自动（IDE 用尽后转 Work）",
+    "creditsPoolCodeOnly": "只用 Code（IDE）池",
+    "creditsPoolWorkOnly": "强制走 Work 池",
+    "creditsPoolHint": "自动模式只在你明确看到 IDE 池见底时切到 Work 端点，避免上游补额度后继续扣错池。"
   },
   "grok": {
     "pageTitle": "Grok 账号",
