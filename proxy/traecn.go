@@ -416,19 +416,33 @@ func traeCNRequestBodyPlan(canonical []byte, knownConfigSets ...[]string) ([]byt
 	return encoded, model, bridges, contracts, err
 }
 
-func traeCanonicalFailure(id, model, code, message string, usage map[string]any) []byte {
+func traeCanonicalFailure(id, model, code, message string, usage map[string]any, providerErrors ...gjson.Result) []byte {
 	if strings.TrimSpace(code) == "" || code == "0" {
 		code = ErrorCodeUpstreamError
 	}
 	if strings.TrimSpace(message) == "" {
 		message = "Trae CN upstream request failed"
 	}
+	detail := map[string]any{"code": code, "message": message}
+	switch traeCNLimitKind(code, message) {
+	case "usage_limit":
+		detail["type"], detail["status_code"] = "insufficient_quota", http.StatusTooManyRequests
+	case "rate_limited":
+		detail["type"], detail["status_code"] = "rate_limit_exceeded", http.StatusTooManyRequests
+	}
+	if len(providerErrors) > 0 && detail["status_code"] == http.StatusTooManyRequests {
+		for _, key := range []string{"resets_at", "resets_in_seconds", "retry_after"} {
+			if value := traeFirstText(providerErrors[0], "error."+key, key); value != "" {
+				detail[key] = value
+			}
+		}
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"type": "response.failed",
 		"response": map[string]any{
 			"id": id, "object": "response", "status": "failed", "model": model,
 			"output": []any{}, "usage": usage,
-			"error": map[string]any{"code": code, "message": message},
+			"error": detail,
 		},
 	})
 	return payload
@@ -914,27 +928,6 @@ func extractTraeCNModelIDs(body []byte) []string {
 	}
 	sort.Strings(result)
 	return result
-}
-
-// IsTraeCNRateLimitError recognizes Trae's application-level throttling. The
-// provider returns these failures inside a successful HTTP 200 SSE stream, so
-// callers must not rely on the transport status alone.
-func IsTraeCNRateLimitError(payload []byte) bool {
-	if len(bytes.TrimSpace(payload)) == 0 || !gjson.ValidBytes(payload) {
-		return false
-	}
-	root := gjson.ParseBytes(payload)
-	code := strings.ToLower(strings.TrimSpace(traeFirstText(root,
-		"response.error.code", "response.status_details.error.code", "error.code", "code", "error_code", "errorCode")))
-	switch code {
-	case "4011", "429", "rate_limit", "rate_limited", "rate_limit_exceeded":
-		return true
-	}
-	message := strings.ToLower(strings.TrimSpace(traeFirstText(root,
-		"response.error.message", "response.status_details.error.message", "error.message", "message", "msg")))
-	return strings.Contains(message, "exceeded the rate limit") ||
-		strings.Contains(message, "too many requests") ||
-		strings.Contains(message, "rate limit exceeded")
 }
 
 type traeCNOutputKind uint8
@@ -1502,13 +1495,13 @@ func (s *traeCNCanonicalState) emitCompleted(writer io.Writer, finishReason stri
 	return writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent(eventType, map[string]any{"response": response}))
 }
 
-func (s *traeCNCanonicalState) emitFailure(writer io.Writer, code, message string) error {
+func (s *traeCNCanonicalState) emitFailure(writer io.Writer, code, message string, providerErrors ...gjson.Result) error {
 	if s.terminal {
 		return nil
 	}
 	s.terminal = true
 	s.logTerminal("response.failed", code)
-	return writeTraeCanonicalEvent(writer, traeCanonicalFailure(s.responseID, s.model, code, message, s.usage))
+	return writeTraeCanonicalEvent(writer, traeCanonicalFailure(s.responseID, s.model, code, message, s.usage, providerErrors...))
 }
 
 // 只记录终态和内容长度，便于定位模型收尾、断流和转换错误，不记录思考或正文。
@@ -1537,12 +1530,12 @@ func (s *traeCNCanonicalState) consume(writer io.Writer, eventName string, data 
 	}
 	if name == "error" || name == "failed" {
 		code, message := traeProviderError(parsed)
-		return s.emitFailure(writer, code, message)
+		return s.emitFailure(writer, code, message, parsed)
 	}
 	if parsed.IsObject() {
 		code, message := traeProviderError(parsed)
 		if (parsed.Get("success").Exists() && !parsed.Get("success").Bool()) || (code != "" && code != "0" && message != "" && name != "token_usage") {
-			return s.emitFailure(writer, code, message)
+			return s.emitFailure(writer, code, message, parsed)
 		}
 	}
 	switch name {
@@ -1910,6 +1903,7 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 		return nil, ErrUpstream(0, "请求 Trae CN 上游失败", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		normalizeTraeCNLimitHTTPResponse(resp)
 		return resp, nil
 	}
 	upstreamBody := wrapTraeCNResumeUpstream(ctx, client, req, resp.Body)

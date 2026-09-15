@@ -3973,7 +3973,8 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 	maxRetries := h.getMaxRetries()
 	maxRateLimitRetries := h.getMaxRateLimitRetries()
 	if isTraeCNResumeWorker(c) {
-		maxRetries, maxRateLimitRetries = 0, 0
+		// 明确的首包前限流仍按配置换号；首包后的流重试由已有写出检查阻止。
+		maxRetries = 0
 	}
 	generalRetries := 0
 	rateLimitRetries := 0
@@ -8244,6 +8245,9 @@ func usageLimitFallbackCooldown(account *auth.Account, body []byte) time.Duratio
 
 // Apply429Cooldown 统一处理 429 对账号状态的影响。
 func Apply429Cooldown(store *auth.Store, account *auth.Account, body []byte, resp *http.Response, model string) codex429Decision {
+	if account != nil && account.IsTraeCNAPI() {
+		return applyTraeCNLimitCooldown(store, account, body, resp)
+	}
 	// Grok 上游的 429 语义（免费额度耗尽/超支限制/Retry-After）与 Codex 不同，且需要落
 	// grok_free_quota 权威快照——批量测试/连通性测试也走这里，必须同样路由到 Grok 专用映射，
 	// 否则免费额度耗尽会被误标 rate_limited 且丢失用量快照。
@@ -8343,12 +8347,10 @@ func (h *Handler) applyCooldownForModel(account *auth.Account, statusCode int, b
 		}
 		return codex429Decision{}
 	}
-	// Trae CN uses rotating RT/AT credentials and its 401 is retried through
-	// RefreshTraeCNAccountByID by the request handlers. Only a real upstream 429
-	// participates in the relay model-cooldown policy; all other provider errors
-	// must not inherit Codex subscription, payment, or auto-clean semantics.
+	// TRAE 的业务限流、额度耗尽走账号冷却；401 仍由凭据刷新处理。
+	// 不套用 Codex 订阅窗口、付费状态或自动清理规则。
 	if account.IsTraeCNAPI() {
-		if statusCode == http.StatusTooManyRequests {
+		if statusCode == http.StatusTooManyRequests || IsTraeCNRateLimitError(body) {
 			return Apply429Cooldown(h.store, account, body, resp, model)
 		}
 		return codex429Decision{}

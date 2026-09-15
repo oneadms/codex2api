@@ -80,10 +80,8 @@ func (h *Handler) applyTraeCNRateLimitFailure(account *auth.Account, payload []b
 	if h == nil || h.store == nil || account == nil || !account.IsTraeCNAPI() || !proxy.IsTraeCNRateLimitError(payload) {
 		return false
 	}
-	// 4011 is an application-level throttle, not a credential ban. A short
-	// account cooldown lets normal pool dispatch rotate to another RT without
-	// poisoning the account's long-term health state.
-	h.store.MarkCooldown(account, time.Minute, "rate_limited")
+	// 测活与真实请求共用限流、额度耗尽的识别和冷却时长。
+	proxy.Apply429Cooldown(h.store, account, payload, nil, "")
 	return true
 }
 
@@ -890,6 +888,9 @@ func formatTraeCNRateLimitTestError(data []byte) string {
 		"code",
 	)
 	message := "Trae CN 上游触发业务限流"
+	if proxy.IsTraeCNQuotaError(data) {
+		message = "Trae CN 上游额度不足"
+	}
 	if code != "" {
 		message += " (code: " + code + ")"
 	}

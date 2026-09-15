@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/codex2api/api"
 	"github.com/codex2api/auth"
@@ -93,7 +94,7 @@ func TestApplyCooldownForModelSkipsAntigravityUnauthorizedBan(t *testing.T) {
 	}
 }
 
-func TestApplyCooldownForModelUsesTraeCNRelaySemantics(t *testing.T) {
+func TestApplyCooldownForModelUsesTraeCNAccountLimits(t *testing.T) {
 	account := &auth.Account{
 		DBID:         6,
 		UpstreamType: auth.UpstreamTraeCN,
@@ -103,6 +104,7 @@ func TestApplyCooldownForModelUsesTraeCNRelaySemantics(t *testing.T) {
 		Status:       auth.StatusReady,
 	}
 	store := auth.NewStore(nil, nil, nil)
+	t.Cleanup(store.Stop)
 	store.SetModelCooldownSettings(database.ModelCooldownSettings{
 		RelayMode:           database.ModelCooldownModeFixed,
 		RelaySeconds:        3,
@@ -114,22 +116,23 @@ func TestApplyCooldownForModelUsesTraeCNRelaySemantics(t *testing.T) {
 	handler := &Handler{store: store}
 
 	decision := handler.applyCooldownForModel(account, http.StatusTooManyRequests, []byte(`{"error":{"message":"busy"}}`), &http.Response{Header: make(http.Header)}, "deepseek-v3")
-	if decision.Scope != rateLimitScopeModel || decision.Reason != "rate_limited_model" || decision.Model != "deepseek-v3" || decision.Cooldown <= 0 {
-		t.Fatalf("Trae CN 429 decision = %+v, want relay model cooldown", decision)
+	if decision.Scope != rateLimitScopeAccount || decision.Reason != "rate_limited" || decision.Model != "" || decision.Cooldown != time.Minute {
+		t.Fatalf("Trae CN 429 decision = %+v, want account cooldown", decision)
 	}
-	if account.HasActiveCooldown() || account.IsBanned() {
-		t.Fatal("Trae CN 429 must not apply a Codex account-wide cooldown")
+	if !account.HasActiveCooldown() || account.IsBanned() {
+		t.Fatal("Trae CN 429 must cool down the account without banning credentials")
 	}
-	if cooldowns := account.ActiveModelCooldowns(); len(cooldowns) != 1 || cooldowns[0].Model != "deepseek-v3" {
+	if cooldowns := account.ActiveModelCooldowns(); len(cooldowns) != 0 {
 		t.Fatalf("Trae CN model cooldowns = %+v", cooldowns)
 	}
+	cooldownUntil := account.CooldownUtil
 
 	decision = handler.applyCooldownForModel(account, http.StatusUnauthorized, []byte(`{"error":{"message":"usage limit reached"}}`), &http.Response{Header: make(http.Header)}, "deepseek-v3")
 	if decision.Reason != "" {
 		t.Fatalf("Trae CN 401 decision = %+v, want empty while refresh retry owns recovery", decision)
 	}
-	if account.HasActiveCooldown() || account.IsBanned() {
-		t.Fatal("Trae CN 401 must not apply Codex unauthorized or subscription state")
+	if !account.CooldownUtil.Equal(cooldownUntil) || account.IsBanned() {
+		t.Fatal("Trae CN 401 must preserve the existing cooldown without applying Codex unauthorized state")
 	}
 }
 

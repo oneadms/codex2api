@@ -202,6 +202,27 @@ func TestFormatTraeCN4011ExplainsApplicationRateLimit(t *testing.T) {
 	}
 }
 
+func TestTraeCNQuotaFailureUsesAccountCooldown(t *testing.T) {
+	store := auth.NewStore(nil, nil, nil)
+	t.Cleanup(store.Stop)
+	account := &auth.Account{DBID: 91750, UpstreamType: auth.UpstreamTraeCN, AccessToken: "AT", RefreshToken: "RT", ExpiresAt: time.Now().Add(time.Hour)}
+	store.AddAccount(account)
+	handler := &Handler{store: store}
+	payload := []byte(`{"type":"response.failed","response":{"error":{"code":"3004","message":"Your requests have exceeded the quota."}}}`)
+	if !handler.applyTraeCNRateLimitFailure(account, payload) || account.RuntimeStatus() != "rate_limited" {
+		t.Fatal("quota-exhausted account remained schedulable after a connection test")
+	}
+	account.Mu().RLock()
+	remaining := time.Until(account.CooldownUtil)
+	account.Mu().RUnlock()
+	if remaining < 4*time.Minute || remaining > 5*time.Minute {
+		t.Fatalf("quota cooldown=%s", remaining)
+	}
+	if message := formatTraeCNRateLimitTestError(payload); !strings.Contains(message, "额度不足") || !strings.Contains(message, "3004") {
+		t.Fatalf("quota diagnostic=%s", message)
+	}
+}
+
 // TestBuildConnectionTestPayloadRandomizesMultiLineContent 验证多行测活内容
 // 按行随机抽取并展开变量（issue #320）。
 func TestBuildConnectionTestPayloadRandomizesMultiLineContent(t *testing.T) {

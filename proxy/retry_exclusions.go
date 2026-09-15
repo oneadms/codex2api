@@ -261,7 +261,7 @@ func isTransientRetryHTTPFailure(statusCode int, body []byte) bool {
 }
 
 func isPermanentQuotaFailure(body []byte) bool {
-	if IsUsageLimitReachedError(body) {
+	if IsUsageLimitReachedError(body) || IsTraeCNQuotaError(body) {
 		return true
 	}
 	value := strings.ToLower(strings.Join([]string{
