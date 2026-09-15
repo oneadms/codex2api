@@ -334,7 +334,11 @@
     "creditsPoolAuto": "Auto (switch to Work when IDE is drained)",
     "creditsPoolCodeOnly": "Code (IDE) pool only",
     "creditsPoolWorkOnly": "Always use the Work pool",
-    "creditsPoolHint": "Auto only switches after the IDE pool is known to be drained, so a topped-up IDE pool is never charged to Work credits."
+    "creditsPoolHint": "Auto only switches after the IDE pool is known to be drained, so a topped-up IDE pool is never charged to Work credits.",
+    "creditsPoolExhausted": "Exhausted",
+    "creditsExhaustedBadge": "Credits exhausted",
+    "creditsWorkOnlyBadge": "Work credits only",
+    "creditsStateHint": "Derived from the last known balance of both pools: with an empty IDE pool and no Work credits the provider answers 4008. The badge returns to unknown once the snapshot expires."
   },
   "grok": {
     "pageTitle": "Grok Accounts",

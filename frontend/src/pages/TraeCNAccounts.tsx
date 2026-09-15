@@ -53,6 +53,7 @@ import { CompactStat } from "../components/CompactStat";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { traeCNCreditsAvailability, traeCNCreditsBadgeKey } from "../lib/traecnCredits";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "../hooks/useToast";
 import { useConfirmDialog } from "../hooks/useConfirmDialog";
@@ -1358,7 +1359,17 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
                         {account.proxy_url ? <div className="mt-0.5 truncate text-[11px] text-muted-foreground" title={account.proxy_url}>{account.proxy_url}</div> : <div className="mt-0.5 text-[11px] text-muted-foreground">{t("traecn.noProxy")}</div>}
                       </td>
                       <td className="px-3 py-3"><GroupChips account={account} groups={traeGroups} /></td>
-                      <td className="px-3 py-3"><div className="flex items-center gap-1.5"><StatusBadge status={account.status} />{account.enabled === false ? <Badge variant="outline">{t("traecn.disabledBadge")}</Badge> : null}</div></td>
+                      <td className="px-3 py-3"><div className="flex items-center gap-1.5">{(() => {
+                        const badgeKey = traeCNCreditsBadgeKey(creditStates[account.id]?.data
+                          ? traeCNCreditsAvailability(account.traecn_credits_pool, creditStates[account.id]?.data?.pools)
+                          : account.traecn_credits_state);
+                        return (<>
+                          <StatusBadge status={account.status} />
+                          {badgeKey ? <Badge variant={badgeKey === "traecn.creditsExhaustedBadge" ? "destructive" : "outline"}
+                            title={t("traecn.creditsStateHint")}>{t(badgeKey)}</Badge> : null}
+                          {account.enabled === false ? <Badge variant="outline">{t("traecn.disabledBadge")}</Badge> : null}
+                        </>);
+                      })()}</div></td>
                       <td className="px-3 py-3"><AccountActions account={account} busy={accountBusy} onTest={() => setTestingAccount(account)} onRefresh={() => void runAccountAction(account, "refresh")} onSyncModels={() => void runAccountAction(account, "syncModels")} onCheckin={() => void runAccountAction(account, "checkin")} onEdit={() => openEdit(account)} onToggle={() => void runAccountAction(account, "toggle")} onDelete={() => void runAccountAction(account, "delete")} /></td>
                     </tr>
                   );

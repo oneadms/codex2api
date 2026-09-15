@@ -1635,6 +1635,7 @@ type accountResponse struct {
 	TraeCNModelAllowlist   []string                    `json:"traecn_model_allowlist,omitempty"`
 	TraeCNModelsSyncedAt   string                      `json:"traecn_models_synced_at,omitempty"`
 	TraeCNCreditsPool      string                      `json:"traecn_credits_pool,omitempty"`
+	TraeCNCreditsState     string                      `json:"traecn_credits_state,omitempty"`
 	// 账号绑定的设备码（一账号一份，Trae 风控按它识别设备）。
 	TraeCNDeviceID                string                     `json:"traecn_device_id,omitempty"`
 	TraeCNMachineID               string                     `json:"traecn_machine_id,omitempty"`

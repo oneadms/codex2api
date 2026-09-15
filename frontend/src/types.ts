@@ -290,6 +290,8 @@ export interface AccountRow {
   traecn_models_synced_at?: string
   /** 账号级积分池：auto（默认，IDE 池见底时切 Work）/ code / work。 */
   traecn_credits_pool?: TraeCNCreditsPoolMode
+  /** 服务端判定的积分可用性：ok / work_only / exhausted / unknown。 */
+  traecn_credits_state?: TraeCNCreditsAvailability
   /** 账号绑定的设备码（一账号一份，Trae 风控按它识别设备）。 */
   traecn_device_id?: string
   traecn_machine_id?: string
@@ -991,6 +993,9 @@ export type TraeCNCreditsPoolKind = 'code' | 'work'
 
 /** 账号级积分池设置：auto 在 IDE 池见底且 Work 池有额度时自动切到 Work 端点。 */
 export type TraeCNCreditsPoolMode = 'auto' | 'code' | 'work'
+
+/** 账号积分可用性（与 src/lib/traecnCredits.ts 保持一致）。 */
+export type TraeCNCreditsAvailability = 'unknown' | 'ok' | 'work_only' | 'exhausted'
 
 export interface TraeCNCreditsPool {
   kind: TraeCNCreditsPoolKind

@@ -158,7 +158,11 @@
     "creditsPoolAuto": "自動（IDE 用盡後轉 Work）",
     "creditsPoolCodeOnly": "只用 Code（IDE）池",
     "creditsPoolWorkOnly": "強制走 Work 池",
-    "creditsPoolHint": "自動模式只在確定 IDE 池用盡時切到 Work 端點，避免上游補額度後繼續扣錯池。"
+    "creditsPoolHint": "自動模式只在確定 IDE 池用盡時切到 Work 端點，避免上游補額度後繼續扣錯池。",
+    "creditsPoolExhausted": "已用盡",
+    "creditsExhaustedBadge": "積分用盡",
+    "creditsWorkOnlyBadge": "只剩 Work 積分",
+    "creditsStateHint": "依最近一次查到的雙池餘額判斷：Code 池見底且 Work 池也沒有額度時，請求會被上游回 4008；快照過期後回到未知。"
   },
   "antigravity": {
     "authKind": "憑證類型",

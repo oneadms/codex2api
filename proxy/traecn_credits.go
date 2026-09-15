@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"os"
@@ -125,7 +126,31 @@ func queryTraeCNCredits(ctx context.Context, store *auth.Store, account *auth.Ac
 		})
 	}
 	recordTraeCNCreditsBalance(account, snapshot)
+	liftTraeCNCreditsCooldown(store, account)
 	return snapshot, nil
+}
+
+// liftTraeCNCreditsCooldown 在额度恢复后立刻解冻账号：额度不足的冷却默认一小时，
+// 如果管理台的余额查询已经看到积分回来了，就不该再等满一小时。
+// 只解冻长冷却（额度不足），短限流冷却让它自然到期，避免提前解冻后又被上游拒。
+func liftTraeCNCreditsCooldown(store *auth.Store, account *auth.Account) {
+	if store == nil || account == nil {
+		return
+	}
+	switch account.TraeCNCreditsState() {
+	case auth.TraeCNCreditsStateOK, auth.TraeCNCreditsStateWorkOnly:
+	default:
+		return
+	}
+	account.Mu().RLock()
+	cooling := account.Status == auth.StatusCooldown
+	remaining := time.Until(account.CooldownUtil)
+	account.Mu().RUnlock()
+	if !cooling || remaining < 5*time.Minute {
+		return
+	}
+	store.ClearCooldown(account)
+	log.Printf("[TRAECN] stage=credits_recovered account=%d remaining_seconds=%d action=clear_cooldown", account.ID(), int(remaining/time.Second))
 }
 
 // recordTraeCNCreditsBalance 把查到的两个池剩余量写进账号，推理请求据此选端点。

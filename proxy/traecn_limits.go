@@ -5,6 +5,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -106,10 +108,11 @@ func applyTraeCNLimitCooldown(store *auth.Store, account *auth.Account, payload 
 	recordTraeCNCreditsRemainFromPayload(account, payload)
 	reason, duration := "rate_limited", time.Minute
 	if IsTraeCNQuotaError(payload) {
-		reason, duration = "usage_limit", 5*time.Minute
-		// Code 池见底但 Work 池还有额度时，账号仍然可用：只做短冷却，让紧接着的
-		// 重试（此时已切到 access_type=1）先把 Work 池用起来。
-		if account != nil && account.TraeCNShouldUseWorkPool() {
+		// 额度不足不是瞬时抖动：积分要等签到/周期重置才会回来，所以默认冷却一小时，
+		// 而不是每几分钟对着一个必然失败的点一次。
+		reason, duration = "usage_limit", traeCNQuotaCooldown()
+		if account != nil && account.TraeCNCreditsState() == auth.TraeCNCreditsStateWorkOnly {
+			// 唯一例外：Code 池见底但 Work 池还有额度，账号立刻可用，只做换池冷却。
 			reason, duration = "usage_limit", traeCNWorkPoolSwitchCooldown
 		}
 	}
@@ -136,6 +139,37 @@ func applyTraeCNLimitCooldown(store *auth.Store, account *auth.Account, payload 
 		log.Printf("[TRAECN] stage=cooldown account=%d reason=%q cooldown_seconds=%d", account.ID(), reason, int(duration/time.Second))
 	}
 	return decision
+}
+
+// 额度不足（4008）不是瞬时抖动：积分要等签到或订阅周期重置才会回来，所以默认直接
+// 按限流处理到下一次日探针（24 小时），由每日探针确认额度恢复后再解冻，而不是每
+// 5 分钟、15 分钟空撞一次。余额查询发现额度已经回来时会提前解冻
+// （见 liftTraeCNCreditsCooldown）。
+const (
+	traeCNQuotaCooldownDefault = traeCNCreditsProbeWindow
+	traeCNQuotaCooldownMin     = 5 * time.Minute
+	traeCNQuotaCooldownMax     = 24 * time.Hour
+	traeCNQuotaCooldownEnv     = "TRAECN_QUOTA_COOLDOWN_MINUTES"
+)
+
+// traeCNQuotaCooldown 允许运维调整额度不足的冷却时长（分钟，5–1440，默认 60）。
+func traeCNQuotaCooldown() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(traeCNQuotaCooldownEnv))
+	if raw == "" {
+		return traeCNQuotaCooldownDefault
+	}
+	minutes, err := strconv.Atoi(raw)
+	if err != nil || minutes <= 0 {
+		return traeCNQuotaCooldownDefault
+	}
+	duration := time.Duration(minutes) * time.Minute
+	if duration < traeCNQuotaCooldownMin {
+		return traeCNQuotaCooldownMin
+	}
+	if duration > traeCNQuotaCooldownMax {
+		return traeCNQuotaCooldownMax
+	}
+	return duration
 }
 
 // traeCNWorkPoolSwitchCooldown 是「换池」用的短冷却：IDE 池刚报额度不足、Work 池还

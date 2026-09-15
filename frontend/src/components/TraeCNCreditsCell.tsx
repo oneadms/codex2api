@@ -67,7 +67,9 @@ function CreditsPoolBlock({ pool, stale, refreshButton }: {
           style={{ width: `${percent}%` }} />
       </div>
       <div className="flex items-center justify-between gap-2 text-muted-foreground">
-        <span>{t("traecn.creditsRemaining", { value: format(pool.remaining) })}</span>
+        <span className={cn(pool.remaining <= 0 && "font-medium text-red-600 dark:text-red-400")}>
+          {pool.remaining <= 0 ? t("traecn.creditsPoolExhausted") : t("traecn.creditsRemaining", { value: format(pool.remaining) })}
+        </span>
         <span title={stale ? t("traecn.creditsUpdatedAt", { time: updatedAt }) : updatedAt}
           className={cn("text-[10px]", stale && "text-amber-600 dark:text-amber-400")}>
           {stale ? t("traecn.creditsStale") : new Date(pool.updated_at ?? Date.now()).toLocaleTimeString(i18n.language, { hour: "2-digit", minute: "2-digit" })}

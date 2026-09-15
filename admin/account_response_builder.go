@@ -63,6 +63,12 @@ func (h *Handler) buildAccountResponse(
 	isGrokAccount := strings.EqualFold(upstreamType, auth.UpstreamGrok)
 	isAntigravityAccount := strings.EqualFold(upstreamType, auth.UpstreamAntigravity)
 	isTraeCNAccount := strings.EqualFold(upstreamType, auth.UpstreamTraeCN)
+	// 积分状态只对 TRAECN 有意义：额度用尽时要让状态列直接显示出来，而不是等
+	// 下一次请求撞 4008 再短暂标成限流。
+	traeCNCreditsState := ""
+	if isTraeCNAccount {
+		traeCNCreditsState = runtimeAccount.TraeCNCreditsState()
+	}
 	isClaudeAccount := strings.EqualFold(upstreamType, auth.UpstreamClaude)
 	antigravityAuthKind := ""
 	if isAntigravityAccount {
@@ -270,6 +276,7 @@ func (h *Handler) buildAccountResponse(
 		TraeCNModelAllowlist:   traeCNModelAllowlist,
 		TraeCNModelsSyncedAt:   row.GetCredential(auth.TraeCNModelsSyncedAtCredentialKey),
 		TraeCNCreditsPool:      auth.NormalizeTraeCNCreditsPoolMode(row.GetCredential(auth.TraeCNCreditsPoolCredentialKey)),
+		TraeCNCreditsState:     traeCNCreditsState,
 		// 未显式绑定的老账号返回它实际生效的设备码（与出站请求同一算法），
 		// 否则列表里看不到设备码，也就无法核对"一账号一设备"。
 		TraeCNDeviceID:               traeCNDeviceIdentity.DeviceID,

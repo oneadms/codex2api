@@ -334,7 +334,11 @@
     "creditsPoolAuto": "自动（IDE 用尽后转 Work）",
     "creditsPoolCodeOnly": "只用 Code（IDE）池",
     "creditsPoolWorkOnly": "强制走 Work 池",
-    "creditsPoolHint": "自动模式只在你明确看到 IDE 池见底时切到 Work 端点，避免上游补额度后继续扣错池。"
+    "creditsPoolHint": "自动模式只在你明确看到 IDE 池见底时切到 Work 端点，避免上游补额度后继续扣错池。",
+    "creditsPoolExhausted": "已用尽",
+    "creditsExhaustedBadge": "积分用尽",
+    "creditsWorkOnlyBadge": "只剩 Work 积分",
+    "creditsStateHint": "按最近一次查询到的双池余额判断：Code 池见底且 Work 池也没有额度时，请求会被上游回 4008；额度快照过期后会回到未知。"
   },
   "grok": {
     "pageTitle": "Grok 账号",

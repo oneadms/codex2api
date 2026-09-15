@@ -67,3 +67,41 @@ test("every locale names both pools and states they are spent separately", () =>
     assert.match(traecn.creditsScope, /Code[\s\S]*Work/, `${name} 说明未区分两个池`);
   }
 });
+
+test("credit availability follows the pool split and the account pool mode", async () => {
+  const { traeCNCreditsAvailability, traeCNCreditsBadgeKey } = await import("./traecnCredits.ts");
+  const pools = (code, work) => ([
+    { kind: "code", total: 100, used: 100 - code, remaining: code, used_percent: 100 - code },
+    { kind: "work", total: 100, used: 100 - work, remaining: work, used_percent: 100 - work },
+  ]);
+
+  // Code 池还有额度：正常状态，不加徽章。
+  assert.equal(traeCNCreditsAvailability("auto", pools(20, 0)), "ok");
+  assert.equal(traeCNCreditsBadgeKey("ok"), "");
+  // Code 用尽、Work 还有：auto 会切池，属于可用但要标注。
+  assert.equal(traeCNCreditsAvailability("auto", pools(0, 50)), "work_only");
+  assert.match(traeCNCreditsBadgeKey("work_only"), /creditsWorkOnlyBadge/);
+  // 两个池都空：这才是"额度用尽"。
+  assert.equal(traeCNCreditsAvailability("auto", pools(0, 0)), "exhausted");
+  assert.match(traeCNCreditsBadgeKey("exhausted"), /creditsExhaustedBadge/);
+  // 强制只用 Code：Code 空就是耗尽，即使 Work 还有额度。
+  assert.equal(traeCNCreditsAvailability("code", pools(0, 50)), "exhausted");
+  // 强制走 Work：只看 Work 池。
+  assert.equal(traeCNCreditsAvailability("work", pools(50, 0)), "exhausted");
+  assert.equal(traeCNCreditsAvailability("work", pools(0, 50)), "work_only");
+  // 查不到（查询失败 / 还没查）时不做判断，绝不显示"已用尽"。
+  assert.equal(traeCNCreditsAvailability("auto", undefined), "unknown");
+  assert.equal(traeCNCreditsAvailability("auto", [
+    { kind: "code", total: 0, used: 0, remaining: 0, used_percent: 0, error: "上游超时" },
+  ]), "unknown");
+  assert.equal(traeCNCreditsBadgeKey("unknown"), "");
+});
+
+test("the account list renders the credit state next to the status badge", () => {
+  const page = readFileSync(new URL("../pages/TraeCNAccounts.tsx", import.meta.url), "utf8");
+  assert.match(page, /traeCNCreditsAvailability\(account\.traecn_credits_pool/);
+  assert.match(page, /account\.traecn_credits_state/);
+  assert.match(page, /title=\{t\("traecn\.creditsStateHint"\)\}/);
+  // 单元格在 100% 时要明说已用尽，而不是只显示"剩余 0"。
+  assert.match(cell, /traecn\.creditsPoolExhausted/);
+});

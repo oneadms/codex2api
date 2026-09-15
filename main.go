@@ -388,6 +388,9 @@ func main() {
 	proxy.StartClaudeCLIVersionSync(backgroundCtx, db, store, store.GetProxyURL)
 	// Trae CN 每日自动签到（随机时段，每账号每天一次；TRAECN_CHECKIN_DISABLED=1 可关）。
 	proxy.StartTraeCNCheckinScheduler(backgroundCtx, store, db)
+	// Trae CN 每日额度探针：额度不足被限流的账号，每天随机时段查一次积分，
+	// 确认恢复后解冻；TRAECN_CREDITS_PROBE_DISABLED=1 可关。
+	proxy.StartTraeCNCreditsProbeScheduler(backgroundCtx, store, db)
 
 	log.Printf("账号就绪: %d/%d 可用", store.AvailableCount(), store.AccountCount())
 

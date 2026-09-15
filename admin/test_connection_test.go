@@ -215,7 +215,8 @@ func TestTraeCNQuotaFailureUsesAccountCooldown(t *testing.T) {
 	account.Mu().RLock()
 	remaining := time.Until(account.CooldownUtil)
 	account.Mu().RUnlock()
-	if remaining < 4*time.Minute || remaining > 5*time.Minute {
+	// 额度不足按限流处理到下一次日探针（默认 24 小时），不再用 5 分钟这种短冷却。
+	if remaining < 23*time.Hour || remaining > 24*time.Hour {
 		t.Fatalf("quota cooldown=%s", remaining)
 	}
 	if message := formatTraeCNRateLimitTestError(payload); !strings.Contains(message, "额度不足") || !strings.Contains(message, "3004") {

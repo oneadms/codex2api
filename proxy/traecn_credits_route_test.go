@@ -163,6 +163,52 @@ func TestTraeCNQuotaCooldownShortensWhenWorkPoolCanTakeOver(t *testing.T) {
 	}
 }
 
+func TestTraeCNQuotaCooldownParksDrainedAccountUntilNextProbe(t *testing.T) {
+	now := time.Now()
+	account := &auth.Account{UpstreamType: auth.UpstreamTraeCN, AccessToken: "AT", TraeCNCreditsPool: auth.TraeCNCreditsPoolAuto}
+	account.SetTraeCNCreditsBalance(auth.TraeCNCreditsBalance{CodeRemaining: 0, WorkRemaining: 0, ObservedAt: now})
+	decision := applyTraeCNLimitCooldown(nil, account, []byte(traeCNCanonicalQuotaPayload), nil)
+	if decision.Reason != "usage_limit" || decision.Cooldown != traeCNQuotaCooldownDefault {
+		t.Fatalf("exhausted account cooldown = %+v, want %v", decision, traeCNQuotaCooldownDefault)
+	}
+	if decision.Cooldown < 24*time.Hour {
+		t.Fatalf("额度不足必须直接按限流处理到下一次日探针，实际 %v", decision.Cooldown)
+	}
+	// 状态列据此显示"积分用尽"，而不是等下一次请求再短暂标限流。
+	if state := account.TraeCNCreditsState(); state != auth.TraeCNCreditsStateExhausted {
+		t.Fatalf("credits state = %q", state)
+	}
+}
+
+func TestTraeCNQuotaCooldownParksAccountsWithoutSnapshot(t *testing.T) {
+	// 还没查到余额的账号同样按限流处理：额度不足不会因为"不知道余额"而每 5 分钟空撞。
+	account := &auth.Account{UpstreamType: auth.UpstreamTraeCN, AccessToken: "AT"}
+	decision := applyTraeCNLimitCooldown(nil, account, []byte(traeCNCanonicalQuotaPayload), nil)
+	if decision.Cooldown != traeCNQuotaCooldownDefault {
+		t.Fatalf("unknown-balance cooldown = %v, want %v", decision.Cooldown, traeCNQuotaCooldownDefault)
+	}
+}
+
+func TestTraeCNQuotaCooldownEnvOverride(t *testing.T) {
+	account := &auth.Account{UpstreamType: auth.UpstreamTraeCN, AccessToken: "AT"}
+	t.Setenv(traeCNQuotaCooldownEnv, "240")
+	if got := applyTraeCNLimitCooldown(nil, account, []byte(traeCNCanonicalQuotaPayload), nil).Cooldown; got != 4*time.Hour {
+		t.Fatalf("env override cooldown = %v, want 4h", got)
+	}
+	t.Setenv(traeCNQuotaCooldownEnv, "1")
+	if got := traeCNQuotaCooldown(); got != traeCNQuotaCooldownMin {
+		t.Fatalf("too-small override = %v", got)
+	}
+	t.Setenv(traeCNQuotaCooldownEnv, "99999")
+	if got := traeCNQuotaCooldown(); got != traeCNQuotaCooldownMax {
+		t.Fatalf("too-large override = %v", got)
+	}
+	t.Setenv(traeCNQuotaCooldownEnv, "not-a-number")
+	if got := traeCNQuotaCooldown(); got != traeCNQuotaCooldownDefault {
+		t.Fatalf("invalid override = %v", got)
+	}
+}
+
 func TestTraeCNQuotaCooldownIgnoresRateLimitPayload(t *testing.T) {
 	account := &auth.Account{UpstreamType: auth.UpstreamTraeCN, AccessToken: "AT", TraeCNCreditsPool: auth.TraeCNCreditsPoolAuto}
 	account.SetTraeCNCreditsBalance(auth.TraeCNCreditsBalance{WorkRemaining: 2000, ObservedAt: time.Now()})

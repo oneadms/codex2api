@@ -65,7 +65,8 @@ func TestTraeCNLimitCooldownUpdatesAccountWithRelayPolicyOff(t *testing.T) {
 		want                   time.Duration
 	}{
 		{"rate", `{"error":{"code":"3004","message":"Your requests have exceeded the rate limit."}}`, "", time.Minute},
-		{"quota", `{"error":{"code":"3004","message":"Your requests have exceeded the quota."}}`, "", 5 * time.Minute},
+		// 额度不足不再用 5 分钟这种短冷却：直接按限流处理到下一次日探针。
+		{"quota", `{"error":{"code":"3004","message":"Your requests have exceeded the quota."}}`, "", traeCNQuotaCooldownDefault},
 		{"header", `{"error":{"code":"3004","message":"Your requests have exceeded the quota."}}`, "12", 12 * time.Second},
 		{"body", `{"error":{"code":"3004","message":"Your requests have exceeded the quota.","resets_in_seconds":90}}`, "", 90 * time.Second},
 		{"body_retry_after", `{"error":{"code":"3004","message":"Your requests have exceeded the quota.","retry_after":45}}`, "", 45 * time.Second},

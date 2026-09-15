@@ -111,3 +111,42 @@ func TraeCNShouldUseWorkPool(mode string, balance TraeCNCreditsBalance, now time
 		return balance.CodeRemaining <= 0 && balance.WorkRemaining > 0
 	}
 }
+
+// 账号当前的积分可用性（给管理台状态列用）：额度快照过期就回到 unknown，
+// 不能用旧结论把账号一直标成耗尽或一直标成可用。
+const (
+	TraeCNCreditsStateUnknown   = "unknown"
+	TraeCNCreditsStateOK        = "ok"
+	TraeCNCreditsStateWorkOnly  = "work_only"
+	TraeCNCreditsStateExhausted = "exhausted"
+)
+
+// TraeCNCreditsState 汇总账号当下能不能出货：
+//   - ok：Code 池还有额度（Work 池有没有都无所谓）；
+//   - work_only：Code 池用尽，但 auto/work 模式还能用 Work 池；
+//   - exhausted：可用的池都为 0，请求会被上游回 4008；
+//   - unknown：快照过期或从没查到过，不做判断。
+func (a *Account) TraeCNCreditsState() string {
+	if a == nil {
+		return TraeCNCreditsStateUnknown
+	}
+	return TraeCNCreditsStateFor(a.TraeCNCreditsPoolMode(), a.TraeCNCreditsBalance(), time.Now())
+}
+
+// TraeCNCreditsStateFor 是上面的纯函数版本，便于测试。
+func TraeCNCreditsStateFor(mode string, balance TraeCNCreditsBalance, now time.Time) string {
+	if !balance.Known(now) {
+		return TraeCNCreditsStateUnknown
+	}
+	mode = NormalizeTraeCNCreditsPoolMode(mode)
+	codeUsable := balance.CodeRemaining > 0 && mode != TraeCNCreditsPoolWork
+	workUsable := balance.WorkRemaining > 0 && mode != TraeCNCreditsPoolCode
+	switch {
+	case codeUsable:
+		return TraeCNCreditsStateOK
+	case workUsable:
+		return TraeCNCreditsStateWorkOnly
+	default:
+		return TraeCNCreditsStateExhausted
+	}
+}
