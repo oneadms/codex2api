@@ -59,3 +59,52 @@ func TestTraeCNStreamKeepsNestedArgumentDeltas(t *testing.T) {
 		t.Fatalf("nested argument delta was lost: %s", raw)
 	}
 }
+
+// 只有思考或空白的 stop 不能作为成功交付，否则客户端会结束本轮且不再重试。
+func TestTraeCNStreamRejectsCompletionWithoutAnswer(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, content, terminal, wantEvent, wantCode string
+	}{
+		{"empty_stop", `{}`, "event: done\ndata: {\"finish_reason\":\"stop\"}\n\n", "response.failed", "upstream_empty_output"},
+		{"empty_done", `{}`, "data: [DONE]\n\n", "response.failed", "upstream_empty_output"},
+		{"reasoning_stop", `{"reasoning_content":"正在检查文件"}`, "event: done\ndata: {\"finish_reason\":\"stop\"}\n\n", "response.failed", "upstream_empty_output"},
+		{"reasoning_done", `{"reasoning_content":"正在检查文件"}`, "data: [DONE]\n\n", "response.failed", "upstream_empty_output"},
+		{"whitespace", `{"content":" \n\t"}`, "data: [DONE]\n\n", "response.failed", "upstream_empty_output"},
+		{"reasoning_whitespace", `{"reasoning_content":"正在检查文件","content":"　 "}`, "data: [DONE]\n\n", "response.failed", "upstream_empty_output"},
+		{"reasoning_length", `{"reasoning_content":"正在检查文件"}`, "event: done\ndata: {\"finish_reason\":\"length\"}\n\n", "response.incomplete", ""},
+		{"reasoning_filtered", `{"reasoning_content":"正在检查文件"}`, "event: done\ndata: {\"finish_reason\":\"content_filter\"}\n\n", "response.incomplete", ""},
+		{"answer", `{"reasoning_content":"已检查","content":"结果正常"}`, "data: [DONE]\n\n", "response.completed", ""},
+		{"tool", `{"reasoning_content":"需要读文件","tool_calls":[{"id":"call_read","function_call":{"name":"read_file","arguments":"{}"}}]}`, "event: done\ndata: {\"finish_reason\":\"tool_calls\"}\n\n", "response.completed", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := "event: output\ndata: " + tc.content + "\n\nevent: token_usage\ndata: {\"prompt_tokens\":3,\"completion_tokens\":4,\"total_tokens\":7}\n\n" + tc.terminal
+			raw, err := io.ReadAll(traeCNCanonicalStream(io.NopCloser(strings.NewReader(provider)), "doubao-seed-code"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			events := canonicalSSEEvents(t, raw)
+			terminal, ok := findCanonicalEvent(events, tc.wantEvent)
+			if !ok || terminal.Get("response.error.code").String() != tc.wantCode {
+				t.Fatalf("unexpected terminal: %s", raw)
+			}
+			if terminal.Get("response.usage.output_tokens").Int() != 4 {
+				t.Fatalf("lost usage at terminal: %s", raw)
+			}
+			terminals := 0
+			for _, event := range events {
+				switch event.Get("type").String() {
+				case "response.completed", "response.failed", "response.incomplete":
+					terminals++
+				case "response.output_item.done":
+					if tc.wantEvent != "response.completed" {
+						t.Fatalf("unfinished output marked as acknowledged: %s", raw)
+					}
+				}
+			}
+			if terminals != 1 {
+				t.Fatalf("terminal count=%d: %s", terminals, raw)
+			}
+		})
+	}
+}

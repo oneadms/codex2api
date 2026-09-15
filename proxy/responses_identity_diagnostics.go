@@ -45,9 +45,9 @@ func beginResponsesIdentityDiagnostics(c *gin.Context, body []byte) func() {
 	model := responsesIdentityLogValue(gjson.GetBytes(body, "model").String())
 	stream := gjson.GetBytes(body, "stream").Bool()
 
-	log.Printf("[RESPONSES-IDENTITY] stage=ingress gateway_request_id=%q newapi_request_id=%q newapi_request_id_present=%t newapi_user_id_present=%t api_key_id=%d session_id=%q thread_id=%q turn_id=%q client_request_id=%q model=%q stream=%t",
+	log.Printf("[RESPONSES-IDENTITY] stage=ingress gateway_request_id=%q newapi_request_id=%q newapi_request_id_present=%t newapi_user_id_present=%t api_key_id=%d session_id=%q thread_id=%q turn_id=%q client_request_id=%q model=%q stream=%t requested_channel=%q resume_enabled=%t",
 		gatewayRequestID, newAPIRequestID, newAPIRequestID != "", newAPIUserIDPresent,
-		requestAPIKeyID(c), sessionID, threadID, turnID, clientRequestID, model, stream)
+		requestAPIKeyID(c), sessionID, threadID, turnID, clientRequestID, model, stream, requestUpstreamChannel(c), traeCNResumeEnabled())
 
 	return func() {
 		clientContextError := ""

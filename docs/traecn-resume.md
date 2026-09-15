@@ -45,6 +45,22 @@ TRAECN_RESUME_UPSTREAM_ENABLED: "1"
 
 半截事件不交付，恢复后由上游补发。只允许补发最后一个相同事件一次；重播更早事件、同 ID 内容改变、没有可用游标或重连耗尽都明确失败，不回落到另起一轮生成。若上游忽略游标并用全新的不透明 ID 开始生成，网关无法仅凭 SSE 识别，因此不能用该开关代替对上游协议的验证。
 
+## 思考中途结束与客户端重试
+
+TRAE 返回 `stop` / `done` 时，必须已经产生非空白正文或工具调用，网关才发送 `response.completed`。只有思考摘要、空白正文或完全没有输出时，发送 `response.failed`，错误码为 `upstream_empty_output`，保留上游已报告的用量。失败前不会把未交付的思考项标成完成。
+
+长度截断和内容过滤继续返回 `response.incomplete`，保留原原因；完整正文和有效工具调用正常完成。
+
+| 当前情况 | 网关处理 |
+| --- | --- |
+| 客户端断线，原任务仍在运行 | 匹配重试接回同一任务 |
+| 客户端断线，原任务已成功完成 | 回放尚未确认的输出和成功终态 |
+| 原任务已失败或未完整生成便结束 | 原订阅收到失败或未完成事件；再次续接返回 HTTP 409 和 `resume_task_failed` / `resume_task_incomplete` |
+| 缓存失败或后台流缺少终态 | 返回对应失败原因，拒绝继续接回已失效任务 |
+| 手动发送“继续”等新消息 | 按新一轮模型调用处理，使用可用历史上下文 |
+
+错误事件能让 Codex 识别失败并自动重试，但无法复活已结束的上游生成。客户端仍可能按自身重试次数再次请求；网关不会反复回放失败流，也不会把新一轮生成伪装成原任务续传。
+
 ## 边界与资源限制
 
 | 项目 | 限制 |
@@ -69,9 +85,12 @@ TRAECN_RESUME_UPSTREAM_ENABLED: "1"
 
 ## 日志与验证
 
-- `[RESPONSES-IDENTITY]`：每次 HTTP 入口及结束的网关请求 ID、NewAPI 请求 ID、会话标识和断开状态。
+- `[RESPONSES-IDENTITY]`：每次 HTTP 入口及结束的网关请求 ID、NewAPI 请求 ID、会话标识和断开状态；`requested_channel` 是 Key 限定的渠道，`resume_enabled` 是任务保留开关。
+- `[TRAECN] stage=terminal`：实际发送的终态 `event`、上游 `finish_reason`、错误或截断 `reason`，以及思考、正文长度和工具数量。
 - `[TRAE-RESUME] stage=attach`：`created=true` 是新任务；`created=false` 是接回，`task` 应保持相同。
 - `stage=detach` / `stage=expired`：连接解除订阅、任务过期。
+- `stage=worker_done`：原任务结束时的 `terminal_event`、`terminal_code` 和本地 `failure`；HTTP 200 或空 `failure` 不能单独证明生成成功。
+- `stage=reject`：已结束失败任务的续接被拒绝，同时记录原终态与错误码。
 - `stage=upstream_reconnect`：实际向 TRAE 重连的原请求 ID 和事件游标。
 
 日志不输出凭据或提示词正文。接回时用量由原后台任务完成一次处理；NewAPI 自身对断开请求和重试请求的记账仍须按其配置验证。
@@ -79,5 +98,7 @@ TRAECN_RESUME_UPSTREAM_ENABLED: "1"
 本地测试覆盖真实 HTTP 客户端断开、持续重试开启时实时输出、同任务接回、已确认消息和推理去重、共享 Key 身份隔离、过期取消、缓存落盘与预算释放，以及模拟 TRAE 的游标恢复和错误游标处理。
 
 2026-09-15 使用本机 Codex 后端 `0.154.0-alpha.6.2`，串联模拟 NewAPI、实际网关处理器和模拟 TRAE 强制断流验证：Codex 自动重连一次、同一后台任务接回、最终正文完整、模拟 TRAE 只生成一次。该验证不代表真实 `llm_utils_chat` 已支持上游游标续传。
+
+同一客户端的终态实验确认：只有思考项的 `response.completed` 会直接结束本轮，没有重试。修复后的实际网关在这一场景发出 `upstream_empty_output`，Codex 自动重试后收到明确的任务结束错误，最终产生 `turn.failed`；整个过程上游只生成一次。正常断线接回的完整输出回归仍通过。
 
 Windows / Go 1.26.6 回归检查中，5 个现有临时文件测试失败，使用本地 HTTP/2 测试辅助函数的一组测试因空指针崩溃；修改前编译的测试程序可复现这些问题。跳过崩溃组后，其余 proxy 测试执行完成，失败仍为上述 5 项。新增续传测试与 `go vet ./...` 通过。

@@ -167,6 +167,8 @@ func (w *traeCNResumeWriter) appendFrameLocked(frame []byte) error {
 	}
 	if typeName == "response.completed" || typeName == "response.failed" || typeName == "response.incomplete" {
 		w.terminal = true
+		w.task.terminalEvent = strings.Clone(typeName)
+		w.task.terminalCode = strings.Clone(responsesIdentityLogValue(firstNonEmptyString(root.Get("response.error.code").String(), root.Get("response.incomplete_details.reason").String())))
 	}
 	return nil
 }

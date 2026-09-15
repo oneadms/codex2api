@@ -416,7 +416,7 @@ func traeCNRequestBodyPlan(canonical []byte, knownConfigSets ...[]string) ([]byt
 	return encoded, model, bridges, contracts, err
 }
 
-func traeCanonicalFailure(id, model, code, message string) []byte {
+func traeCanonicalFailure(id, model, code, message string, usage map[string]any) []byte {
 	if strings.TrimSpace(code) == "" || code == "0" {
 		code = ErrorCodeUpstreamError
 	}
@@ -427,6 +427,7 @@ func traeCanonicalFailure(id, model, code, message string) []byte {
 		"type": "response.failed",
 		"response": map[string]any{
 			"id": id, "object": "response", "status": "failed", "model": model,
+			"output": []any{}, "usage": usage,
 			"error": map[string]any{"code": code, "message": message},
 		},
 	})
@@ -1469,6 +1470,7 @@ func (s *traeCNCanonicalState) emitCompleted(writer io.Writer, finishReason stri
 	if finishReason == "" {
 		finishReason = traeCNFirstNonEmpty(s.finishReason, "stop")
 	}
+	s.finishReason = finishReason
 	if (finishReason == "tool_calls" || finishReason == "function_call") && len(s.tools) == 0 {
 		return s.emitFailure(writer, "missing_tool_calls", "Trae CN ended with a tool-call finish reason but returned no tool calls")
 	}
@@ -1478,6 +1480,11 @@ func (s *traeCNCanonicalState) emitCompleted(writer io.Writer, finishReason stri
 	if incompleteReason != "" {
 		status = "incomplete"
 		eventType = "response.incomplete"
+	}
+	// 思考摘要不构成一次交付；空结果报 completed 会让 Codex 安静结束本轮。
+	// 长度截断和内容过滤仍保留原 incomplete 原因，工具调用由终态转换校验。
+	if status == "completed" && strings.TrimSpace(s.text.String()) == "" && len(s.tools) == 0 {
+		return s.emitFailure(writer, "upstream_empty_output", "Trae CN ended before returning an answer or tool call")
 	}
 	output, err := s.terminalOutput(writer, status)
 	if err != nil {
@@ -1490,10 +1497,7 @@ func (s *traeCNCanonicalState) emitCompleted(writer io.Writer, finishReason stri
 	if finishReason != "" {
 		response["stop_reason"] = finishReason
 	}
-	// 记录带工具请求的纯文本终态，便于区分模型主动收尾和转换丢失调用；不记录正文。
-	if status == "completed" && len(s.tools) == 0 && len(s.contracts) > 0 {
-		log.Printf("[TRAECN] text-only completion: model=%q response_id=%s finish_reason=%q declared_tools=%d tool_calls=0 output_chars=%d", s.model, s.responseID, finishReason, len(s.contracts), len([]rune(s.text.String())))
-	}
+	s.logTerminal(eventType, incompleteReason)
 	s.terminal = true
 	return writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent(eventType, map[string]any{"response": response}))
 }
@@ -1503,7 +1507,14 @@ func (s *traeCNCanonicalState) emitFailure(writer io.Writer, code, message strin
 		return nil
 	}
 	s.terminal = true
-	return writeTraeCanonicalEvent(writer, traeCanonicalFailure(s.responseID, s.model, code, message))
+	s.logTerminal("response.failed", code)
+	return writeTraeCanonicalEvent(writer, traeCanonicalFailure(s.responseID, s.model, code, message, s.usage))
+}
+
+// 只记录终态和内容长度，便于定位模型收尾、断流和转换错误，不记录思考或正文。
+func (s *traeCNCanonicalState) logTerminal(event, reason string) {
+	log.Printf("[TRAECN] stage=terminal model=%q response_id=%q event=%q finish_reason=%q reason=%q declared_tools=%d tool_calls=%d reasoning_chars=%d output_chars=%d",
+		s.model, s.responseID, event, responsesIdentityLogValue(s.finishReason), responsesIdentityLogValue(reason), len(s.contracts), len(s.tools), len([]rune(s.reasoning.String())), len([]rune(s.text.String())))
 }
 
 func (s *traeCNCanonicalState) consume(writer io.Writer, eventName string, data []byte) error {

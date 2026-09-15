@@ -64,6 +64,8 @@ type traeCNResumeTask struct {
 	toolSubmitted bool
 	done, expired bool
 	failure       string
+	terminalEvent string
+	terminalCode  string
 	responseID    string
 	header        http.Header
 	status        int
@@ -119,6 +121,21 @@ func (r *traeCNResumeRegistry) acquire(identity traeCNResumeIdentity, inputBytes
 		if task.toolSubmitted {
 			task.mu.Unlock()
 			return nil, nil, 0, false, "resume_tool_call_unsupported"
+		}
+		// 失败终态已结束原生成。重复回放它只会耗尽客户端重试次数，不能恢复进度。
+		reason := task.failure
+		if reason == "" {
+			switch {
+			case task.terminalEvent == "response.failed" || task.status >= http.StatusBadRequest:
+				reason = "resume_task_failed"
+			case task.terminalEvent == "response.incomplete":
+				reason = "resume_task_incomplete"
+			}
+		}
+		if reason != "" {
+			log.Printf("[TRAE-RESUME] task=%s stage=reject reason=%q terminal_event=%q terminal_code=%q", task.id, reason, task.terminalEvent, task.terminalCode)
+			task.mu.Unlock()
+			return nil, nil, 0, false, reason
 		}
 		if task.timer != nil {
 			task.timer.Stop()
@@ -213,7 +230,11 @@ func (h *Handler) serveTraeCNResumableResponses(c *gin.Context, validated respon
 	}
 	task, skip, reader, created, reason := h.traeCNResumeTasks.acquire(identity, len(validated.body))
 	if reason != "" {
-		c.JSON(http.StatusConflict, gin.H{"error": gin.H{"type": "invalid_request_error", "code": reason, "message": "TRAE 原任务无法安全续接：" + reason}})
+		message := "TRAE 原任务无法安全续接：" + reason
+		if reason == "resume_task_failed" || reason == "resume_task_incomplete" {
+			message = "TRAE 原任务已失败或未完整生成并结束，无法继续接收。请重新发起一轮请求。"
+		}
+		c.JSON(http.StatusConflict, gin.H{"error": gin.H{"type": "invalid_request_error", "code": reason, "message": message}})
 		return true
 	}
 	if created {
@@ -245,7 +266,7 @@ func (h *Handler) serveTraeCNResumableResponses(c *gin.Context, validated respon
 				writer.finish()
 				task.mu.Lock()
 				h.traeCNResumeTasks.retireLocked(task)
-				log.Printf("[TRAE-RESUME] task=%s stage=worker_done response_id=%q status=%d failure=%q", task.id, task.responseID, task.status, task.failure)
+				log.Printf("[TRAE-RESUME] task=%s stage=worker_done response_id=%q status=%d terminal_event=%q terminal_code=%q failure=%q", task.id, task.responseID, task.status, task.terminalEvent, task.terminalCode, task.failure)
 				task.mu.Unlock()
 			}()
 			h.responsesValidated(worker, validated)
