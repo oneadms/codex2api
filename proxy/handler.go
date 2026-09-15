@@ -73,6 +73,7 @@ type Handler struct {
 	// without changing process-wide limits or TMPDIR.
 	// continuousRetryReplayFactory 在测试中注入有界回放失败，不修改进程级限制或 TMPDIR。
 	continuousRetryReplayFactory func() *continuousRetryReplay
+	traeCNResumeTasks            traeCNResumeRegistry
 }
 
 const (
@@ -3728,6 +3729,8 @@ func (h *Handler) Responses(c *gin.Context) {
 		return
 	}
 	h.capturePromptRequestIngress(c, rawBody)
+	finishIdentityDiagnostics := beginResponsesIdentityDiagnostics(c, rawBody)
+	defer finishIdentityDiagnostics()
 	bodyReadDone := time.Now()
 	compactionMeta := requestCompactionMetaForHTTP(c, rawBody)
 	cacheRequestCompactionMeta(c, compactionMeta)
@@ -3856,8 +3859,28 @@ func (h *Handler) Responses(c *gin.Context) {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidParameter, err.Error(), api.ErrorTypeInvalidRequest))
 		return
 	}
+	validated := responsesValidatedRequest{
+		body: rawBody, model: model, logModel: logModel, mappingApplied: mappingApplied,
+		bodySignalCompact: bodySignalCompact, nativeRemoteCompactionV2: nativeRemoteCompactionV2,
+		handlerStart: handlerStart, bodyReadDone: bodyReadDone,
+	}
+	if h.serveTraeCNResumableResponses(c, validated) {
+		return
+	}
+	h.responsesValidated(c, validated)
+}
+
+// responsesValidated 执行已通过入口校验的模型调用，也供续传任务独立持有生成生命周期。
+func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidatedRequest) {
+	rawBody, model, logModel := validated.body, validated.model, validated.logModel
+	mappingApplied := validated.mappingApplied
+	bodySignalCompact, nativeRemoteCompactionV2 := validated.bodySignalCompact, validated.nativeRemoteCompactionV2
+	handlerStart, bodyReadDone := validated.handlerStart, validated.bodyReadDone
 	isStream := gjson.GetBytes(rawBody, "stream").Bool()
 	continuousRetryPolicy := continuousRetryPolicyForCall(nil)
+	if isTraeCNResumeWorker(c) {
+		continuousRetryPolicy.Enabled = false
+	}
 	rememberContinuousRetryPolicyForRequest(c, continuousRetryPolicy)
 	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
 	apiKeyID := requestAPIKeyID(c)
@@ -3949,6 +3972,9 @@ func (h *Handler) Responses(c *gin.Context) {
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
 	maxRateLimitRetries := h.getMaxRateLimitRetries()
+	if isTraeCNResumeWorker(c) {
+		maxRetries, maxRateLimitRetries = 0, 0
+	}
 	generalRetries := 0
 	rateLimitRetries := 0
 	var lastStatusCode int
@@ -4100,7 +4126,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			if lastUpstreamCancel != nil {
 				lastUpstreamCancel()
 			}
-			upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
+			upstreamCtx, upstreamCancel := responsesRelayUpstreamContext(c)
 			// Keep the platform chosen from the ingress affinity key for relay-style
 			// adapters too (notably Trae CN).  Their executors can otherwise derive a
 			// second platform from the translated body and lose the API-key-scoped
@@ -4690,11 +4716,18 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 			outcome = annotateStreamBreakDiagnostics(outcome, streamDiag)
 			ttftGuard.Stop()
+			resumeCanceled := isTraeCNResumeWorker(c) && c.Request.Context().Err() != nil
+			if resumeCanceled {
+				// 任务过期或本地缓存失败引起的取消，不计为 TRAE 账号故障。
+				outcome = classifyStreamOutcome(c.Request.Context().Err(), nil, nil, false)
+				outcome.failureKind = "local"
+				outcome.failureMessage = "TRAE 续传任务已取消或超时"
+			}
 			if outcome.verifyAccountAuth {
 				h.store.VerifyAccountAuthAsync(account)
 			}
 			var responseFailedDecision codex429Decision
-			if len(terminalFailurePayload) > 0 && !outcome.terminalLocal {
+			if len(terminalFailurePayload) > 0 && !outcome.terminalLocal && !resumeCanceled {
 				outcome = classifyResponseFailedOutcome(terminalFailurePayload)
 				if withContinuousRetryDeadlinePending(c.Request.Context(), func() {
 					responseFailedDecision = h.applyResponseFailedCooldown(account, terminalFailurePayload, resp, attemptEffectiveModel)

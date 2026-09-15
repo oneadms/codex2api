@@ -1722,6 +1722,9 @@ func traeCNCanonicalStreamForTools(source io.ReadCloser, model string, bridges t
 					data.WriteString(strings.TrimSpace(line))
 				}
 			}
+			if state.terminal {
+				return
+			}
 			if readErr != nil {
 				if data.Len() > 0 {
 					if err := flush(); err != nil {
@@ -1898,7 +1901,8 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return resp, nil
 	}
-	canonicalStream := traeCNCanonicalStreamForTools(resp.Body, model, bridges, contracts)
+	upstreamBody := wrapTraeCNResumeUpstream(ctx, client, req, resp.Body)
+	canonicalStream := traeCNCanonicalStreamForTools(upstreamBody, model, bridges, contracts)
 	// Chat and Messages handlers deliberately aggregate canonical SSE for their
 	// non-stream response types. Native Responses non-stream instead expects one
 	// response JSON object, so aggregate only that inbound protocol here.
