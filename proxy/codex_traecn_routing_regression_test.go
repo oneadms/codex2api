@@ -55,7 +55,7 @@ func TestDefaultChannelCodexRequestDoesNotFallbackToTraeCN(t *testing.T) {
 	// traecn_additional_tools_test.go), so misrouting is asserted the direct way
 	// below: no Trae upstream call may happen and the request must not degrade
 	// into a conversion error.
-	body := []byte(`{"model":"gpt-5.4","stream":false,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},{"type":"additional_tools","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}]}`)
+	body := []byte(`{"model":"gpt-5.5","stream":false,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},{"type":"additional_tools","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}]}`)
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
@@ -104,11 +104,11 @@ func TestResponsesResolverSeparatesCodexAndTraeCNChannels(t *testing.T) {
 		AccessToken:  "trae-at",
 		RefreshToken: "trae-rt",
 	}
-	base := accountFilterForResponsesModel("gpt-5.4", true)
+	base := accountFilterForResponsesModel("gpt-5.5", true)
 
 	autoCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	autoCtx.Set(contextAPIKeyRow, &database.APIKeyRow{ID: 91013})
-	autoFilter := (&Handler{}).applyUpstreamChannelFilter(autoCtx, "gpt-5.4", base)
+	autoFilter := (&Handler{}).applyUpstreamChannelFilter(autoCtx, "gpt-5.5", base)
 	if autoFilter(trae) {
 		t.Fatal("default/auto Responses routing admitted Trae CN for a Codex model")
 	}
@@ -125,7 +125,7 @@ func TestResponsesResolverSeparatesCodexAndTraeCNChannels(t *testing.T) {
 
 	codexCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	codexCtx.Set(contextAPIKeyRow, &database.APIKeyRow{ID: 91014, Limits: database.APIKeyLimits{UpstreamChannel: database.UpstreamChannelCodex}})
-	codexFilter := (&Handler{}).applyUpstreamChannelFilter(codexCtx, "gpt-5.4", base)
+	codexFilter := (&Handler{}).applyUpstreamChannelFilter(codexCtx, "gpt-5.5", base)
 	if codexFilter(trae) {
 		t.Fatal("explicit Codex channel admitted Trae CN")
 	}
