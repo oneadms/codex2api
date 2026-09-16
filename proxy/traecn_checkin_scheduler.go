@@ -155,10 +155,13 @@ func runTraeCNCheckinForAccount(ctx context.Context, store *auth.Store, db *data
 	snapshot := auth.TraeCNCheckinSnapshot{Date: day, At: time.Now(), Credits: outcome.Status.Credits, Result: result}
 	if err != nil {
 		// 失败不写日期，留出当天补签机会；尝试次数上限与轮询间隔一起兜住频率。
+		// 出口必须写进事件：签到地址对所有账号相同，成败差异只可能来自每个账号自己的
+		// 出站（代理/中转），没有出口信息就只能看到一页看不懂的上游 HTML。
+		egress := traeCNCheckinEgressLabel(account.GetProxyURL())
 		if db != nil {
-			db.InsertAccountEventAsync(account.DBID, "traecn_checkin_failed", fmt.Sprintf("第 %d 次尝试失败: %v", attempt, err))
+			db.InsertAccountEventAsync(account.DBID, "traecn_checkin_failed", fmt.Sprintf("第 %d 次尝试失败（出口 %s）: %v", attempt, egress, err))
 		}
-		log.Printf("[traecn-checkin] 账号 %d 第 %d 次签到失败: %v", account.DBID, attempt, err)
+		log.Printf("[traecn-checkin] 账号 %d 第 %d 次签到失败（出口 %s）: %v", account.DBID, attempt, egress, err)
 		return
 	}
 	store.PersistTraeCNCheckin(account.DBID, snapshot)

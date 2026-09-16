@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -136,5 +137,46 @@ func TestRunTraeCNCheckinSkipsClaimWhenAlreadyCheckedInOrDisabled(t *testing.T) 
 				t.Fatalf("outcome = %+v, want skip=%s", outcome, tc.wantSkip)
 			}
 		})
+	}
+}
+
+// 签到地址对所有账号相同，成/败差异只来自账号自己的出口；出口与错误摘要必须能看懂。
+func TestTraeCNCheckinEgressLabelHidesCredentials(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ in, want string }{
+		{"", "none"},
+		{"   ", "none"},
+		{"http://user:secret@cp.example.com:8080", "cp.example.com:8080"},
+		{"socks5://10.0.0.1:1080", "10.0.0.1:1080"},
+		{"not a url", "configured"},
+	} {
+		if got := traeCNCheckinEgressLabel(tc.in); got != tc.want {
+			t.Fatalf("traeCNCheckinEgressLabel(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// Cloudflare / 代理的 502 页面不能整页塞进账号事件，只留标题与 Ray ID。
+func TestTraeCNCheckinErrorSummaryCompactsHTMLErrorPage(t *testing.T) {
+	t.Parallel()
+	page := []byte(`<!DOCTYPE html><html><head><title>cp.example.com | 502: Bad gateway</title></head>` +
+		`<body><p>Cloudflare Ray ID: <strong>a3c1d2c9d8720501</strong></p></body></html>`)
+	got := traeCNCheckinErrorSummary(page)
+	if got != "cp.example.com | 502: Bad gateway | Ray a3c1d2c9d8720501" {
+		t.Fatalf("summary = %q", got)
+	}
+	if strings.Contains(got, "<") {
+		t.Fatalf("摘要里残留 HTML: %q", got)
+	}
+	// 没有 title 的 HTML 也要给出点可用信息，而不是空白。
+	if got := traeCNCheckinErrorSummary([]byte("<html><body>Bad gateway</body></html>")); got == "" || strings.Contains(got, "<") {
+		t.Fatalf("无 title 页面的摘要 = %q", got)
+	}
+	// JSON 错误体保持原样（只是截断）。
+	if got := traeCNCheckinErrorSummary([]byte(`{"code":4001,"message":"invalid token"}`)); got != `{"code":4001,"message":"invalid token"}` {
+		t.Fatalf("JSON 摘要被改写: %q", got)
+	}
+	if got := traeCNCheckinErrorSummary(nil); got != "" {
+		t.Fatalf("空响应体摘要 = %q", got)
 	}
 }

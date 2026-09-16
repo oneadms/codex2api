@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/security"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
@@ -25,6 +28,50 @@ const (
 
 // traeCNCheckinMarketClientID 是桌面端上报的市场客户端标识。
 const traeCNCheckinMarketClientID = "VSCode 1.107.1"
+
+// traeCNCheckinEgressLabel 只保留出口的 host:port：账号事件和日志里绝不能出现代理凭据。
+// 账号没配代理时记 none，此时进程环境代理（HTTP(S)_PROXY）仍可能生效。
+func traeCNCheckinEgressLabel(proxyURL string) string {
+	trimmed := strings.TrimSpace(proxyURL)
+	if trimmed == "" {
+		return "none"
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Host == "" {
+		return "configured"
+	}
+	return parsed.Host
+}
+
+var (
+	traeCNCheckinHTMLTitleRe = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+	traeCNCheckinRayIDRe     = regexp.MustCompile(`(?is)Cloudflare Ray ID:[^<]*<strong[^>]*>([^<]+)</strong>`)
+	traeCNCheckinTagRe       = regexp.MustCompile(`(?s)<[^>]*>`)
+)
+
+// traeCNCheckinErrorSummary 把上游错误体压成一行可读文本。签到失败时上游可能回整页
+// HTML（Cloudflare/代理的 502 页面），原样写进账号事件既看不懂也看不出是谁拒的，
+// 这里只保留页面标题与 Cloudflare Ray ID。
+func traeCNCheckinErrorSummary(raw []byte) string {
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		return ""
+	}
+	if strings.HasPrefix(text, "<") {
+		var parts []string
+		if match := traeCNCheckinHTMLTitleRe.FindStringSubmatch(text); len(match) == 2 {
+			parts = append(parts, strings.Join(strings.Fields(match[1]), " "))
+		}
+		if match := traeCNCheckinRayIDRe.FindStringSubmatch(text); len(match) == 2 {
+			parts = append(parts, "Ray "+strings.TrimSpace(match[1]))
+		}
+		if len(parts) == 0 {
+			parts = append(parts, strings.Join(strings.Fields(traeCNCheckinTagRe.ReplaceAllString(text, " ")), " "))
+		}
+		text = strings.Join(parts, " | ")
+	}
+	return security.SafeTruncate(text, 200)
+}
 
 type traeCNCheckinStatus struct {
 	Code      int64
@@ -117,11 +164,7 @@ func runTraeCNCheckin(ctx context.Context, store *auth.Store, account *auth.Acco
 			return gjson.Result{}, readErr
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			message := strings.TrimSpace(string(raw))
-			if len(message) > 200 {
-				message = message[:200]
-			}
-			return gjson.Result{}, fmt.Errorf("HTTP %d %s", resp.StatusCode, message)
+			return gjson.Result{}, fmt.Errorf("HTTP %d %s", resp.StatusCode, traeCNCheckinErrorSummary(raw))
 		}
 		return gjson.ParseBytes(raw), nil
 	}
