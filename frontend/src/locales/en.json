@@ -367,6 +367,10 @@
   "traecn": {
     "selectedCount": "{{count}} accounts selected",
     "batchDelete": "Delete selected",
+    "batchTestFilteredTitle": "Test filtered accounts",
+    "batchTestFilteredDesc": "Batch-test the {{count}} TRAECN accounts in the current filter.",
+    "batchTestAllTitle": "Test all TRAECN accounts",
+    "batchTestAllDesc": "No selection and no filter — this will test all {{count}} TRAECN accounts. Large pools may take a while. Continue?",
     "batchDeleteTitle": "Delete selected Trae CN accounts",
     "batchDeleteDesc": "This deletes the {{count}} selected accounts including their credentials and cannot be undone. Continue?",
     "batchDeleteDone": "Deleted {{success}} accounts, {{failed}} failed",

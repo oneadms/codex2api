@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  ArrowDown,
+  ArrowUpDown,
+  ArrowUp,
   CheckCircle2,
   ChevronDown,
   CircleAlert,
@@ -9,6 +12,7 @@ import {
   Edit3,
   ExternalLink,
   FileJson,
+  FlaskConical,
   Fingerprint,
   KeyRound,
   Layers,
@@ -28,6 +32,7 @@ import {
 import { api, getAdminKey } from "../api";
 import type {
   AccountGroup,
+  AccountOperationSelector,
   AccountRow,
   AddTraeCNAccountsResponse,
   TraeCNCreditsPoolMode,
@@ -45,7 +50,10 @@ import StateShell from "../components/StateShell";
 import Pagination from "../components/Pagination";
 import StatusBadge from "../components/StatusBadge";
 import TraeCNCreditsCell from "../components/TraeCNCreditsCell";
+import OperationProgressToast from "../components/OperationProgressToast";
+import OperationResultsModal from "../components/OperationResultsModal";
 import { useTraeCNCredits } from "../hooks/useTraeCNCredits";
+import { useOperationProgress } from "../hooks/useOperationProgress";
 import AccountGroupMultiSelect from "../components/AccountGroupMultiSelect";
 import ModelLogo from "../components/ModelLogo";
 import Modal from "../components/Modal";
@@ -55,10 +63,19 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { traeCNCreditsAvailability, traeCNCreditsBadgeKey } from "../lib/traecnCredits";
 import { Badge } from "@/components/ui/badge";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { useToast } from "../hooks/useToast";
 import { useConfirmDialog } from "../hooks/useConfirmDialog";
 import { usePersistedPageSize, DEFAULT_PAGE_SIZE_OPTIONS } from "../hooks/usePersistedPageSize";
 import { getErrorMessage } from "../utils/error";
+import { formatBeijingTime, formatRelativeTime } from "../utils/time";
 import { cn } from "@/lib/utils";
 
 const DEFAULT_HOST = "https://trae-api-cn.mchost.guru";
@@ -125,6 +142,11 @@ function downloadBlob(blob: Blob, filename: string) {
 }
 
 type StatusFilter = "all" | "active" | "disabled" | "error";
+type SortKey = "importTime" | "updatedAt";
+const SORT_FIELD: Record<SortKey, "created_at" | "updated_at"> = {
+  importTime: "created_at",
+  updatedAt: "updated_at",
+};
 
 function parseLines(value: string): string[] {
   const seen = new Set<string>();
@@ -673,6 +695,13 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const { t } = useTranslation();
   const { showToast } = useToast();
   const { confirm, confirmDialog } = useConfirmDialog();
+  const {
+    operationProgress,
+    operationResults,
+    runStreamingOperation,
+    closeOperationProgress,
+    closeOperationResults,
+  } = useOperationProgress(true);
   const requestAbortRef = useRef<AbortController | null>(null);
   const [accounts, setAccounts] = useState<AccountRow[]>([]);
   const creditAccountIDs = useMemo(() => accounts.map(account => account.id), [accounts]);
@@ -690,6 +719,8 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
+  const [sortKey, setSortKey] = useState<SortKey>("importTime");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [busy, setBusy] = useState<{ id: number; action: string } | null>(null);
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null);
   const [modelsAccount, setModelsAccount] = useState<AccountRow | null>(null);
@@ -705,6 +736,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const [showJSONImport, setShowJSONImport] = useState(false);
   const [importing, setImporting] = useState(false);
   const [batchDeleting, setBatchDeleting] = useState(false);
+  const [batchTesting, setBatchTesting] = useState(false);
   const [jsonPreview, setJsonPreview] = useState<{ items: TraeCNImportPreviewItem[]; error?: string }>({ items: [] });
   const [jsonSelected, setJsonSelected] = useState<Set<number>>(new Set());
   // OAuth 授权会话：从 start 拿到授权链接，轮询到 ready 后自动建号。
@@ -744,8 +776,8 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
         pageSize,
         search: debouncedSearch,
         status,
-        sort: "updated_at",
-        order: "desc",
+        sort: SORT_FIELD[sortKey],
+        order: sortDir,
       }, controller.signal);
       if (controller.signal.aborted) return;
       setAccounts((response.accounts ?? []).filter((account) => account.traecn_api !== false));
@@ -765,7 +797,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
     } finally {
       if (requestAbortRef.current === controller) setLoading(false);
     }
-  }, [debouncedSearch, page, pageSize, showToast, status]);
+  }, [debouncedSearch, page, pageSize, showToast, sortDir, sortKey, status]);
 
   useEffect(() => { void reloadGroups(); }, [reloadGroups]);
   useEffect(() => { void reload(); }, [reload]);
@@ -1204,12 +1236,109 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
   );
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const currentPage = Math.min(page, totalPages);
   const activeCount = summary?.active ?? accounts.filter((account) => account.enabled !== false && account.status !== "error").length;
   const disabledCount = summary?.disabled ?? accounts.filter((account) => account.enabled === false).length;
   const errorCount = summary?.error ?? accounts.filter((account) => account.status === "error").length;
 
+  const currentTraeCNSelector = useMemo<AccountOperationSelector>(() => ({
+    channel: "traecn",
+    search: debouncedSearch || undefined,
+    status: status === "all" ? undefined : status,
+  }), [debouncedSearch, status]);
+  const hasActiveTraeCNFilters = Boolean(debouncedSearch || status !== "all");
+
+  const handleBatchTest = async (testIds?: number[]) => {
+    if (total === 0 && selectedIDs.size === 0 && !testIds?.length) return;
+
+    // 必须显式传 ids 或 channel=traecn 的 selector，否则会连其它渠道一起测。
+    let ids: number[] | null = null;
+    if (testIds && testIds.length > 0) {
+      ids = testIds;
+    } else if (selectedIDs.size > 0) {
+      ids = Array.from(selectedIDs);
+    } else if (hasActiveTraeCNFilters) {
+      const confirmed = await confirm({
+        title: t("traecn.batchTestFilteredTitle"),
+        description: t("traecn.batchTestFilteredDesc", { count: total }),
+        confirmText: t("accounts.batchTest"),
+      });
+      if (!confirmed) return;
+    } else {
+      const confirmed = await confirm({
+        title: t("traecn.batchTestAllTitle"),
+        description: t("traecn.batchTestAllDesc", { count: total }),
+        confirmText: t("accounts.batchTest"),
+        tone: "destructive",
+        confirmVariant: "destructive",
+      });
+      if (!confirmed) return;
+    }
+    if (ids && ids.length === 0) return;
+
+    setBatchTesting(true);
+    try {
+      const result = await runStreamingOperation(
+        "/accounts/batch-test?stream=true",
+        ids ? { ids } : { selector: currentTraeCNSelector },
+        t("accounts.batchTestProgressTitle"),
+      );
+      showToast(
+        t("accounts.batchTestDone", {
+          success: result?.success ?? 0,
+          banned: result?.banned ?? 0,
+          rateLimited: result?.rate_limited ?? 0,
+          failed: result?.failed ?? 0,
+        }),
+        result?.failed || result?.banned || result?.rate_limited ? "warning" : "success",
+      );
+      await reload(true);
+    } catch (testError) {
+      showToast(t("accounts.batchTestFailed", { error: getErrorMessage(testError) }), "error");
+    } finally {
+      setBatchTesting(false);
+    }
+  };
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir((dir) => (dir === "desc" ? "asc" : "desc"));
+    } else {
+      setSortKey(key);
+      setSortDir("desc");
+    }
+    setPage(1);
+  };
+
+  const renderSortHead = (key: SortKey, label: string) => (
+    <TableHead className="text-[13px] font-semibold">
+      <button
+        type="button"
+        onClick={() => toggleSort(key)}
+        className={cn(
+          "inline-flex items-center gap-1.5 rounded outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50",
+          sortKey === key && "text-foreground",
+        )}
+      >
+        {label}
+        {sortKey === key ? (
+          sortDir === "desc" ? <ArrowDown className="size-3" /> : <ArrowUp className="size-3" />
+        ) : (
+          <ArrowUpDown className="size-3 opacity-50" />
+        )}
+      </button>
+    </TableHead>
+  );
+
   return (
     <div className="space-y-4">
+      <OperationProgressToast progress={operationProgress} onClose={closeOperationProgress} />
+      <OperationResultsModal
+        state={operationResults}
+        accounts={accounts}
+        channel="traecn"
+        onClose={closeOperationResults}
+      />
       <PageHeader
         title={t("traecn.pageTitle")}
         description={t("traecn.pageDescription")}
@@ -1217,6 +1346,17 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
         onRefresh={() => void reload()}
         actions={
           <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              onClick={() => void handleBatchTest()}
+              disabled={batchTesting || total === 0}
+              title={t("accounts.batchTest")}
+            >
+              {batchTesting ? <Loader2 className="size-4 animate-spin" /> : <FlaskConical className="size-4" />}
+              <span className="hidden sm:inline">
+                {batchTesting ? t("accounts.batchTesting") : t("accounts.testConnection")}
+              </span>
+            </Button>
             <Button variant="outline" onClick={openJSONImport} disabled={importing}>
               <Upload className="size-4" />
               {t("traecn.importJSONBtn")}
@@ -1251,9 +1391,13 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
       </div>
 
       {selectedIDs.size > 0 ? (
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-muted/40 px-3 py-2">
+        <div className="sticky top-2 z-20 flex flex-col gap-2 rounded-xl border border-primary/20 bg-card/95 px-3 py-2 shadow-lg backdrop-blur-sm sm:flex-row sm:items-center sm:justify-between">
           <span className="text-sm font-medium">{t("traecn.selectedCount", { count: selectedIDs.size })}</span>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+            <Button variant="outline" size="sm" onClick={() => void handleBatchTest(Array.from(selectedIDs))} disabled={batchTesting || batchDeleting}>
+              {batchTesting ? <Loader2 className="size-3.5 animate-spin" /> : <FlaskConical className="size-3.5" />}
+              <span className="hidden sm:inline">{batchTesting ? t("accounts.batchTesting") : t("accounts.batchTest")}</span>
+            </Button>
             <Button variant="outline" size="sm" onClick={() => void exportAccountsSelected()} disabled={exporting || batchDeleting}>
               {exporting ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
               {t("traecn.exportSelected", { count: selectedIDs.size })}
@@ -1281,103 +1425,175 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
         emptyTitle={total === 0 ? t("traecn.emptyTitle") : t("traecn.noMatchesTitle")}
         emptyDescription={total === 0 ? t("traecn.emptyDescription") : t("traecn.noMatchesDescription")}
       >
-        <div className="w-full overflow-hidden rounded-xl border border-border bg-card shadow-sm">
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[860px] text-sm">
-              <thead className="border-b border-border bg-muted/30">
-                <tr className="text-left text-xs font-semibold uppercase text-muted-foreground">
-                  <th className="w-10 px-3 py-3">
-                    <input
-                      type="checkbox"
-                      className="size-4 accent-primary"
-                      aria-label={t("traecn.selectAllOnPage")}
-                      checked={pageIDs.length > 0 && pageIDs.every((id) => selectedIDs.has(id))}
-                      ref={(node) => {
-                        if (node) node.indeterminate = pageIDs.some((id) => selectedIDs.has(id)) && !pageIDs.every((id) => selectedIDs.has(id));
-                      }}
-                      onChange={(event) => toggleSelectPage(event.target.checked)}
-                    />
-                  </th>
-                  <th className="px-3 py-3">{t("traecn.columnAccount")}</th>
-                  <th className="px-3 py-3">{t("traecn.columnModels")}</th>
-                  <th className="px-3 py-3">{t("traecn.columnCredits")}</th>
-                  <th className="px-3 py-3">{t("traecn.columnEndpoint")}</th>
-                  <th className="px-3 py-3">{t("traecn.columnGroups")}</th>
-                  <th className="px-3 py-3">{t("traecn.columnStatus")}</th>
-                  <th className="px-3 py-3 text-right">{t("traecn.columnActions")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {accounts.map((account) => {
-                  const accountBusy = busy?.id === account.id
-                    ? busy.action
-                    : testingAccount?.id === account.id
-                      ? "test"
-                      : null;
-                  return (
-                    <tr key={account.id} className={cn("border-b border-border/70 last:border-0", account.enabled === false && "opacity-60")}>
-                      <td className="px-3 py-3 align-top">
-                        <input
-                          type="checkbox"
-                          className="size-4 accent-primary"
-                          aria-label={t("traecn.selectAccount", { name: accountLabel(account) })}
-                          checked={selectedIDs.has(account.id)}
-                          onChange={(event) => toggleSelect(account.id, event.target.checked)}
-                        />
-                      </td>
-                      <td className="max-w-[220px] px-3 py-3">
-                        <div className="truncate font-semibold" title={accountLabel(account)}>{accountLabel(account)}</div>
-                        <div
-                          className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground"
-                          title={account.email || `ID ${account.id}`}
-                        >
-                          {account.email || `ID ${account.id}`}
+        <div className="hidden data-table-shell md:block">
+          <Table className="[&_td]:px-3 [&_th]:px-3 [&_td]:py-3">
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-10">
+                  <input
+                    type="checkbox"
+                    className="size-4 accent-primary"
+                    aria-label={t("traecn.selectAllOnPage")}
+                    checked={pageIDs.length > 0 && pageIDs.every((id) => selectedIDs.has(id))}
+                    ref={(node) => {
+                      if (node) node.indeterminate = pageIDs.some((id) => selectedIDs.has(id)) && !pageIDs.every((id) => selectedIDs.has(id));
+                    }}
+                    onChange={(event) => toggleSelectPage(event.target.checked)}
+                  />
+                </TableHead>
+                <TableHead className="text-[13px] font-semibold">{t("traecn.columnAccount")}</TableHead>
+                <TableHead className="text-[13px] font-semibold">{t("traecn.columnModels")}</TableHead>
+                <TableHead className="text-[13px] font-semibold">{t("traecn.columnCredits")}</TableHead>
+                <TableHead className="text-[13px] font-semibold">{t("traecn.columnEndpoint")}</TableHead>
+                <TableHead className="text-[13px] font-semibold">{t("traecn.columnGroups")}</TableHead>
+                {renderSortHead("importTime", t("accounts.importTime"))}
+                <TableHead className="text-[13px] font-semibold">{t("traecn.columnStatus")}</TableHead>
+                <TableHead className="text-right text-[13px] font-semibold">{t("traecn.columnActions")}</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {accounts.map((account) => {
+                const accountBusy = busy?.id === account.id
+                  ? busy.action
+                  : testingAccount?.id === account.id
+                    ? "test"
+                    : null;
+                return (
+                  <TableRow key={account.id} className={cn(account.enabled === false && "opacity-60")}>
+                    <TableCell className="align-top">
+                      <input
+                        type="checkbox"
+                        className="size-4 accent-primary"
+                        aria-label={t("traecn.selectAccount", { name: accountLabel(account) })}
+                        checked={selectedIDs.has(account.id)}
+                        onChange={(event) => toggleSelect(account.id, event.target.checked)}
+                      />
+                    </TableCell>
+                    <TableCell className="max-w-[220px]">
+                      <div className="truncate font-semibold" title={accountLabel(account)}>{accountLabel(account)}</div>
+                      <div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground" title={account.email || `ID ${account.id}`}>
+                        {account.email || `ID ${account.id}`}
+                      </div>
+                      {account.traecn_checkin_date ? (
+                        <div className="mt-0.5 truncate text-[10px] text-muted-foreground" title={account.traecn_checkin_result || ""}>
+                          {t("traecn.checkinLast", { date: account.traecn_checkin_date, credits: account.traecn_checkin_credits ?? 0 })}
                         </div>
-                        {account.traecn_checkin_date ? (
-                          <div className="mt-0.5 truncate text-[10px] text-muted-foreground" title={account.traecn_checkin_result || ""}>
-                            {t("traecn.checkinLast", { date: account.traecn_checkin_date, credits: account.traecn_checkin_credits ?? 0 })}
-                          </div>
-                        ) : null}
-                        {/* 设备码：一账号一份，Trae 风控按它识别设备，方便核对是否串号。 */}
-                        <button
-                          type="button"
-                          onClick={() => void handleCopy(account.traecn_machine_id || account.traecn_device_id || "")}
-                          disabled={!account.traecn_machine_id && !account.traecn_device_id}
-                          title={account.traecn_machine_id || account.traecn_device_id || ""}
-                          className="mt-0.5 flex items-center gap-1 truncate font-mono text-[10px] text-muted-foreground transition-colors hover:text-foreground disabled:cursor-default disabled:hover:text-muted-foreground"
-                        >
-                          <Fingerprint className="size-3 shrink-0" />
-                          {t("traecn.deviceCode", { code: shortDeviceCode(account.traecn_device_id || account.traecn_machine_id) })}
-                        </button>
-                      </td>
-                      <td className="px-3 py-3 align-top">
-                        <TraeCNModelsCell account={account} catalog={models} onOpen={() => setModelsAccount(account)} />
-                      </td>
-                      <td className="px-3 py-3"><TraeCNCreditsCell state={creditStates[account.id]} onRefresh={() => void refreshCredits(account.id)} /></td>
-                      <td className="max-w-[240px] px-3 py-3">
-                        <div className="truncate font-mono text-xs" title={account.traecn_host || DEFAULT_HOST}>{account.traecn_host || DEFAULT_HOST}</div>
-                        {account.proxy_url ? <div className="mt-0.5 truncate text-[11px] text-muted-foreground" title={account.proxy_url}>{account.proxy_url}</div> : <div className="mt-0.5 text-[11px] text-muted-foreground">{t("traecn.noProxy")}</div>}
-                      </td>
-                      <td className="px-3 py-3"><GroupChips account={account} groups={traeGroups} /></td>
-                      <td className="px-3 py-3"><div className="flex items-center gap-1.5">{(() => {
-                        const badgeKey = traeCNCreditsBadgeKey(creditStates[account.id]?.data
-                          ? traeCNCreditsAvailability(account.traecn_credits_pool, creditStates[account.id]?.data?.pools)
-                          : account.traecn_credits_state);
-                        return (<>
-                          <StatusBadge status={account.status} />
-                          {badgeKey ? <Badge variant={badgeKey === "traecn.creditsExhaustedBadge" ? "destructive" : "outline"}
-                            title={t("traecn.creditsStateHint")}>{t(badgeKey)}</Badge> : null}
-                          {account.enabled === false ? <Badge variant="outline">{t("traecn.disabledBadge")}</Badge> : null}
-                        </>);
-                      })()}</div></td>
-                      <td className="px-3 py-3"><AccountActions account={account} busy={accountBusy} onTest={() => setTestingAccount(account)} onRefresh={() => void runAccountAction(account, "refresh")} onSyncModels={() => void runAccountAction(account, "syncModels")} onCheckin={() => void runAccountAction(account, "checkin")} onEdit={() => openEdit(account)} onToggle={() => void runAccountAction(account, "toggle")} onDelete={() => void runAccountAction(account, "delete")} /></td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          <div className="px-3 pb-3"><Pagination page={page} totalPages={totalPages} onPageChange={setPage} totalItems={total} pageSize={pageSize} pageSizeOptions={DEFAULT_PAGE_SIZE_OPTIONS} onPageSizeChange={(next) => { setPageSize(next); setPage(1); }} /></div>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => void handleCopy(account.traecn_machine_id || account.traecn_device_id || "")}
+                        disabled={!account.traecn_machine_id && !account.traecn_device_id}
+                        title={account.traecn_machine_id || account.traecn_device_id || ""}
+                        className="mt-0.5 flex items-center gap-1 truncate font-mono text-[10px] text-muted-foreground transition-colors hover:text-foreground disabled:cursor-default disabled:hover:text-muted-foreground"
+                      >
+                        <Fingerprint className="size-3 shrink-0" />
+                        {t("traecn.deviceCode", { code: shortDeviceCode(account.traecn_device_id || account.traecn_machine_id) })}
+                      </button>
+                    </TableCell>
+                    <TableCell className="align-top">
+                      <TraeCNModelsCell account={account} catalog={models} onOpen={() => setModelsAccount(account)} />
+                    </TableCell>
+                    <TableCell><TraeCNCreditsCell state={creditStates[account.id]} onRefresh={() => void refreshCredits(account.id)} /></TableCell>
+                    <TableCell className="max-w-[240px]">
+                      <div className="truncate font-mono text-xs" title={account.traecn_host || DEFAULT_HOST}>{account.traecn_host || DEFAULT_HOST}</div>
+                      {account.proxy_url ? <div className="mt-0.5 truncate text-[11px] text-muted-foreground" title={account.proxy_url}>{account.proxy_url}</div> : <div className="mt-0.5 text-[11px] text-muted-foreground">{t("traecn.noProxy")}</div>}
+                    </TableCell>
+                    <TableCell><GroupChips account={account} groups={traeGroups} /></TableCell>
+                    <TableCell className="whitespace-nowrap">
+                      <div className="text-xs tabular-nums">{formatBeijingTime(account.created_at)}</div>
+                      <time className="mt-0.5 block text-[11px] tabular-nums text-muted-foreground" dateTime={account.updated_at} title={formatBeijingTime(account.updated_at)}>
+                        {formatRelativeTime(account.updated_at)}
+                      </time>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1.5">
+                        <StatusBadge status={account.status} />
+                        {(() => {
+                          const badgeKey = traeCNCreditsBadgeKey(creditStates[account.id]?.data
+                            ? traeCNCreditsAvailability(account.traecn_credits_pool, creditStates[account.id]?.data?.pools)
+                            : account.traecn_credits_state);
+                          return (<>
+                            {badgeKey ? <Badge variant={badgeKey === "traecn.creditsExhaustedBadge" ? "destructive" : "outline"} title={t("traecn.creditsStateHint")}>{t(badgeKey)}</Badge> : null}
+                            {account.enabled === false ? <Badge variant="outline">{t("traecn.disabledBadge")}</Badge> : null}
+                          </>);
+                        })()}
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <AccountActions account={account} busy={accountBusy} onTest={() => setTestingAccount(account)} onRefresh={() => void runAccountAction(account, "refresh")} onSyncModels={() => void runAccountAction(account, "syncModels")} onCheckin={() => void runAccountAction(account, "checkin")} onEdit={() => openEdit(account)} onToggle={() => void runAccountAction(account, "toggle")} onDelete={() => void runAccountAction(account, "delete")} />
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
+
+        <div className="grid gap-2 md:hidden">
+          {accounts.map((account) => {
+            const accountBusy = busy?.id === account.id ? busy.action : null;
+            const badgeKey = traeCNCreditsBadgeKey(creditStates[account.id]?.data
+              ? traeCNCreditsAvailability(account.traecn_credits_pool, creditStates[account.id]?.data?.pools)
+              : account.traecn_credits_state);
+            return (
+              <article key={account.id} className={cn("rounded-xl border border-border bg-card p-3 shadow-sm", account.enabled === false && "opacity-60")}>
+                <div className="flex items-start gap-3">
+                  <input
+                    type="checkbox"
+                    className="mt-1 size-4 accent-primary"
+                    aria-label={t("traecn.selectAccount", { name: accountLabel(account) })}
+                    checked={selectedIDs.has(account.id)}
+                    onChange={(event) => toggleSelect(account.id, event.target.checked)}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-semibold" title={accountLabel(account)}>{accountLabel(account)}</div>
+                    <div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground" title={account.email || `ID ${account.id}`}>
+                      {account.email || `ID ${account.id}`}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleCopy(account.traecn_machine_id || account.traecn_device_id || "")}
+                      disabled={!account.traecn_machine_id && !account.traecn_device_id}
+                      title={account.traecn_machine_id || account.traecn_device_id || ""}
+                      className="mt-1 flex max-w-full items-center gap-1 truncate font-mono text-[10px] text-muted-foreground transition-colors hover:text-foreground disabled:cursor-default disabled:hover:text-muted-foreground"
+                    >
+                      <Fingerprint className="size-3 shrink-0" />
+                      {t("traecn.deviceCode", { code: shortDeviceCode(account.traecn_device_id || account.traecn_machine_id) })}
+                    </button>
+                  </div>
+                  <StatusBadge status={account.status} />
+                </div>
+                <div className="mt-3 space-y-3 border-t border-border pt-3">
+                  <TraeCNModelsCell account={account} catalog={models} onOpen={() => setModelsAccount(account)} />
+                  <TraeCNCreditsCell state={creditStates[account.id]} onRefresh={() => void refreshCredits(account.id)} />
+                  <div className="space-y-1 text-xs">
+                    <div className="truncate font-mono" title={account.traecn_host || DEFAULT_HOST}>{account.traecn_host || DEFAULT_HOST}</div>
+                    <div className="truncate text-[11px] text-muted-foreground" title={account.proxy_url || undefined}>
+                      {account.proxy_url || t("traecn.noProxy")}
+                    </div>
+                    <GroupChips account={account} groups={traeGroups} />
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-border pt-2">
+                  {badgeKey ? <Badge variant={badgeKey === "traecn.creditsExhaustedBadge" ? "destructive" : "outline"} title={t("traecn.creditsStateHint")}>{t(badgeKey)}</Badge> : null}
+                  {account.enabled === false ? <Badge variant="outline">{t("traecn.disabledBadge")}</Badge> : null}
+                  <time className="ml-auto text-[10px] text-muted-foreground" dateTime={account.updated_at} title={formatBeijingTime(account.updated_at)}>
+                    {formatRelativeTime(account.updated_at)}
+                  </time>
+                </div>
+                <div className="mt-2 flex items-center justify-between gap-2 border-t border-border pt-2">
+                  <span className="text-[10px] text-muted-foreground" title={formatBeijingTime(account.created_at)}>
+                    {t("accounts.importTime")}: {formatBeijingTime(account.created_at).slice(0, 10)}
+                  </span>
+                  <AccountActions account={account} busy={accountBusy} onTest={() => setTestingAccount(account)} onRefresh={() => void runAccountAction(account, "refresh")} onSyncModels={() => void runAccountAction(account, "syncModels")} onCheckin={() => void runAccountAction(account, "checkin")} onEdit={() => openEdit(account)} onToggle={() => void runAccountAction(account, "toggle")} onDelete={() => void runAccountAction(account, "delete")} />
+                </div>
+              </article>
+            );
+          })}
+        </div>
+
+        <div className="px-0 pb-0 md:px-3 md:pb-3">
+          <Pagination page={currentPage} totalPages={totalPages} onPageChange={setPage} totalItems={total} pageSize={pageSize} pageSizeOptions={DEFAULT_PAGE_SIZE_OPTIONS} onPageSizeChange={(next) => { setPageSize(next); setPage(1); }} />
         </div>
       </StateShell>
 

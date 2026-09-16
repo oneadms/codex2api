@@ -85,6 +85,22 @@ test("Trae CN selection bar offers batch delete with confirmation", () => {
   assert.match(source, /setSelectedIDs\(new Set\(\)\);\s*\n\s*await reload\(true\);/);
 });
 
+test("Trae CN list offers the shared streaming batch test flow", () => {
+  // 与 Codex/Grok 一致：右上角批量测试 + 选中后批量测试，走 SSE 进度浮层和结果弹窗。
+  assert.match(source, /useOperationProgress\(true\)/);
+  assert.match(source, /"\/accounts\/batch-test\?stream=true"/);
+  assert.match(source, /selector: currentTraeCNSelector/);
+  assert.match(source, /OperationProgressToast/);
+  assert.match(source, /OperationResultsModal/);
+  assert.match(source, /channel="traecn"/);
+});
+
+test("Trae CN list has a mobile card layout instead of a wide scrolling table", () => {
+  assert.match(source, /className="hidden data-table-shell md:block"/);
+  assert.match(source, /className="grid gap-2 md:hidden"/);
+  assert.doesNotMatch(source, /min-w-\[980px\]/);
+});
+
 test("Trae CN JSON import previews parsed entries so specific ones can be picked", () => {
   assert.match(source, /parseTraeCNImportJSON/);
   assert.match(source, /selectTraeCNImportEntries\(jsonText, picked\)/);

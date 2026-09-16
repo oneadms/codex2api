@@ -367,6 +367,10 @@
   "traecn": {
     "selectedCount": "已选 {{count}} 个账号",
     "batchDelete": "批量删除",
+    "batchTestFilteredTitle": "测试当前筛选账号",
+    "batchTestFilteredDesc": "将对当前筛选结果中的 {{count}} 个 TRAECN 账号发起批量测试。",
+    "batchTestAllTitle": "测试全部 TRAECN 账号",
+    "batchTestAllDesc": "未勾选账号且无筛选时，将测试全部 {{count}} 个 TRAECN 账号。号池较大时可能耗时较长，确认继续？",
     "batchDeleteTitle": "批量删除 Trae CN 账号",
     "batchDeleteDesc": "将删除已选中的 {{count}} 个账号（含凭据），删除后无法恢复。确定继续？",
     "batchDeleteDone": "已删除 {{success}} 个账号，失败 {{failed}} 个",
