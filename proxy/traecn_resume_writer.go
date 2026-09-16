@@ -170,6 +170,10 @@ func (w *traeCNResumeWriter) appendFrameLocked(frame []byte) error {
 			w.task.toolSubmitted = true
 		}
 	}
+	if typeName == "response.failed" && isExplicitUpstreamCyberPolicy(data) {
+		// 上游明确判定内容不合规：重开只会被再拒一次，交回客户端处理。
+		w.task.policyRefused = true
+	}
 	if typeName == "response.completed" || typeName == "response.failed" || typeName == "response.incomplete" {
 		w.terminal = true
 		w.task.terminalEvent = strings.Clone(typeName)

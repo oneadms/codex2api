@@ -16,6 +16,7 @@ import (
 )
 
 // 明确鉴权拒绝可在原任务内换号；鉴权、限流预算耗尽后的下游重试不能被失败缓存锁死。
+// 未知 5xx 的下游重试同样降级为全新生成，不再把 409 交给客户端。
 func TestTraeCNResumeRejectedRequestRecovery(t *testing.T) {
 	t.Setenv("TRAECN_RESUME_ENABLED", "1")
 	for _, testCase := range []struct {
@@ -73,10 +74,11 @@ func TestTraeCNResumeRejectedRequestRecovery(t *testing.T) {
 				return
 			}
 			if testCase.status == http.StatusInternalServerError {
-				retry, failed := traeCNResumeTestContext(traeCNResumeTestBody, testCase.name)
+				// 任务内不自动重试状态不明的 5xx；客户端重发时放弃续传、按普通流程重新生成。
+				retry, recovered := traeCNResumeTestContext(traeCNResumeTestBody, testCase.name)
 				handler.Responses(retry)
-				if calls.Load() != 1 || failed.Code != http.StatusConflict {
-					t.Fatalf("ambiguous failure restarted: calls=%d status=%d", calls.Load(), failed.Code)
+				if calls.Load() != 2 || recovered.Code != http.StatusOK || !strings.Contains(recovered.Body.String(), "response.completed") {
+					t.Fatalf("ambiguous failure not recovered: calls=%d status=%d body=%s", calls.Load(), recovered.Code, recovered.Body.String())
 				}
 				return
 			}
@@ -130,8 +132,9 @@ func TestTraeCNResumeSafeFailureWaitsForCleanup(t *testing.T) {
 	}
 }
 
+// 上游明确失败（含已交付正文）时替换失败记录重新调度；没有终态或未完整生成仍然拒绝替换。
 func TestTraeCNResumeSafeFailureReplacement(t *testing.T) {
-	for _, mode := range []string{"http", "sse", "expired", "published", "unknown", "incomplete"} {
+	for _, mode := range []string{"http", "sse", "expired", "published", "unknown", "incomplete", "delivered"} {
 		t.Run(mode, func(t *testing.T) {
 			var registry traeCNResumeRegistry
 			t.Cleanup(func() { cleanupTraeCNResumeRegistry(t, &registry) })
@@ -150,6 +153,9 @@ func TestTraeCNResumeSafeFailureReplacement(t *testing.T) {
 					writeTraeCNResumeTestEvent(t, writer, `{"type":"response.created","response":{"id":"resp-a"}}`)
 					markTraeCNResumeRetrySafe(request, true)
 				}
+				if mode == "delivered" {
+					writeTraeCNResumeTestEvent(t, writer, `{"type":"response.output_text.delta","item_id":"msg-a","delta":"部分输出"}`)
+				}
 				if mode != "incomplete" {
 					writeTraeCNResumeTestEvent(t, writer, `{"type":"response.failed","response":{"error":{"code":"upstream_error"}}}`)
 				}
@@ -163,7 +169,7 @@ func TestTraeCNResumeSafeFailureReplacement(t *testing.T) {
 				registry.expire(task, reader)
 			}
 			replacement, _, _, created, reason := registry.acquire(identity, 10)
-			if mode == "published" || mode == "unknown" || mode == "incomplete" {
+			if mode == "incomplete" {
 				if created || reason == "" {
 					t.Fatalf("unsafe replacement: created=%t reason=%s", created, reason)
 				}

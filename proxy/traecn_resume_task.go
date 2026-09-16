@@ -23,6 +23,9 @@ const traeCNResumeMaxRequests = 64
 const traeCNResumeInputBudget = 64 << 20
 const traeCNResumeRequestBytes = 16 << 20
 
+// 容量耗尽只说明网关自己的保留表满了，不代表这次请求不能服务。
+const traeCNResumeCapacityExceeded = "resume_capacity_exceeded"
+
 func traeCNResumeEnabled() bool { return strings.TrimSpace(os.Getenv("TRAECN_RESUME_ENABLED")) == "1" }
 
 // 上游游标能力需要单独开启，未验证的接口不能通过重发 POST 猜测续传。
@@ -69,6 +72,8 @@ type traeCNResumeTask struct {
 	responseID        string
 	retrySafe         bool
 	generationStarted bool
+	policyRefused     bool
+	restarts          int
 	header            http.Header
 	status            int
 	changed           chan struct{}
@@ -109,6 +114,7 @@ func (r *traeCNResumeRegistry) acquire(identity traeCNResumeIdentity, inputBytes
 	if r.tasks == nil {
 		r.tasks = make(map[string][]*traeCNResumeTask)
 	}
+	restarts := 0
 	for index, task := range r.tasks[identity.key] {
 		task.mu.Lock()
 		skip, matches := task.match(identity)
@@ -120,7 +126,7 @@ func (r *traeCNResumeRegistry) acquire(identity traeCNResumeIdentity, inputBytes
 			// 原订阅与后台均已收尾，原子替换失败记录，避免并发重试创建多个任务。
 			if inputBytes > traeCNResumeRequestBytes || r.inputBytes+inputBytes > traeCNResumeInputBudget {
 				task.mu.Unlock()
-				return nil, nil, 0, false, "resume_capacity_exceeded"
+				return nil, nil, 0, false, traeCNResumeCapacityExceeded
 			}
 			if task.timer != nil {
 				task.timer.Stop()
@@ -133,7 +139,8 @@ func (r *traeCNResumeRegistry) acquire(identity traeCNResumeIdentity, inputBytes
 			list := r.tasks[identity.key]
 			r.tasks[identity.key] = append(list[:index], list[index+1:]...)
 			r.count--
-			log.Printf("[TRAE-RESUME] task=%s stage=retry reason=pre_generation_failure", task.id)
+			restarts = task.restarts + 1
+			log.Printf("[TRAE-RESUME] task=%s stage=retry reason=pre_generation_failure terminal_event=%q silent_restarts=%d", task.id, task.terminalEvent, restarts)
 			task.mu.Unlock()
 			break
 		}
@@ -156,7 +163,8 @@ func (r *traeCNResumeRegistry) acquire(identity traeCNResumeIdentity, inputBytes
 			}
 		}
 		if reason != "" && !task.canRetryLocked() {
-			log.Printf("[TRAE-RESUME] task=%s stage=reject reason=%q terminal_event=%q terminal_code=%q", task.id, reason, task.terminalEvent, task.terminalCode)
+			// 续传层拒绝接回；调用方随后放弃续传，按普通流程继续服务这次请求。
+			log.Printf("[TRAE-RESUME] task=%s stage=refuse reason=%q terminal_event=%q terminal_code=%q", task.id, reason, task.terminalEvent, task.terminalCode)
 			task.mu.Unlock()
 			return nil, nil, 0, false, reason
 		}
@@ -172,9 +180,9 @@ func (r *traeCNResumeRegistry) acquire(identity traeCNResumeIdentity, inputBytes
 		return task, skip, generation, false, ""
 	}
 	if inputBytes > traeCNResumeRequestBytes || r.inputBytes+inputBytes > traeCNResumeInputBudget || r.count >= traeCNResumeMaxRequests {
-		return nil, nil, 0, false, "resume_capacity_exceeded"
+		return nil, nil, 0, false, traeCNResumeCapacityExceeded
 	}
-	task := &traeCNResumeTask{id: uuid.NewString(), identity: identity, completed: make(map[string]string), changed: make(chan struct{}), ttl: traeCNResumeTTL(), reader: 1, attached: true}
+	task := &traeCNResumeTask{id: uuid.NewString(), identity: identity, completed: make(map[string]string), changed: make(chan struct{}), ttl: traeCNResumeTTL(), reader: 1, attached: true, restarts: restarts}
 	r.tasks[identity.key] = append(r.tasks[identity.key], task)
 	r.count++
 	r.inputBytes += inputBytes
@@ -253,13 +261,22 @@ func (h *Handler) serveTraeCNResumableResponses(c *gin.Context, validated respon
 	}
 	task, skip, reader, created, reason := h.traeCNResumeTasks.acquire(identity, len(validated.body))
 	if reason != "" {
-		message := "TRAE 原任务无法安全续接：" + reason
-		if reason == "resume_task_failed" || reason == "resume_task_incomplete" {
-			message = "TRAE 原任务已失败或未完整生成并结束，无法继续接收。请重新发起一轮请求。"
-		}
-		c.JSON(http.StatusConflict, gin.H{"error": gin.H{"type": "invalid_request_error", "code": reason, "message": message}})
-		return true
+		// 续传层只决定"能不能接回上一条生成"，不决定"这一次请求能不能服务"。
+		// 接不回时放弃续传保护、按普通流程照常生成，不把 409 丢给客户端。
+		h.traeCNResumeTasks.mu.Lock()
+		count, inputBytes := h.traeCNResumeTasks.count, h.traeCNResumeTasks.inputBytes
+		h.traeCNResumeTasks.mu.Unlock()
+		c.Header(traeCNResumeStatusHeader, traeCNResumeStatusBypass)
+		log.Printf("[TRAE-RESUME] stage=bypass reason=%s tasks=%d input_bytes=%d gateway_request_id=%q", reason, count, inputBytes, ensurePromptPolicyRequestCorrelationID(c))
+		return false
 	}
+	status := traeCNResumeStatusFresh
+	if created && traeCNResumeTaskRestarts(task) > 0 {
+		status = traeCNResumeStatusRestart
+	} else if !created {
+		status = traeCNResumeStatusAttached
+	}
+	c.Header(traeCNResumeStatusHeader, status)
 	if created {
 		worker := c.Copy()
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 20*time.Minute)
