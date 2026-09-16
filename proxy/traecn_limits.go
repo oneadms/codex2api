@@ -100,6 +100,26 @@ func normalizeTraeCNLimitHTTPResponse(resp *http.Response) {
 	}
 }
 
+// traeCNErrorBodyPrefix 读取错误响应体的前缀并原样放回，供日志记录使用。
+// 上层日志对非 JSON 体一律省略（避免打印 HTML 错误页），而 Trae 的 4xx 恰恰是很短的
+// 纯文本（例如 "invalid request"），省略后这类拒绝就彻底无法定位。
+func traeCNErrorBodyPrefix(resp *http.Response) []byte {
+	if resp == nil || resp.Body == nil {
+		return nil
+	}
+	const maxBytes = 128
+	original := resp.Body
+	prefix, err := io.ReadAll(io.LimitReader(original, maxBytes))
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(prefix), original), original}
+	if err != nil {
+		return nil
+	}
+	return prefix
+}
+
 // 账号被明确拒绝时需要退出调度，不能受普通中转默认关闭模型冷却的设置影响。
 // 未给出恢复时间时采用短期冷却；该时长不代表上游额度的实际重置周期。
 func applyTraeCNLimitCooldown(store *auth.Store, account *auth.Account, payload []byte, resp *http.Response) codex429Decision {

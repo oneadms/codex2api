@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"bytes"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -644,5 +646,51 @@ func TestTraeCNRequestResetsAcquireAuditPerAttempt(t *testing.T) {
 	defer resp.Body.Close()
 	if acquire := wsAcquireAuditTotal(ctx); acquire >= 5*time.Second {
 		t.Fatalf("旧 attempt 的取连耗时被累加: %s", acquire)
+	}
+}
+
+// Trae 的 4xx 常常只有十几个字节的纯文本；上层日志对非 JSON 体一律省略，导致这类
+// 拒绝无法定位。断开续传的 409 被降级成真实错误之后，这一点必须先能看见。
+func TestTraeCNUpstreamRejectLogsShortTextBody(t *testing.T) {
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previous) })
+
+	const rejectBody = "invalid request" // 15 字节，正是被省略的那种响应体
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, rejectBody)
+	}))
+	defer server.Close()
+
+	account := &auth.Account{
+		DBID:         time.Now().UnixNano(),
+		UpstreamType: auth.UpstreamTraeCN,
+		AccessToken:  "AT",
+		RefreshToken: "RT",
+		ExpiresAt:    time.Now().Add(time.Hour),
+		TraeCNHost:   server.URL,
+	}
+	inbound := []byte(`{"model":"DeepSeek-V4-Pro","input":"hi","stream":true}`)
+	resp, err := ExecuteTraeCNRequest(t.Context(), account, GrokProtocolResponses, inbound, inbound, "", http.Header{})
+	if err != nil {
+		t.Fatalf("ExecuteTraeCNRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	// 日志读取的是响应体前缀，必须原样放回给上层。
+	payload, err := io.ReadAll(resp.Body)
+	if err != nil || string(payload) != rejectBody {
+		t.Fatalf("响应体被日志读取吃掉: %q err=%v", payload, err)
+	}
+	out := logs.String()
+	for _, want := range []string{`stage=upstream_reject`, `status=400`, `body="invalid request"`, `model="DeepSeek-V4-Pro"`, `wire_bytes=`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("拒绝日志缺少 %q:\n%s", want, out)
+		}
 	}
 }

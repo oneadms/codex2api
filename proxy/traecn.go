@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/security"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
@@ -1930,6 +1931,18 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		normalizeTraeCNLimitHTTPResponse(resp)
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			// 上层日志按通用策略省略非 JSON 错误体，Trae 的 4xx 却常常只有十几个
+			// 字节的纯文本。这里补上"上游说了什么"和"我们发了什么"，否则模型不在
+			// 目录、请求体过大、item 形态被拒这三种 400 在日志里完全无法区分。
+			preview := ""
+			if prefix := traeCNErrorBodyPrefix(resp); len(prefix) > 0 && len(prefix) <= 128 && !json.Valid(prefix) {
+				preview = security.SanitizeLog(strings.Join(strings.Fields(string(prefix)), " "))
+			}
+			log.Printf("[TRAECN] stage=upstream_reject status=%d via_resin=%t model=%q config_name=%q wire_bytes=%d messages=%d tools=%d body=%q request_id=%q",
+				resp.StatusCode, viaResin, gjson.GetBytes(body, "model").String(), gjson.GetBytes(body, "config_name").String(),
+				len(body), len(gjson.GetBytes(body, "messages").Array()), len(gjson.GetBytes(body, "tools").Array()), preview, requestID)
+		}
 		return resp, nil
 	}
 	upstreamBody := wrapTraeCNCreditsRemainScanner(wrapTraeCNResumeUpstream(ctx, client, req, resp.Body), account)
