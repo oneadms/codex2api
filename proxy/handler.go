@@ -4165,6 +4165,9 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 			}
 		}
 		if account == nil {
+			if attempt == 0 {
+				markTraeCNResumeRetrySafe(c, true)
+			}
 			if writeSchedulerQueueError(c, selectionErr, continuousRetryProtocolResponses) {
 				return
 			}
@@ -4229,6 +4232,7 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 		if attempt == 0 {
 			emitResponsesPhaseTimings(c, logModel, len(rawBody), handlerStart, bodyReadDone, validateDone, prepareDone)
 		}
+		markTraeCNResumeRetrySafe(c, false)
 		h.AcquireAPIKeyScopeConcurrency(c, account)
 		attemptMaxRateLimitRetries := h.effectiveMaxRateLimitRetries(account, maxRateLimitRetries)
 		start := time.Now()
@@ -4465,6 +4469,16 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 						log.Printf("Trae CN token refresh failed after upstream 401 (account=%d): %v", account.ID(), refreshErr)
 					}
 				}
+				attemptMaxRetries := maxRetries
+				if isTraeCNResumeWorker(c) && account.IsTraeCNAPI() {
+					if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusTooManyRequests {
+						markTraeCNResumeRetrySafe(c, true)
+					}
+					if resp.StatusCode == http.StatusUnauthorized {
+						// 明确的鉴权拒绝未开始生成，允许按普通重试预算换号。
+						attemptMaxRetries = h.getMaxRetries()
+					}
+				}
 
 				if !invalidEncryptedContentRetried && isInvalidEncryptedContentError(resp.StatusCode, errBody) && len(grokCompactionDigestsForAccount(upstreamCtx, account)) == 0 {
 					strippedRawBody, rawChanged := stripInvalidEncryptedContentFromResponsesBody(rawBody)
@@ -4491,7 +4505,7 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 				}
 				h.store.Release(account)
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
-				retryExclusions.MarkHTTPFailure(account.ID(), resp.StatusCode, errBody, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
+				retryExclusions.MarkHTTPFailure(account.ID(), resp.StatusCode, errBody, attemptMaxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
 
 				log.Printf("OpenAI Responses 上游返回错误 (attempt %d, status %d): %s", attempt+1, resp.StatusCode, upstreamErrorConsoleBody(errBody))
 				logUpstreamError("/v1/responses", resp.StatusCode, logModel, account.ID(), errBody)
@@ -4500,7 +4514,7 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 					AccountID: account.ID(), AttemptIndex: attempt + 1,
 				}))
 				decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, attemptEffectiveModel)
-				shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
+				shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, attemptMaxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
 				usageTiers := resolveUsageServiceTiers("", serviceTier)
 				h.logUsageForRequest(c, &database.UsageLogInput{
 					AccountID:              account.ID(),
@@ -4530,7 +4544,7 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 					lastStatusCode = resp.StatusCode
 					lastBody = errBody
 					lastRetryAfter = retryAfter
-					retryOrdinal, retryLimit := retryStateForHTTPStatusWithBody(resp.StatusCode, errBody, generalRetries, rateLimitRetries, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
+					retryOrdinal, retryLimit := retryStateForHTTPStatusWithBody(resp.StatusCode, errBody, generalRetries, rateLimitRetries, attemptMaxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
 					if !h.waitBeforeRetryWithBudget(c.Request.Context(), retryOrdinal, retryLimit, resp) {
 						return
 					}
@@ -4918,6 +4932,9 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 				wsHTTPFallback.LogHTTPAttemptCompletion("/v1/responses", account.ID(), attempt+1, totalDuration, firstTokenMs, outcome.logStatusCode)
 			}
 			downstreamWrote := streamAttempt.downstreamWrote(wroteAnyBody)
+			if account.IsTraeCNAPI() && !downstreamWrote && outcome.logStatusCode == http.StatusTooManyRequests {
+				markTraeCNResumeRetrySafe(c, true)
+			}
 			if shouldTransparentRetryStreamWithBudgets(outcome, &generalRetries, &rateLimitRetries, maxRetries, attemptMaxRateLimitRetries, downstreamWrote, c.Request.Context().Err(), writeErr, continuousRetryPolicy) {
 				rememberContinuousRetryStreamFailure(c.Request.Context(), outcome, terminalFailurePayload)
 				_ = streamAttempt.Close()

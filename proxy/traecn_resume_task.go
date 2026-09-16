@@ -56,26 +56,28 @@ type traeCNResumeRegistry struct {
 }
 
 type traeCNResumeTask struct {
-	mu            sync.Mutex
-	id            string
-	identity      traeCNResumeIdentity
-	log           traeCNResumeLog
-	completed     map[string]string
-	toolSubmitted bool
-	done, expired bool
-	failure       string
-	terminalEvent string
-	terminalCode  string
-	responseID    string
-	header        http.Header
-	status        int
-	changed       chan struct{}
-	cancel        context.CancelFunc
-	reader        uint64
-	attached      bool
-	timer         *time.Timer
-	retireTimer   *time.Timer
-	ttl           time.Duration
+	mu                sync.Mutex
+	id                string
+	identity          traeCNResumeIdentity
+	log               traeCNResumeLog
+	completed         map[string]string
+	toolSubmitted     bool
+	done, expired     bool
+	failure           string
+	terminalEvent     string
+	terminalCode      string
+	responseID        string
+	retrySafe         bool
+	generationStarted bool
+	header            http.Header
+	status            int
+	changed           chan struct{}
+	cancel            context.CancelFunc
+	reader            uint64
+	attached          bool
+	timer             *time.Timer
+	retireTimer       *time.Timer
+	ttl               time.Duration
 }
 
 func (t *traeCNResumeTask) notifyLocked() { close(t.changed); t.changed = make(chan struct{}) }
@@ -107,12 +109,33 @@ func (r *traeCNResumeRegistry) acquire(identity traeCNResumeIdentity, inputBytes
 	if r.tasks == nil {
 		r.tasks = make(map[string][]*traeCNResumeTask)
 	}
-	for _, task := range r.tasks[identity.key] {
+	for index, task := range r.tasks[identity.key] {
 		task.mu.Lock()
 		skip, matches := task.match(identity)
 		if !matches {
 			task.mu.Unlock()
 			continue
+		}
+		if task.canRetryLocked() && task.done && !task.attached {
+			// 原订阅与后台均已收尾，原子替换失败记录，避免并发重试创建多个任务。
+			if inputBytes > traeCNResumeRequestBytes || r.inputBytes+inputBytes > traeCNResumeInputBudget {
+				task.mu.Unlock()
+				return nil, nil, 0, false, "resume_capacity_exceeded"
+			}
+			if task.timer != nil {
+				task.timer.Stop()
+			}
+			if task.retireTimer != nil {
+				task.retireTimer.Stop()
+			}
+			task.expired = true
+			task.log.close()
+			list := r.tasks[identity.key]
+			r.tasks[identity.key] = append(list[:index], list[index+1:]...)
+			r.count--
+			log.Printf("[TRAE-RESUME] task=%s stage=retry reason=pre_generation_failure", task.id)
+			task.mu.Unlock()
+			break
 		}
 		if task.expired {
 			task.mu.Unlock()
@@ -132,7 +155,7 @@ func (r *traeCNResumeRegistry) acquire(identity traeCNResumeIdentity, inputBytes
 				reason = "resume_task_incomplete"
 			}
 		}
-		if reason != "" {
+		if reason != "" && !task.canRetryLocked() {
 			log.Printf("[TRAE-RESUME] task=%s stage=reject reason=%q terminal_event=%q terminal_code=%q", task.id, reason, task.terminalEvent, task.terminalCode)
 			task.mu.Unlock()
 			return nil, nil, 0, false, reason
@@ -245,6 +268,7 @@ func (h *Handler) serveTraeCNResumableResponses(c *gin.Context, validated respon
 		writer := newTraeCNResumeWriter(task)
 		worker.Writer = writer
 		worker.Set(traeCNResumeWorkerKey, true)
+		worker.Set(traeCNResumeTaskKey, task)
 		task.mu.Lock()
 		task.cancel = cancel
 		if task.expired {

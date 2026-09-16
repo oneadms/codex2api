@@ -139,6 +139,11 @@ func (w *traeCNResumeWriter) appendFrameLocked(frame []byte) error {
 	}
 	root := gjson.ParseBytes(data)
 	typeName := root.Get("type").String()
+	if typeName != "response.failed" {
+		// 一旦发布生成事件，后续失败不能再按未生成请求重新派发。
+		w.task.generationStarted = true
+		w.task.retrySafe = false
+	}
 	itemID := strings.Clone(firstNonEmptyString(root.Get("item_id").String(), root.Get("item.id").String()))
 	event["sequence_number"], _ = json.Marshal(w.sequence)
 	w.sequence++
