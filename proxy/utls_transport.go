@@ -382,7 +382,11 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	// 获取主机名（不含端口）用于 TLS ServerName
 	hostname := req.URL.Hostname()
 
+	// 取连耗时：连接池命中约等于 0，冷连接含拨号/TLS 握手；同主机并发建连时
+	// getOrCreateConnection 会等在途拨号，这段排队时间也一并计入（issue #413）。
+	acquireStart := time.Now()
 	entry, err := t.getOrCreateConnection(hostname, addr)
+	AddWsAcquireDuration(req.Context(), time.Since(acquireStart))
 	if err != nil {
 		return nil, err
 	}

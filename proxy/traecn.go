@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"sort"
 	"strconv"
@@ -1807,6 +1808,13 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 	if account == nil || !account.IsTraeCNAPI() {
 		return nil, ErrNoAvailableAccount()
 	}
+	// 取连耗时（与 Codex WS 侧同口径）：本 attempt 内把账号变成"可以发请求"的
+	// 花费 = 请求转换 + 懒刷新令牌/代理租约 + 客户端池选择 + 拿到可用连接。
+	// 不含上游生成首内容的时间，因此 first_token_ms - ws_acquire_ms 就是纯粹的
+	// 生成首内容耗时；此前 HTTP 中转路径恒为 0，TRAE 的首字看起来只能和 Codex
+	// 的含取连口径对比。
+	resetWsAcquireAudit(ctx)
+	acquireStart := time.Now()
 	canonical, err := canonicalGrokResponsesBody(inbound, inboundBody, responsesBody)
 	if err != nil {
 		return nil, ErrBadRequest("Trae CN request conversion failed: " + err.Error())
@@ -1897,7 +1905,23 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 	if viaResin {
 		req.Header.Set("X-Resin-Account", ResinAccountID(account))
 	}
+	// 到这里连接参数、凭据和客户端都已就绪：这段是执行器侧的取连成本。
+	AddWsAcquireDuration(ctx, time.Since(acquireStart))
+	// 连接本身的获取（连接池命中约等于 0；冷连接含拨号/TLS/代理 CONNECT）由
+	// net/http 的连接回调单独计时。uTLS 传输不走 net/http 连接池，改由
+	// utlsRoundTripper.RoundTrip 记录，两条路径互斥，不会重复累加。
+	dispatchStart := time.Now()
+	var connectedAt time.Time
+	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) {
+		if connectedAt.IsZero() {
+			connectedAt = time.Now()
+		}
+	}}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 	resp, err := client.Do(req)
+	if !connectedAt.IsZero() {
+		AddWsAcquireDuration(ctx, connectedAt.Sub(dispatchStart))
+	}
 	if err != nil {
 		if !viaResin && shouldRecyclePooledClient(err) {
 			recyclePooledClient(account, proxyURL)

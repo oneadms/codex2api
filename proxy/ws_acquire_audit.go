@@ -9,12 +9,21 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// ws_acquire_ms（issue #413 跟进）：记录一次 attempt 内获取上游 WS 连接花费的
-// 墙钟时间（busy 排队 + 探活 + 握手，含发送失败后的重建）。挂在下游请求 ctx 上，
-// 由 wsrelay 累加、logUsageForRequest 统一回填 usage_logs，使 first_token_ms 中
-// "网关内取连排队"与"上游生成"可分离归因。HTTP/中转路径恒为 0。
-// 与 userAgentAudit 同构：每个 attempt 由 executor 入口清零，最终落库的是
-// 成功（或写了日志行的）那个 attempt 的取值。
+// ws_acquire_ms（issue #413 跟进）：记录一次 attempt 内获取上游连接花费的
+// 墙钟时间，挂在下游请求 ctx 上，由 wsrelay/TRAE CN 累加、logUsageForRequest
+// 统一回填 usage_logs，使 first_token_ms 中「网关内取连排队」与「上游生成」
+// 可分离归因。
+//
+// 两条路径的口径：
+//   - Codex WS：busy 排队 + 探活 + 握手（含发送失败后的重建）。
+//   - TRAE CN 等 HTTP 中转：请求转换、懒刷新令牌/代理租约、客户端池选择，
+//     以及拿到可用连接的耗时（连接池命中约等于 0，冷连接包含拨号/TLS/代理
+//     CONNECT；uTLS 传输由 utlsRoundTripper 单独记录）。
+//
+// 二者都不包含上游生成首内容的时间，因此 first_token_ms - ws_acquire_ms 是
+// 「上游产出首个内容」的口径。其余未接入的 HTTP 路径仍为 0。与 userAgentAudit
+// 同构：每个 attempt 由 executor 入口清零，最终落库的是成功（或写了日志行的）
+// 那个 attempt 的取值。
 type wsAcquireAuditContextKey struct{}
 
 type wsAcquireAudit struct {
@@ -69,6 +78,17 @@ func wsAcquireAuditMs(ctx context.Context) int {
 	audit.mu.Lock()
 	defer audit.mu.Unlock()
 	return int(audit.total.Milliseconds())
+}
+
+// wsAcquireAuditTotal 返回未取整的取连总耗时，供内部判断与测试使用。
+func wsAcquireAuditTotal(ctx context.Context) time.Duration {
+	audit := wsAcquireAuditFromContext(ctx)
+	if audit == nil {
+		return 0
+	}
+	audit.mu.Lock()
+	defer audit.mu.Unlock()
+	return audit.total
 }
 
 func attachWsAcquireAudit(c *gin.Context) {

@@ -575,3 +575,74 @@ func TestTraeCNAPIKeyRoutesNonStreamingChatAndMessages(t *testing.T) {
 		})
 	}
 }
+
+// 取连耗时：TRAE 也必须记录"把账号变成可发请求"的花费，且不能把上游等首包的时间
+// 算进去，否则 TRAE 的首字永远比 Codex 的含取连口径更难对比（issue #413 跟进）。
+func TestTraeCNRequestRecordsAcquireWithoutUpstreamWait(t *testing.T) {
+	const upstreamDelay = 300 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(upstreamDelay)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: output\ndata: {\"type\":\"text\",\"content\":\"hello\"}\n\nevent: done\ndata: {\"finish_reason\":\"stop\"}\n\n")
+	}))
+	defer server.Close()
+
+	account := &auth.Account{
+		DBID:         time.Now().UnixNano(),
+		UpstreamType: auth.UpstreamTraeCN,
+		AccessToken:  "AT",
+		RefreshToken: "RT",
+		ExpiresAt:    time.Now().Add(time.Hour),
+		TraeCNHost:   server.URL,
+	}
+	ctx := withWsAcquireAudit(t.Context())
+	inbound := []byte(`{"model":"DeepSeek-V4-Pro","input":"hi","stream":true}`)
+	started := time.Now()
+	resp, err := ExecuteTraeCNRequest(ctx, account, GrokProtocolResponses, inbound, inbound, "", http.Header{})
+	if err != nil {
+		t.Fatalf("ExecuteTraeCNRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+	if elapsed := time.Since(started); elapsed < upstreamDelay {
+		t.Fatalf("上游延迟未生效: %s", elapsed)
+	}
+	acquire := wsAcquireAuditTotal(ctx)
+	if acquire <= 0 {
+		t.Fatal("TRAE 取连耗时未记录")
+	}
+	if acquire >= upstreamDelay/2 {
+		t.Fatalf("取连耗时把上游等待算进去了: %s", acquire)
+	}
+	if got := wsAcquireAuditMs(ctx); got != int(acquire.Milliseconds()) {
+		t.Fatalf("ws_acquire_ms=%d 与取连总耗时 %s 不一致", got, acquire)
+	}
+}
+
+// 每次 attempt 重新计时，避免前一次 attempt 的取连耗时累加到落库值上。
+func TestTraeCNRequestResetsAcquireAuditPerAttempt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: output\ndata: {\"type\":\"text\",\"content\":\"hello\"}\n\nevent: done\ndata: {\"finish_reason\":\"stop\"}\n\n")
+	}))
+	defer server.Close()
+
+	account := &auth.Account{
+		DBID:         time.Now().UnixNano(),
+		UpstreamType: auth.UpstreamTraeCN,
+		AccessToken:  "AT",
+		RefreshToken: "RT",
+		ExpiresAt:    time.Now().Add(time.Hour),
+		TraeCNHost:   server.URL,
+	}
+	ctx := withWsAcquireAudit(t.Context())
+	AddWsAcquireDuration(ctx, 5*time.Second)
+	inbound := []byte(`{"model":"DeepSeek-V4-Pro","input":"hi","stream":true}`)
+	resp, err := ExecuteTraeCNRequest(ctx, account, GrokProtocolResponses, inbound, inbound, "", http.Header{})
+	if err != nil {
+		t.Fatalf("ExecuteTraeCNRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+	if acquire := wsAcquireAuditTotal(ctx); acquire >= 5*time.Second {
+		t.Fatalf("旧 attempt 的取连耗时被累加: %s", acquire)
+	}
+}
