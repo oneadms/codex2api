@@ -1409,6 +1409,15 @@ func (s *traeCNCanonicalState) terminalOutput(writer io.Writer, status string) (
 				doneEvent = "response.custom_tool_call_input.done"
 				// 降级后的 function 参数是 {"input": "..."}；客户端要的是原始文本。
 				arguments = traeCNCustomToolInput(arguments)
+			}
+			// 校验放在任何事件写出之前：空载荷必须以整轮失败结束，不能先把半截
+			// 调用发给客户端再去失败。
+			if status == "completed" {
+				if err := s.emptyToolPayloadError(tool, arguments); err != nil {
+					return nil, err
+				}
+			}
+			if tool.custom {
 				// added 事件在终态补齐（降级工具的载荷要完整后才能脱壳）。
 				if err := writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent("response.output_item.added", map[string]any{
 					"response_id": s.responseID, "output_index": tool.outputIndex,
@@ -1495,6 +1504,93 @@ func (s *traeCNCanonicalState) emitCompleted(writer io.Writer, finishReason stri
 	s.logTerminal(eventType, incompleteReason)
 	s.terminal = true
 	return writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent(eventType, map[string]any{"response": response}))
+}
+
+// emptyToolPayloadError 判定一次已完成的工具调用有没有"真的带内容"。
+//
+// 模型没把参数填出来时（特别是被降级成单个 input 字符串的自由文本工具，以及必填
+// 参数被留空的普通 function 工具），网关原样交付会让客户端拿着空参数去执行：
+// 多智能体模式下就表现为"子智能体被拉起来了但收到空任务"，客户端还会继续重试，
+// 用户看到的是模型"不会用多智能体"。这类调用既不可用也不可修，按 malformed_tool_call
+// 结束本轮，让客户端重试整轮（重试时可能会补上参数）。
+//
+// 只判"内容确实为空"的两类，不判"少传了字段"：required 字段缺失的处理留给客户端，
+// 避免对宽松 schema 的工具误报（例如客户端允许用默认值补全的字段）。
+func (s *traeCNCanonicalState) emptyToolPayloadError(tool *traeCNToolCall, arguments string) error {
+	if tool == nil {
+		return nil
+	}
+	if tool.custom || tool.bridge == traeCNBridgeCustomTool {
+		switch strings.TrimSpace(arguments) {
+		case "", "{}", "null":
+			return fmt.Errorf("Trae CN returned an empty payload for freeform tool %q", tool.name)
+		}
+		return nil
+	}
+	contract := s.contracts[tool.name]
+	if len(contract.Required) == 0 {
+		return nil
+	}
+	var payload map[string]json.RawMessage
+	if json.Unmarshal([]byte(strings.TrimSpace(arguments)), &payload) != nil {
+		return nil // 非对象形状交给既有校验与客户端处理。
+	}
+	// 必填字段在、但值是空串：典型是"把 target 填了、message 留空"，客户端会拿着
+	// 空参数去执行（多智能体模式下就是空任务）。
+	for _, field := range contract.Required {
+		raw, ok := payload[field]
+		if !ok {
+			continue
+		}
+		var text string
+		if json.Unmarshal(raw, &text) == nil && strings.TrimSpace(text) == "" {
+			return fmt.Errorf("Trae CN left required field %q of tool %q empty", field, tool.name)
+		}
+	}
+	// 字段全空（含完全没有字段）＝这次调用什么都没带。只判"整体为空"：参数被多包
+	// 一层但内容还在的情况保持原样透传，让客户端报它自己的字段错误。
+	for _, raw := range payload {
+		if rawMessageHasContent(raw) {
+			return nil
+		}
+	}
+	return fmt.Errorf("Trae CN returned a call for tool %q without any payload", tool.name)
+}
+
+// rawMessageHasContent 判断一个 JSON 字段值是否携带实际内容（空串、null、空对象、
+// 空数组，以及递归下去全为空的容器，都视为没有内容）。
+func rawMessageHasContent(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return false
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return strings.TrimSpace(text) != ""
+	}
+	switch trimmed {
+	case "null", "{}", "[]":
+		return false
+	}
+	var nested map[string]json.RawMessage
+	if json.Unmarshal(raw, &nested) == nil {
+		for _, inner := range nested {
+			if rawMessageHasContent(inner) {
+				return true
+			}
+		}
+		return false
+	}
+	var list []json.RawMessage
+	if json.Unmarshal(raw, &list) == nil {
+		for _, inner := range list {
+			if rawMessageHasContent(inner) {
+				return true
+			}
+		}
+		return false
+	}
+	return true
 }
 
 func (s *traeCNCanonicalState) emitFailure(writer io.Writer, code, message string, providerErrors ...gjson.Result) error {
