@@ -116,6 +116,35 @@ test("Trae CN account row shows the per-account device code", () => {
   assert.match(source, /function shortDeviceCode/);
 });
 
+test("Trae CN list surfaces live dispatch concurrency like the Codex pool", () => {
+  // 并发徽章：有在途请求时显示 调度中 并发数（与 Codex AccountConcurrencyBadge 同款式）。
+  assert.match(source, /function TraeCNConcurrencyBadge/);
+  assert.match(source, /account\.active_requests/);
+  assert.match(source, /account\.occupied_requests/);
+  // 实时并发走独立的轻量轮询接口，不重建整页快照。
+  assert.match(source, /useAccountLiveState/);
+  assert.match(source, /mergeAccountLiveState/);
+  // 会话槽缓冲开启时显示 真实在途/占用槽位，与 Codex 一致。
+  assert.match(source, /accounts\.occupiedRequestsTooltip/);
+  assert.match(source, /accounts\.activeRequestsTooltip/);
+  // 被调度中的账号带「调度中」文字标签 + 并发数。
+  assert.match(source, /traecn\.schedulingBadge/);
+});
+
+test("Trae CN stat strip and filters expose scheduling, normal and rate-limited buckets", () => {
+  // 与 Codex/Claude 相同的状态聚合：正常 / 调度中 / 限流。
+  assert.match(source, /traecn\.statNormal/);
+  assert.match(source, /traecn\.statScheduling/);
+  assert.match(source, /traecn\.statRateLimited/);
+  assert.match(source, /traecn\.filterScheduling/);
+  assert.match(source, /traecn\.filterRateLimited/);
+  assert.match(source, /traecn\.filterNormal/);
+  // 统计卡可点击切换到对应筛选，调度卡还带当前页处理中明细。
+  assert.match(source, /traecn\.statDispatching/);
+  assert.match(source, /setStatus\(status === "scheduling" \? "all" : "scheduling"\)/);
+  assert.match(source, /setStatus\(status === "rate_limited" \? "all" : "rate_limited"\)/);
+});
+
 test("Trae CN OAuth panel leads with the paste-back flow", () => {
   // Trae 只接受 http://127.0.0.1:<port>/authorize，远端部署时回调不可达，
   // 所以粘贴回调链接是主路径，必须排在回调地址说明前面。

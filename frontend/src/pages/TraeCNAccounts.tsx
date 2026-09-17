@@ -32,6 +32,7 @@ import {
 import { api, getAdminKey } from "../api";
 import type {
   AccountGroup,
+  AccountLiveStateResponse,
   AccountOperationSelector,
   AccountRow,
   AddTraeCNAccountsResponse,
@@ -54,6 +55,7 @@ import OperationProgressToast from "../components/OperationProgressToast";
 import OperationResultsModal from "../components/OperationResultsModal";
 import { useTraeCNCredits } from "../hooks/useTraeCNCredits";
 import { useOperationProgress } from "../hooks/useOperationProgress";
+import { mergeAccountLiveState, useAccountLiveState } from "../hooks/useAccountLiveState";
 import AccountGroupMultiSelect from "../components/AccountGroupMultiSelect";
 import ModelLogo from "../components/ModelLogo";
 import Modal from "../components/Modal";
@@ -141,7 +143,37 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-type StatusFilter = "all" | "active" | "disabled" | "error";
+// 状态徽章旁的调度中标签：正在处理请求（active/occupied > 0）时出现，
+// 与 Codex 账号页的 AccountConcurrencyBadge 同款式——蓝色脉冲点 + 调度中 + 并发数，
+// 开启会话槽缓冲时显示 真实在途/占用槽位。
+function TraeCNConcurrencyBadge({ account }: { account: AccountRow }) {
+  const { t } = useTranslation();
+  const active = Math.max(0, account.active_requests ?? 0);
+  const occupied = Math.max(active, account.occupied_requests ?? active);
+  if (occupied === 0) return null;
+  const buffered = occupied - active;
+  const showOccupied = account.session_slot_buffer_enabled === true;
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-blue-600 ring-1 ring-inset ring-blue-500/20 dark:bg-blue-950 dark:text-blue-400 dark:ring-blue-400/20"
+      title={showOccupied
+        ? `${t("traecn.schedulingBadge")} · ${t("accounts.occupiedRequestsTooltip", { active, occupied, buffered })}`
+        : `${t("traecn.schedulingBadge")} · ${t("accounts.activeRequestsTooltip", { count: active })}`}
+    >
+      <span className="size-1.5 animate-pulse rounded-full bg-blue-500 dark:bg-blue-400" aria-hidden />
+      {t("traecn.schedulingBadge")}
+      <span className="font-semibold">{showOccupied ? `${active}/${occupied}` : active}</span>
+    </span>
+  );
+}
+
+// 状态筛选与 Codex/Claude 对齐：normal=正常可调度（scheduling 同义），
+// rate_limited=限流（TraeCN 的积分耗尽/429 冷却都会落到这里），
+// disabled/error 保持原语义。旧值 active 仍接受，等价于 scheduling。
+type StatusFilter = "all" | "normal" | "scheduling" | "rate_limited" | "disabled" | "error";
+const TRAECN_STATUS_FILTER_ALIASES: Record<string, Exclude<StatusFilter, "all">> = {
+  active: "scheduling",
+};
 type SortKey = "importTime" | "updatedAt";
 const SORT_FIELD: Record<SortKey, "created_at" | "updated_at"> = {
   importTime: "created_at",
@@ -713,7 +745,13 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [total, setTotal] = useState(0);
-  const [summary, setSummary] = useState<{ active: number; disabled: number; error: number } | null>(null);
+  const [summary, setSummary] = useState<{
+    normal: number;
+    active: number;
+    rateLimited: number;
+    disabled: number;
+    error: number;
+  } | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = usePersistedPageSize("traecn-accounts", 20, DEFAULT_PAGE_SIZE_OPTIONS);
   const [search, setSearch] = useState("");
@@ -783,7 +821,9 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
       setAccounts((response.accounts ?? []).filter((account) => account.traecn_api !== false));
       setTotal(response.total ?? 0);
       setSummary({
+        normal: response.summary?.normal ?? 0,
         active: response.summary?.active ?? 0,
+        rateLimited: response.summary?.rate_limited ?? 0,
         disabled: response.summary?.disabled ?? 0,
         error: response.summary?.error ?? 0,
       });
@@ -798,6 +838,15 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
       if (requestAbortRef.current === controller) setLoading(false);
     }
   }, [debouncedSearch, page, pageSize, showToast, sortDir, sortKey, status]);
+
+  // 当前页的实时在途并发是易变状态，单独轻量轮询（/accounts/live 只读内存原子计数），
+  // 与 Codex/Grok/Claude 账号页一致：并发徽章和调度中标签每秒刷新，
+  // 不触发整页账号快照重建。
+  const visibleAccountIDs = useMemo(() => accounts.map((account) => account.id), [accounts]);
+  const applyAccountLiveState = useCallback((response: AccountLiveStateResponse) => {
+    setAccounts((current) => mergeAccountLiveState(current, response));
+  }, []);
+  useAccountLiveState(visibleAccountIDs, applyAccountLiveState);
 
   useEffect(() => { void reloadGroups(); }, [reloadGroups]);
   useEffect(() => { void reload(); }, [reload]);
@@ -1237,9 +1286,13 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const currentPage = Math.min(page, totalPages);
-  const activeCount = summary?.active ?? accounts.filter((account) => account.enabled !== false && account.status !== "error").length;
+  const normalCount = summary?.normal ?? accounts.filter((account) => account.enabled !== false && account.status !== "error").length;
+  const schedulingCount = summary?.active ?? accounts.filter((account) => account.enabled !== false && account.status !== "error").length;
+  const rateLimitedCount = summary?.rateLimited ?? 0;
   const disabledCount = summary?.disabled ?? accounts.filter((account) => account.enabled === false).length;
   const errorCount = summary?.error ?? accounts.filter((account) => account.status === "error").length;
+  // 当前页正在处理请求的账号数（用于统计卡 details 与调度视图提示）。
+  const dispatchingCount = accounts.filter((account) => (account.active_requests ?? 0) > 0).length;
 
   const currentTraeCNSelector = useMemo<AccountOperationSelector>(() => ({
     channel: "traecn",
@@ -1370,9 +1423,26 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
         }
       />
 
-      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 xl:grid-cols-6">
         <CompactStat label={t("traecn.statTotal")} value={total} tone="neutral" />
-        <CompactStat label={t("traecn.statActive")} value={activeCount} tone="success" active={status === "active"} onClick={() => setStatus(status === "active" ? "all" : "active")} />
+        <CompactStat label={t("traecn.statNormal")} value={normalCount} tone="success" active={status === "normal"} onClick={() => setStatus(status === "normal" ? "all" : "normal")} />
+        <CompactStat
+          label={t("traecn.statScheduling")}
+          chipLabel={t("traecn.filterScheduling")}
+          value={schedulingCount}
+          tone="warning"
+          active={status === "scheduling"}
+          details={[{ label: t("traecn.statDispatching"), value: dispatchingCount }]}
+          onClick={() => setStatus(status === "scheduling" ? "all" : "scheduling")}
+        />
+        <CompactStat
+          label={t("traecn.statRateLimited")}
+          chipLabel={t("traecn.filterRateLimited")}
+          value={rateLimitedCount}
+          tone="warning"
+          active={status === "rate_limited"}
+          onClick={() => setStatus(status === "rate_limited" ? "all" : "rate_limited")}
+        />
         <CompactStat label={t("traecn.statDisabled")} value={disabledCount} tone="warning" active={status === "disabled"} onClick={() => setStatus(status === "disabled" ? "all" : "disabled")} />
         <CompactStat label={t("traecn.statError")} value={errorCount} tone="danger" active={status === "error"} onClick={() => setStatus(status === "error" ? "all" : "error")} />
       </div>
@@ -1382,9 +1452,11 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
           <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input className="pl-9" value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t("traecn.searchPlaceholder")} />
         </div>
-        <Select value={status} onValueChange={(value) => setStatus(value as StatusFilter)} options={[
+        <Select value={status} onValueChange={(value) => setStatus(TRAECN_STATUS_FILTER_ALIASES[value] ?? (value as StatusFilter))} options={[
           { value: "all", label: t("traecn.filterAll") },
-          { value: "active", label: t("traecn.filterActive") },
+          { value: "normal", label: t("traecn.filterNormal") },
+          { value: "scheduling", label: t("traecn.filterScheduling") },
+          { value: "rate_limited", label: t("traecn.filterRateLimited") },
           { value: "disabled", label: t("traecn.filterDisabled") },
           { value: "error", label: t("traecn.filterError") },
         ]} className="sm:w-36" compact />
@@ -1508,6 +1580,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
                     <TableCell>
                       <div className="flex items-center gap-1.5">
                         <StatusBadge status={account.status} />
+                        <TraeCNConcurrencyBadge account={account} />
                         {(() => {
                           const badgeKey = traeCNCreditsBadgeKey(creditStates[account.id]?.data
                             ? traeCNCreditsAvailability(account.traecn_credits_pool, creditStates[account.id]?.data?.pools)
@@ -1561,7 +1634,10 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
                       {t("traecn.deviceCode", { code: shortDeviceCode(account.traecn_device_id || account.traecn_machine_id) })}
                     </button>
                   </div>
-                  <StatusBadge status={account.status} />
+                  <div className="flex shrink-0 flex-col items-end gap-1">
+                    <StatusBadge status={account.status} />
+                    <TraeCNConcurrencyBadge account={account} />
+                  </div>
                 </div>
                 <div className="mt-3 space-y-3 border-t border-border pt-3">
                   <TraeCNModelsCell account={account} catalog={models} onOpen={() => setModelsAccount(account)} />

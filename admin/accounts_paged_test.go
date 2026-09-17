@@ -1253,3 +1253,39 @@ func TestClaudeAccountListSuccessfulProbeCountsAsSampledWithoutQuotaHeaders(t *t
 		t.Fatalf("Claude successful probe should be sampled: item=%+v", item)
 	}
 }
+
+// TraeCN 渠道与 Codex 共用同一套状态聚合：scheduling / rate_limited 筛选与
+// 统计卡字段必须对 Trae CN 号池同样成立（积分耗尽的账号按限流归类）。
+func TestTraeCNAccountListStatusBuckets(t *testing.T) {
+	healthy := &accountListSnapshotItem{Status: "active", Enabled: true, TraeCN: true}
+	limited := &accountListSnapshotItem{Status: "rate_limited", Enabled: true, TraeCN: true, CooldownReason: "rate_limited"}
+	exhausted := &accountListSnapshotItem{Status: "usage_limited", Enabled: true, TraeCN: true, CooldownReason: "usage_limit"}
+	broken := &accountListSnapshotItem{Status: "error", Enabled: true, TraeCN: true}
+	channel := database.UpstreamChannelTraeCN
+
+	if !accountListStatusMatches(healthy, "scheduling", channel) || !accountListStatusMatches(healthy, "normal", channel) {
+		t.Fatal("healthy Trae CN account should match scheduling and normal")
+	}
+	for _, item := range []*accountListSnapshotItem{limited, exhausted} {
+		if accountListStatusMatches(item, "scheduling", channel) {
+			t.Fatalf("limited Trae CN account (%s) must be excluded from scheduling", item.Status)
+		}
+		if !accountListStatusMatches(item, "rate_limited", channel) {
+			t.Fatalf("limited Trae CN account (%s) should match rate_limited filter", item.Status)
+		}
+		if !accountListRateLimited(item) {
+			t.Fatalf("limited Trae CN account (%s) must count as rate limited", item.Status)
+		}
+	}
+	if accountListStatusMatches(broken, "scheduling", channel) || !accountListStatusMatches(broken, "error", channel) {
+		t.Fatal("error Trae CN account must not match scheduling but should match error")
+	}
+
+	summary, _ := summarizeAccountList([]*accountListSnapshotItem{healthy, limited, exhausted, broken}, channel)
+	if summary.Total != 4 || summary.Active != 1 || summary.RateLimited != 2 || summary.Error != 1 || summary.Normal != 1 {
+		t.Fatalf("summary = %+v, want Total=4 Active=1 RateLimited=2 Error=1 Normal=1", summary)
+	}
+	if summary.OAuth != 4 {
+		t.Fatalf("Trae CN accounts count as OAuth credentials, got oauth=%d", summary.OAuth)
+	}
+}
