@@ -1177,6 +1177,12 @@ func (s *traeCNCanonicalState) mergeToolCall(writer io.Writer, raw gjson.Result,
 		s.toolByKey[indexKey] = tool
 		s.tools = append(s.tools, tool)
 		s.output = append(s.output, traeCNOutputRef{kind: traeCNOutputTool, tool: tool})
+		if debugAgentLogEnabled() {
+			debugAgentLog("traecn.go:mergeToolCall", "tool call detected", "C", "pre-fix", map[string]any{
+				"tool_name": name, "tool_id": id, "position": position, "response_id": s.responseID,
+				"finish_reason": s.finishReason, "output_chars": len([]rune(s.text.String())),
+			})
+		}
 	} else {
 		// 名称、ID 和参数可能分批到达；发出输出项后保持下游调用标识稳定。
 		s.toolByKey[indexKey] = tool
@@ -1475,6 +1481,14 @@ func (s *traeCNCanonicalState) emitCompleted(writer io.Writer, finishReason stri
 		finishReason = traeCNFirstNonEmpty(s.finishReason, "stop")
 	}
 	s.finishReason = finishReason
+	// 未开启诊断时不构造正文片段，避免普通请求承担额外的字符串处理开销。
+	if debugAgentLogEnabled() {
+		debugAgentLog("traecn.go:emitCompleted", "terminal attempt", "D", "pre-fix", map[string]any{
+			"finish_reason": finishReason, "tool_calls": len(s.tools), "declared_tools": len(s.contracts),
+			"output_chars": len([]rune(s.text.String())), "reasoning_chars": len([]rune(s.reasoning.String())),
+			"text_tail": debugAgentTextTail(s.text.String(), 120), "response_id": s.responseID, "model": s.model,
+		})
+	}
 	if (finishReason == "tool_calls" || finishReason == "function_call") && len(s.tools) == 0 {
 		return s.emitFailure(writer, "missing_tool_calls", "Trae CN ended with a tool-call finish reason but returned no tool calls")
 	}
@@ -1503,6 +1517,12 @@ func (s *traeCNCanonicalState) emitCompleted(writer io.Writer, finishReason stri
 	}
 	s.logTerminal(eventType, incompleteReason)
 	s.terminal = true
+	if debugAgentLogEnabled() && eventType == "response.completed" && len(s.tools) == 0 {
+		debugAgentLog("traecn.go:emitCompleted", "completed without tools", "D", "pre-fix", map[string]any{
+			"finish_reason": finishReason, "output_chars": len([]rune(s.text.String())),
+			"text_tail": debugAgentTextTail(s.text.String(), 120), "response_id": s.responseID,
+		})
+	}
 	return writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent(eventType, map[string]any{"response": response}))
 }
 
@@ -1596,6 +1616,20 @@ func rawMessageHasContent(raw json.RawMessage) bool {
 func (s *traeCNCanonicalState) emitFailure(writer io.Writer, code, message string, providerErrors ...gjson.Result) error {
 	if s.terminal {
 		return nil
+	}
+	if debugAgentLogEnabled() {
+		hypothesisID := "B"
+		switch code {
+		case ErrorCodeUpstreamStreamBreak:
+			hypothesisID = "A"
+		case "missing_tool_calls":
+			hypothesisID = "C"
+		}
+		debugAgentLog("traecn.go:emitFailure", "terminal failure", hypothesisID, "pre-fix", map[string]any{
+			"code": code, "message": message, "finish_reason": s.finishReason, "tool_calls": len(s.tools),
+			"output_chars": len([]rune(s.text.String())), "reasoning_chars": len([]rune(s.reasoning.String())),
+			"text_tail": debugAgentTextTail(s.text.String(), 120), "response_id": s.responseID, "model": s.model,
+		})
 	}
 	s.terminal = true
 	s.logTerminal("response.failed", code)
@@ -1837,6 +1871,13 @@ func traeCNCanonicalStreamForTools(source io.ReadCloser, model string, bridges t
 					message := "Trae CN upstream stream ended before a done event"
 					if readErr != io.EOF {
 						message = readErr.Error()
+					}
+					if debugAgentLogEnabled() {
+						debugAgentLog("traecn.go:traeCNCanonicalStreamForTools", "upstream stream break", "A", "pre-fix", map[string]any{
+							"read_err": readErr.Error(), "had_text": state.text.Len() > 0, "tool_calls": len(state.tools),
+							"output_chars": len([]rune(state.text.String())), "text_tail": debugAgentTextTail(state.text.String(), 120),
+							"response_id": state.responseID, "model": model,
+						})
 					}
 					_ = state.emitFailure(writer, ErrorCodeUpstreamStreamBreak, message)
 				}

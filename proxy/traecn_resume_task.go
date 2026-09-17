@@ -268,6 +268,12 @@ func (h *Handler) serveTraeCNResumableResponses(c *gin.Context, validated respon
 		h.traeCNResumeTasks.mu.Unlock()
 		c.Header(traeCNResumeStatusHeader, traeCNResumeStatusBypass)
 		log.Printf("[TRAE-RESUME] stage=bypass reason=%s tasks=%d input_bytes=%d gateway_request_id=%q", reason, count, inputBytes, ensurePromptPolicyRequestCorrelationID(c))
+		if debugAgentLogEnabled() {
+			debugAgentLog("traecn_resume_task.go:serveTraeCNResumableResponses", "resume bypass", "E", "pre-fix", map[string]any{
+				"reason": reason, "created": created, "tasks": count, "input_bytes": inputBytes,
+				"gateway_request_id": ensurePromptPolicyRequestCorrelationID(c),
+			})
+		}
 		return false
 	}
 	status := traeCNResumeStatusFresh
