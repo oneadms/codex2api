@@ -176,6 +176,11 @@ type Account struct {
 	// 改写请求体 environment_context 里的时区与日期（见 proxy/codex_environment_context.go）；
 	// 空 = 不绑定、透传下游值。Claude 账号沿用同一凭据键做身份标签。
 	Timezone string
+	// CodexTurnState* 见 codex_turn_state.go：凭据级 X-Codex-Turn-State 强制注入的值、
+	// 模型名单与设置时刻。空值 = 不注入。
+	CodexTurnState       string
+	CodexTurnStateModels string
+	CodexTurnStateSetAt  time.Time
 	// ClaudeFingerprintMode 见 claude_fingerprint_mode.go:Claude Code 出站身份头
 	// 收敛模式(preserve/force;空=跟随全局默认)。
 	ClaudeFingerprintMode string
@@ -4838,11 +4843,17 @@ func (s *Store) resolveProxyForAccountSnapshot(acc *Account) (string, bool) {
 	var accountID int64
 	var accountProxy string
 	var groupIDs []int64
+	// Resin 承担 Codex 出站时,代理池 fail-closed 对 Codex 账号不再成立:出口 IP 由
+	// Resin 提供,池空或绑定的托管代理已禁用都不会让它脏 IP 直连。选出的代理照常返回
+	// (Resin 模式下执行器只拿它做审计),只有 usable 判定放行。中继型账号不经 Resin,
+	// 仍按原规则(issue #679)。
+	resinCarriesEgress := false
 	if acc != nil {
 		acc.mu.RLock()
 		accountID = acc.DBID
 		accountProxy = strings.TrimSpace(acc.ProxyURL)
 		groupIDs = cloneInt64Slice(acc.GroupIDs)
+		resinCarriesEgress = ResinEgressEnabled() && !acc.isRelayStyleLocked()
 		acc.mu.RUnlock()
 	}
 
@@ -4861,7 +4872,7 @@ func (s *Store) resolveProxyForAccountSnapshot(acc *Account) (string, bool) {
 	}
 	if accountProxy != "" {
 		if managedProxyUnavailable(accountProxy) {
-			return "", false
+			return "", resinCarriesEgress
 		}
 		return accountProxy, true
 	}
@@ -4891,7 +4902,7 @@ func (s *Store) resolveProxyForAccountSnapshot(acc *Account) (string, bool) {
 	}
 
 	proxyURL := strings.TrimSpace(s.globalProxy)
-	return proxyURL, proxyURL != "" || !s.proxyPoolEnabled
+	return proxyURL, proxyURL != "" || !s.proxyPoolEnabled || resinCarriesEgress
 }
 
 // resolveGroupProxyForAccount 返回账号按组继承的代理(issue #479):按 GroupIDs
@@ -5532,6 +5543,9 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		CodexPassthroughMode:         codexPassthroughMode,
 		CodexFingerprintMode:         codexFingerprintMode,
 		Timezone:                     accountTimezone,
+		CodexTurnState:               strings.TrimSpace(row.GetCredential(CodexTurnStateCredentialKey)),
+		CodexTurnStateModels:         NormalizeCodexTurnStateModels(row.GetCredential(CodexTurnStateModelsCredentialKey)),
+		CodexTurnStateSetAt:          ParseCodexTurnStateSetAt(row.GetCredential(CodexTurnStateSetAtCredentialKey)),
 		ClaudeFingerprintMode:        claudeFingerprintMode,
 		ClaudeAuthKind:               claudeAuthKind,
 		ClaudeBaseURL:                row.GetCredential(ClaudeBaseURLCredentialKey),
@@ -5988,6 +6002,7 @@ func (s *Store) reconcileDispatchState(ctx context.Context) (bool, error) {
 			allowedAPIKeyIDs := normalizeAllowedAPIKeyIDs(row.GetCredentialInt64Slice("allowed_api_key_ids"))
 			acc.mu.Lock()
 			acc.UpstreamRequestIDHeader = row.GetCredential(UpstreamRequestIDHeaderCredentialKey)
+			acc.setCodexTurnStateFromRowLocked(row)
 			accountMetadataChanged := !int64SliceEqual(normalizeAllowedGroupIDs(acc.GroupIDs), groupIDs) ||
 				!int64SliceEqual(normalizeAllowedAPIKeyIDs(acc.AllowedAPIKeyIDs), allowedAPIKeyIDs)
 			if accountMetadataChanged {

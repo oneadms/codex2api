@@ -140,35 +140,32 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		return nil, fmt.Errorf("构建 WebSocket URL 失败: %w", err)
 	}
 
-	// Resin 反向代理：改写 WS URL 为 Resin 反代地址
+	// Resin 平台按请求固定，直接调用 WS 执行器时也沿用相同的会话选择规则。
 	if viaResin {
 		resinPlatform := proxy.ResinPlatformFromContext(ctx)
 		if resinPlatform == "" {
-			// Direct callers may not have gone through ExecuteRequest.  Reuse the
-			// same header/body/session fallback there, including the rule that a
-			// stateless per-request connection ID is not a routing key.
+			// Direct callers may not have gone through ExecuteRequest. Reuse the
+			// same fallback, excluding stateless per-request connection IDs.
 			resinPlatform = proxy.ResinPlatformForRequest(ctx, sessionID, ginHeaders, requestBody, apiKey)
 		}
 		if resinPlatform != "" && proxy.ResinPlatformFromContext(ctx) == "" {
-			// Carry the decision into the manager's dial context as well. This
-			// keeps a hot Resin update or a retry from accidentally enabling the
-			// account-level proxy for a URL that was already rewritten to Resin.
 			ctx = proxy.WithResinPlatform(ctx, resinPlatform)
 		}
-		wsURL = proxy.BuildWebSocketURLForContext(ctx, wsURL, resinPlatform)
 	}
+	// URL 改写和拨号共用请求快照，热更新不会改变在途请求的出口。
+	egress := proxy.ResolveCodexWebsocketEgressForContext(ctx, account, wsURL, effectiveProxyURL(account, proxyOverride))
+	wsURL = egress.URL
 
 	// 准备请求头
 	headers := e.prepareWebsocketHeaders(accessToken, account, accountIDStr, headerSessionID, apiKey, deviceCfg, ginHeaders, wsBody)
+	// 凭据级 turn state 注入在账号自定义头之后落定（帧体已由 proxy.ExecuteRequest 写入）。
+	proxy.ApplyCodexTurnStateInjectionHeader(ctx, headers)
 	// Record the attempted handshake UA immediately so failed handshakes are
 	// still auditable. A reused connection replaces this below with the UA that
 	// was actually sent when that connection was established.
 	proxy.RecordUpstreamUserAgent(ctx, headers.Get("User-Agent"))
 
-	// Resin 反代：注入账号身份头
-	if viaResin {
-		headers.Set("X-Resin-Account", proxy.ResinAccountID(account))
-	}
+	egress.ApplyHeaders(headers)
 
 	// 获取或创建连接。无显式会话的请求（stateless 连接 ID）在确定性 cache key
 	// 的槽位池内复用连接，避免持续高 RPM 下逐请求握手触发上游限流。
@@ -815,6 +812,8 @@ func websocketResponseToHTTP(ctx context.Context, wsResp *WsResponse, statusCode
 		defer wsResp.Close()
 
 		err := wsResp.ReadStream(func(data []byte) bool {
+			// 上游回带的 turn state 只在帧里（握手头是建连时的旧快照），逐帧观测记进追踪。
+			proxy.ObserveCodexTurnStateFrame(ctx, data)
 			// SSE 的 data: 负载以换行为界，含换行的帧（如 pretty-printed JSON）
 			// 必须先压缩成单行，否则下游解析器只能读到第一行。
 			if bytes.IndexByte(data, '\n') >= 0 {

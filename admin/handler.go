@@ -1817,6 +1817,9 @@ type accountResponse struct {
 	GroupIDs                      []int64                    `json:"group_ids"`
 	Note                          string                     `json:"note"`
 	CodexPassthroughMode          string                     `json:"codex_passthrough_mode,omitempty"`
+	CodexTurnState                string                     `json:"codex_turn_state,omitempty"`
+	CodexTurnStateModels          string                     `json:"codex_turn_state_models,omitempty"`
+	CodexTurnStateSetAt           string                     `json:"codex_turn_state_set_at,omitempty"`
 	CreditsValid                  bool                       `json:"credits_valid"`
 	CreditsSpendControlReached    *bool                      `json:"credits_spend_control_reached,omitempty"`
 	CreditsRateLimitReachedType   string                     `json:"credits_rate_limit_reached_type,omitempty"`
@@ -2206,6 +2209,8 @@ type updateAccountSchedulerReq struct {
 	ClaudeVersionPolicy     json.RawMessage `json:"claude_version_policy"`
 	ClaudeClientVersion     json.RawMessage `json:"claude_client_version"`
 	Timezone                json.RawMessage `json:"timezone"`
+	CodexTurnState          json.RawMessage `json:"codex_turn_state"`
+	CodexTurnStateModels    json.RawMessage `json:"codex_turn_state_models"`
 }
 
 type accountSchedulerUpdate struct {
@@ -2230,6 +2235,8 @@ type accountSchedulerUpdate struct {
 	ClaudeVersionPolicy     database.OptionalString
 	ClaudeClientVersion     database.OptionalString
 	Timezone                database.OptionalString
+	CodexTurnState          database.OptionalString
+	CodexTurnStateModels    database.OptionalString
 	CredentialUpdates       map[string]interface{}
 }
 
@@ -2336,6 +2343,17 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	if err != nil {
 		return accountSchedulerUpdate{}, err
 	}
+	codexTurnStateField, err := parseOptionalStringField(req.CodexTurnState, "codex_turn_state", auth.ValidateCodexTurnState)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	codexTurnStateModelsField, err := parseOptionalStringField(req.CodexTurnStateModels, "codex_turn_state_models", auth.ValidateCodexTurnStateModels)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	if codexTurnStateModelsField.Set {
+		codexTurnStateModelsField.Value = auth.NormalizeCodexTurnStateModels(codexTurnStateModelsField.Value)
+	}
 	if codexFingerprintMode.Set {
 		codexFingerprintMode.Value = auth.NormalizeCodexFingerprintMode(codexFingerprintMode.Value)
 	}
@@ -2367,6 +2385,19 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	}
 	if timezoneField.Set {
 		credentialUpdates[auth.AccountTimezoneCredentialKey] = strings.TrimSpace(timezoneField.Value)
+	}
+	if codexTurnStateField.Set {
+		credentialUpdates[auth.CodexTurnStateCredentialKey] = codexTurnStateField.Value
+		// 时效起点默认随值一起刷新（批量接口拿不到逐账号旧值，只能按"换了新值"处理）；
+		// 单账号接口在值未变且已有起点时保留旧起点，见 refineCodexTurnStateSetAt。
+		setAt := ""
+		if codexTurnStateField.Value != "" {
+			setAt = time.Now().UTC().Format(time.RFC3339)
+		}
+		credentialUpdates[auth.CodexTurnStateSetAtCredentialKey] = setAt
+	}
+	if codexTurnStateModelsField.Set {
+		credentialUpdates[auth.CodexTurnStateModelsCredentialKey] = codexTurnStateModelsField.Value
 	}
 	if autoPause5hThreshold.Set {
 		credentialUpdates["auto_pause_5h_threshold"] = autoPause5hThreshold.Value
@@ -2427,6 +2458,8 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 		ClaudeVersionPolicy:     claudeVersionPolicy,
 		ClaudeClientVersion:     claudeClientVersion,
 		Timezone:                timezoneField,
+		CodexTurnState:          codexTurnStateField,
+		CodexTurnStateModels:    codexTurnStateModelsField,
 		CredentialUpdates:       credentialUpdates,
 	}, nil
 }
@@ -2486,8 +2519,24 @@ func validateCodexFingerprintMode(value string) error {
 	return errors.New("必须是 off、device、session 或 full")
 }
 
+// refineCodexTurnStateSetAt 让时效起点只在注入值真正换掉时重置：原样重提同一个值不
+// 重置（它还是上游那时候签发的那一个 state）；存量行没有起点时补一次，让倒计时能从
+// 这一刻开始走，而不是逼用户先清空再粘贴一遍。
+func refineCodexTurnStateSetAt(row *database.AccountRow, update accountSchedulerUpdate) {
+	if row == nil || !update.CodexTurnState.Set || update.CodexTurnState.Value == "" {
+		return
+	}
+	current := strings.TrimSpace(row.GetCredential(auth.CodexTurnStateCredentialKey))
+	currentSetAt := strings.TrimSpace(row.GetCredential(auth.CodexTurnStateSetAtCredentialKey))
+	if current == update.CodexTurnState.Value && currentSetAt != "" {
+		delete(update.CredentialUpdates, auth.CodexTurnStateSetAtCredentialKey)
+	}
+}
+
 func (u accountSchedulerUpdate) hasChanges() bool {
 	return u.ScoreBiasOverride.Set ||
+		u.CodexTurnState.Set ||
+		u.CodexTurnStateModels.Set ||
 		u.BaseConcurrencyOverride.Set ||
 		u.SkipWarmTier.Set ||
 		u.AllowedAPIKeyIDs.Set ||
@@ -2590,6 +2639,18 @@ func (h *Handler) UpdateAccountScheduler(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
+	if update.CodexTurnState.Set && update.CodexTurnState.Value != "" {
+		row, err := h.db.GetAccountByID(ctx, id)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(c, http.StatusNotFound, "账号不存在")
+				return
+			}
+			writeError(c, http.StatusInternalServerError, "读取账号失败: "+err.Error())
+			return
+		}
+		refineCodexTurnStateSetAt(row, update)
+	}
 	if update.AllowedAPIKeyIDs.Set {
 		missingAPIKeyIDs, err := h.findMissingAPIKeyIDs(ctx, update.AllowedAPIKeyIDs.Values)
 		if err != nil {
@@ -2781,6 +2842,21 @@ func (h *Handler) applyAccountSchedulerRuntimeUpdate(id int64, update accountSch
 	}
 	if value, ok := update.CredentialUpdates[auth.UpstreamRequestIDHeaderCredentialKey].(string); ok {
 		h.store.ApplyAccountUpstreamRequestIDHeader(id, value)
+	}
+	if update.CodexTurnState.Set || update.CodexTurnStateModels.Set {
+		if account := h.store.FindByID(id); account != nil {
+			value, models, setAt := account.CodexTurnStateConfig()
+			if update.CodexTurnState.Set {
+				value = update.CodexTurnState.Value
+			}
+			if update.CodexTurnStateModels.Set {
+				models = update.CodexTurnStateModels.Value
+			}
+			if raw, ok := update.CredentialUpdates[auth.CodexTurnStateSetAtCredentialKey].(string); ok {
+				setAt = auth.ParseCodexTurnStateSetAt(raw)
+			}
+			h.store.ApplyAccountCodexTurnState(id, value, models, setAt)
+		}
 	}
 	if update.CustomHeaders.Set {
 		h.store.ApplyAccountCustomHeaders(id, update.CustomHeaders.Values)
@@ -9347,29 +9423,32 @@ type settingsResponse struct {
 	GrokOAuthClientIDEffective   string `json:"grok_oauth_client_id_effective"`
 	// Antigravity OAuth client 配置视图（嵌入展平）。
 	antigravityOAuthSettingsView
-	MaxRetries                         int                              `json:"max_retries"`
-	MaxRateLimitRetries                int                              `json:"max_rate_limit_retries"`
-	RetryIntervalMS                    int                              `json:"retry_interval_ms"`
-	TransportRetryPolicy               string                           `json:"transport_retry_policy"`
-	ContinuousRetryEnabled             bool                             `json:"continuous_retry_enabled"`
-	ContinuousRetryCatchAll            bool                             `json:"continuous_retry_catch_all"`
-	ContinuousRetryCategories          []string                         `json:"continuous_retry_categories"`
-	ContinuousRetryStatusCodes         []int                            `json:"continuous_retry_status_codes"`
-	ContinuousRetryErrorCodes          []string                         `json:"continuous_retry_error_codes"`
-	ContinuousRetryMaxDurationSeconds  int                              `json:"continuous_retry_max_duration_seconds"`
-	CodexFingerprintDefaultMode        string                           `json:"codex_fingerprint_default_mode"`
-	AllowRemoteMigration               bool                             `json:"allow_remote_migration"`
-	DatabaseDriver                     string                           `json:"database_driver"`
-	DatabaseLabel                      string                           `json:"database_label"`
-	CacheDriver                        string                           `json:"cache_driver"`
-	CacheLabel                         string                           `json:"cache_label"`
-	ExpiredCleaned                     int                              `json:"expired_cleaned,omitempty"`
-	ModelMapping                       string                           `json:"model_mapping"`
-	CodexModelMapping                  string                           `json:"codex_model_mapping"`
-	PayloadRules                       string                           `json:"payload_rules"`
-	ReasoningEffortModels              string                           `json:"reasoning_effort_models"`
-	ResinURL                           string                           `json:"resin_url"`
-	ResinPlatformName                  string                           `json:"resin_platform_name"`
+	MaxRetries                        int      `json:"max_retries"`
+	MaxRateLimitRetries               int      `json:"max_rate_limit_retries"`
+	RetryIntervalMS                   int      `json:"retry_interval_ms"`
+	TransportRetryPolicy              string   `json:"transport_retry_policy"`
+	ContinuousRetryEnabled            bool     `json:"continuous_retry_enabled"`
+	ContinuousRetryCatchAll           bool     `json:"continuous_retry_catch_all"`
+	ContinuousRetryCategories         []string `json:"continuous_retry_categories"`
+	ContinuousRetryStatusCodes        []int    `json:"continuous_retry_status_codes"`
+	ContinuousRetryErrorCodes         []string `json:"continuous_retry_error_codes"`
+	ContinuousRetryMaxDurationSeconds int      `json:"continuous_retry_max_duration_seconds"`
+	CodexFingerprintDefaultMode       string   `json:"codex_fingerprint_default_mode"`
+	AllowRemoteMigration              bool     `json:"allow_remote_migration"`
+	DatabaseDriver                    string   `json:"database_driver"`
+	DatabaseLabel                     string   `json:"database_label"`
+	CacheDriver                       string   `json:"cache_driver"`
+	CacheLabel                        string   `json:"cache_label"`
+	ExpiredCleaned                    int      `json:"expired_cleaned,omitempty"`
+	ModelMapping                      string   `json:"model_mapping"`
+	CodexModelMapping                 string   `json:"codex_model_mapping"`
+	PayloadRules                      string   `json:"payload_rules"`
+	ReasoningEffortModels             string   `json:"reasoning_effort_models"`
+	ResinURL                          string   `json:"resin_url"`
+	ResinPlatformName                 string   `json:"resin_platform_name"`
+	// CodexEgress 是后端权威的"Codex 渠道当前由谁承担出站"摘要:Resin 启用时代理池与
+	// proxy_url 对 Codex 不生效,界面据此标注,避免三套配置并存看不出谁在生效(issue #679)。
+	CodexEgress                        proxy.CodexEgressSummary         `json:"codex_egress"`
 	PromptFilterEnabled                bool                             `json:"prompt_filter_enabled"`
 	PromptFilterMode                   string                           `json:"prompt_filter_mode"`
 	PromptFilterThreshold              int                              `json:"prompt_filter_threshold"`
@@ -10380,6 +10459,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		ReasoningEffortModels:               h.store.GetReasoningEffortModels(),
 		ResinURL:                            resinURL,
 		ResinPlatformName:                   resinPlatformName,
+		CodexEgress:                         proxy.CurrentCodexEgressSummary(),
 		PromptFilterEnabled:                 promptFilterCfg.Enabled,
 		PromptFilterMode:                    promptFilterCfg.Mode,
 		PromptFilterThreshold:               promptFilterCfg.Threshold,
@@ -12264,6 +12344,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		ReasoningEffortModels:               h.store.GetReasoningEffortModels(),
 		ResinURL:                            resinURL,
 		ResinPlatformName:                   resinPlatformName,
+		CodexEgress:                         proxy.CurrentCodexEgressSummary(),
 		PromptFilterEnabled:                 promptFilterCfg.Enabled,
 		PromptFilterMode:                    promptFilterCfg.Mode,
 		PromptFilterThreshold:               promptFilterCfg.Threshold,

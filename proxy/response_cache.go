@@ -235,6 +235,9 @@ func resetResponseCacheStateForTest(config responseCacheConfig) {
 	drainResponseCacheBackendWrites()
 	responseCacheBackendWriter.mu.Lock()
 	responseCacheBackendWriter.draining = false
+	responseCacheBackendWriter.maxActive = responseCacheBackendWriteSlots
+	responseCacheBackendWriter.maxBytes = responseCacheBackendWriteBytes
+	responseCacheBackendWriter.maxWaiters = responseCacheBackendMaxWaiters
 	responseCacheBackendWriter.highWaterActive = 0
 	responseCacheBackendWriter.highWaterBytes = 0
 	responseCacheBackendWriter.queueRejections = 0

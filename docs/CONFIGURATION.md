@@ -342,6 +342,18 @@ Codex 瞬时账号限流按 `15s → 30s → 60s → 120s → 240s → 300s` 退
 |------|------|--------|------|
 | `ProxyURL` | string | "" | 全局代理 URL |
 | `ProxyPoolEnabled` | bool | false | 启用代理池。开启后未绑定账号从启用代理中粘性分配；绑定到已禁用/测挂托管代理的账号不会直连；池空且无全局代理时拒绝调度 |
+| `ResinURL` | string | "" | Resin 粘性代理池地址（含 token，形如 `http://127.0.0.1:2260/<token>`）。日志与设置接口只回显打码后的 `scheme://host` |
+| `ResinPlatformName` | string | "" | Resin 侧平台标识。与 `ResinURL` 同时填写才启用，清空任一即禁用 |
+
+#### 出口链路优先级
+
+Codex 渠道的出站有三套配置并存，生效关系是固定的、逐层覆盖而不是叠加：
+
+1. **Resin 反代**（全局）：启用后 Codex 渠道所有携带账号身份的出站（`/responses`、compact、WebSocket、wham 用量/重置券/订阅查询、客户端遥测、令牌刷新）全部改经 Resin，出口 IP 由 Resin 按账号粘性提供。此时下面第 2 层选出的代理只保留在审计标签里、不参与拨号；代理池的 fail-closed（池空、绑定的托管代理已禁用）对 Codex 账号也不再成立，账号不会因此被跳过。
+2. **代理链**：账号 `proxy_url` > 分组代理 > 代理池（按账号 ID 粘性）> 全局 `ProxyURL`。
+3. **直连**：代理池关闭且以上都为空时直连上游。
+
+Claude / Grok / Antigravity 等中继型账号不经 Resin，始终按第 2、3 层解析。管理后台在「系统设置 → Resin」卡片、代理池页顶部与 Codex 账号列表的代理徽章上标出当前由谁承担出站；设置接口的只读字段 `codex_egress` 给出同一结论（`mode` 为 `resin` 或 `proxy_chain`）。
 
 ### 账号级设置（单账号）
 

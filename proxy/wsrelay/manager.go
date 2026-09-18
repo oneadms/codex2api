@@ -1219,15 +1219,13 @@ func (m *Manager) createConnection(
 	dialerCopy := *m.dialer
 	dialer := &dialerCopy
 
-	// 配置代理（Resin 反代模式下跳过，URL 已包含 Resin 地址）。请求上下文
-	// 里的平台标记比此刻再次读取全局开关更可靠：热更新可能正好发生在握手
-	// 期间，但本次请求的 URL 已经固定为 Resin 出口。
+	// 沿用 ExecuteRequestViaWebsocket 固定的配置，避免热更新让已改写的
+	// Resin URL 再经账号代理拨号；poolKey 仍按第 2 层代理分池。
 	proxyURL := effectiveProxyURL(account, proxyOverride)
-
-	if proxy.IsResinEnabledForContext(ctx) {
+	if dialProxy := proxy.CodexDialProxyURLForContext(ctx, account, proxyURL); dialProxy == "" {
 		dialer.Proxy = nil
-	} else if proxyURL != "" {
-		if err := configureWebsocketDialerProxy(dialer, proxyURL); err != nil {
+	} else {
+		if err := configureWebsocketDialerProxy(dialer, dialProxy); err != nil {
 			return nil, err
 		}
 	}

@@ -17,7 +17,8 @@ import (
 
 func waitForResponseCacheWriter(t *testing.T, condition func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	// Race-instrumented CI runners are slow; this bounds a hang, not throughput.
+	deadline := time.Now().Add(5 * time.Second)
 	for !condition() {
 		if time.Now().After(deadline) {
 			t.Fatal("writer state did not converge")
@@ -111,6 +112,17 @@ func (b *blockingReadOnlyResponseBackend) SetResponseContext(ctx context.Context
 	return b.SetResponseContextReadOnly(ctx, key, items, ttl)
 }
 func (b *blockingReadOnlyResponseBackend) SetResponseContextReadOnly(ctx context.Context, _ string, items []json.RawMessage, _ time.Duration) error {
+	// The call is in flight from entry; serialization below must not delay
+	// the observable active count that tests converge on.
+	b.calls.Add(1)
+	n := b.active.Add(1)
+	defer b.active.Add(-1)
+	for {
+		old := b.peak.Load()
+		if n <= old || b.peak.CompareAndSwap(old, n) {
+			break
+		}
+	}
 	// Match production serialization and hold only its encoded SET argument.
 	normalized, err := cache.NormalizeResponseContextItems(items)
 	if err != nil {
@@ -121,14 +133,6 @@ func (b *blockingReadOnlyResponseBackend) SetResponseContextReadOnly(ctx context
 	}{normalized})
 	if err != nil {
 		return err
-	}
-	b.calls.Add(1)
-	n := b.active.Add(1)
-	for {
-		old := b.peak.Load()
-		if n <= old || b.peak.CompareAndSwap(old, n) {
-			break
-		}
 	}
 	if b.first != nil {
 		select {
@@ -143,17 +147,35 @@ func (b *blockingReadOnlyResponseBackend) SetResponseContextReadOnly(ctx context
 		err = ctx.Err()
 	}
 	runtime.KeepAlive(wire)
-	b.active.Add(-1)
 	return err
 }
 
+// configureResponseCacheWriterLimitsForTest scales the shared writer so
+// budget-shaped scenarios run with small payloads; race-instrumented CI cannot
+// serialize tens of MiB inside the production write timeout. The reset helper
+// restores production limits.
+func configureResponseCacheWriterLimitsForTest(maxActive int, maxBytes int64, maxWaiters int) {
+	w := responseCacheBackendWriter
+	w.mu.Lock()
+	w.maxActive, w.maxBytes, w.maxWaiters = maxActive, maxBytes, maxWaiters
+	w.mu.Unlock()
+}
+
 func TestResponseCacheWriterBoundsAllBackendWrites(t *testing.T) {
+	// Production limits (16 slots / 64 MiB) scaled 1:1024 keep the same shape:
+	// 64_concurrent fills every slot, byte_budget fills 12 slots then blocks on
+	// bytes (12 x 5 KiB = 60 KiB) with four writers queued.
+	const (
+		scaledSlots = responseCacheBackendWriteSlots
+		scaledBytes = responseCacheBackendWriteBytes >> 10
+	)
 	for _, tc := range []struct {
 		name                string
 		count, size, active int
-	}{{"64_concurrent", 64, 1 << 20, 16}, {"byte_budget", 16, 5 << 20, 12}} {
+	}{{"64_concurrent", 64, 1 << 10, scaledSlots}, {"byte_budget", 16, 5 << 10, 12}} {
 		t.Run(tc.name, func(t *testing.T) {
 			resetResponseCacheStateForTest(defaultResponseCacheConfig())
+			configureResponseCacheWriterLimitsForTest(scaledSlots, scaledBytes, responseCacheBackendMaxWaiters)
 			backend := &blockingReadOnlyResponseBackend{release: make(chan struct{})}
 			var release sync.Once
 			SetResponseContextCache(backend)
@@ -173,7 +195,7 @@ func TestResponseCacheWriterBoundsAllBackendWrites(t *testing.T) {
 				return s.ActiveWrites == tc.active && s.WaitingWrites == tc.count-tc.active && backend.active.Load() == int64(tc.active)
 			})
 			held := GetResponseCacheWriterSnapshot()
-			if held.InflightLogicalBytes > held.MaxLogicalBytes || held.ActiveWrites > 16 {
+			if held.InflightLogicalBytes > held.MaxLogicalBytes || held.ActiveWrites > scaledSlots {
 				t.Fatalf("writer exceeded budget: %+v", held)
 			}
 			// L1 admission finishes before callers wait for backend capacity.

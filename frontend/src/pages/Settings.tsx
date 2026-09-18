@@ -243,7 +243,7 @@ const SETTINGS_TAB_SECTION_INDEX: Record<SettingsTabKey, ReadonlyArray<{ id: str
 // 分区滚动高亮的判定线：分区顶部越过视口该高度即视为当前分区（要盖过粘性 Tab 栏）。
 const SETTINGS_SECTION_SPY_OFFSET_PX = 140
 // 手动保存字段的脏检查里跳过的键：生成号是服务端只读，自定义 Prompt 规则由规则页单独保存。
-const SETTINGS_DIRTY_IGNORED_KEYS: ReadonlySet<string> = new Set(['response_cache_config_generation', 'prompt_filter_custom_patterns', 'codex_images_default_main_model'])
+const SETTINGS_DIRTY_IGNORED_KEYS: ReadonlySet<string> = new Set(['response_cache_config_generation', 'prompt_filter_custom_patterns', 'codex_images_default_main_model', 'codex_egress'])
 
 const getDefaultModelMappingEntries = (): ModelMappingEntry[] =>
   Object.entries(DEFAULT_CLAUDE_MODEL_MAP) as ModelMappingEntry[]
@@ -2873,6 +2873,9 @@ export default function Settings() {
   const isExternalDatabase = settingsForm.database_driver === 'postgres'
   const isExternalCache = settingsForm.cache_driver === 'redis'
   const showConnectionPool = isExternalDatabase || isExternalCache
+  // Resin 生效与否以后端摘要为准(保存后随响应刷新),不按表单里未保存的草稿猜。
+  const codexEgress = persistedSettings?.codex_egress
+  const resinActive = Boolean(codexEgress?.resin_enabled)
   const canConfigureRemoteMigration = settingsForm.admin_auth_source === 'env' || settingsForm.admin_secret.trim() !== ''
   const saveButtonLabel = savingSettings ? t('common.saving') : t('settings.saveSettings')
   const siteLogoPreview = sanitizeBrandingLogo(settingsForm.site_logo) || DEFAULT_SITE_LOGO
@@ -5697,7 +5700,11 @@ export default function Settings() {
                     <Badge variant="outline" className="text-[11px]">
                       {t('settings.nav.restartRequired')}
                     </Badge>
-                  ) : null
+                  ) : (
+                    <Badge variant={resinActive ? 'default' : 'outline'} className="text-[11px]">
+                      {resinActive ? t('settings.resinActiveBadge') : t('settings.resinInactiveBadge')}
+                    </Badge>
+                  )
                 }
               >
                 <div className="space-y-4">
@@ -5727,10 +5734,28 @@ export default function Settings() {
                   ) : null}
                   {showConnectionPool ? (
                     <div className="border-t border-border/80 pt-4">
-                      <h4 className="text-[13px] font-semibold text-foreground sm:text-sm">{t('settings.resinTitle')}</h4>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h4 className="text-[13px] font-semibold text-foreground sm:text-sm">{t('settings.resinTitle')}</h4>
+                        <Badge variant={resinActive ? 'default' : 'outline'} className="text-[11px]">
+                          {resinActive ? t('settings.resinActiveBadge') : t('settings.resinInactiveBadge')}
+                        </Badge>
+                      </div>
                       <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t('settings.resinDesc')}</p>
                     </div>
                   ) : null}
+                  {/* 三套出口并存时必须明说谁在生效(issue #679):Resin 是整层覆盖,不是叠加。 */}
+                  <div
+                    className={cn(
+                      'rounded-lg border px-3 py-2 text-xs leading-relaxed',
+                      resinActive
+                        ? 'border-amber-500/30 bg-amber-500/5 text-amber-800 dark:text-amber-200'
+                        : 'border-border/60 bg-muted/20 text-muted-foreground',
+                    )}
+                  >
+                    {resinActive
+                      ? t('settings.resinActiveNote', { endpoint: codexEgress?.resin_endpoint || '', platform: codexEgress?.resin_platform_name || '' })
+                      : t('settings.resinInactiveNote')}
+                  </div>
                   <div className={SETTINGS_FIELD_GRID}>
                     <SettingField label={t('settings.resinUrl')} description={t('settings.resinUrlDesc')}>
                       <Input

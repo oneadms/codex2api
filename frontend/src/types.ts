@@ -357,6 +357,12 @@ export interface AccountRow {
   claude_usage_windows_probed?: boolean
   timezone?: string
   custom_headers?: Record<string, string> | null
+  /** Forced X-Codex-Turn-State injected on every outbound Codex request; empty = off. */
+  codex_turn_state?: string
+  /** Comma-separated model scope for the injection; empty = all models. */
+  codex_turn_state_models?: string
+  /** RFC3339 timestamp of the last time the injected value changed; absent = unknown. */
+  codex_turn_state_set_at?: string
   health_tier?: string
   scheduler_score?: number
   dispatch_score?: number
@@ -1650,6 +1656,8 @@ export interface UpdateAccountSchedulerRequest {
   claude_version_policy?: 'passthrough' | 'fixed' | 'minimum' | null
   claude_client_version?: string | null
   timezone?: string | null
+  codex_turn_state?: string | null
+  codex_turn_state_models?: string | null
 }
 
 export interface BatchUpdateAccountsRequest extends UpdateAccountSchedulerRequest {
@@ -2190,6 +2198,15 @@ export interface AntigravityOAuthClientSetting {
   client_secret?: string
 }
 
+/** Codex 渠道当前由谁承担出站:resin 为整层覆盖,proxy_chain 表示按 账号 > 分组 > 代理池 > 全局 > 直连 解析。 */
+export interface CodexEgressSummary {
+  mode: 'resin' | 'proxy_chain' | string
+  resin_enabled: boolean
+  /** 打码后的 Resin 地址(不含 token),仅用于展示。 */
+  resin_endpoint?: string
+  resin_platform_name?: string
+}
+
 export interface SystemSettings {
   site_name: string
   site_logo: string
@@ -2330,6 +2347,8 @@ export interface SystemSettings {
   reasoning_effort_models: string
   resin_url: string
   resin_platform_name: string
+  /** 后端权威的 Codex 出口摘要(只读):Resin 启用时代理池/分组/账号/全局代理对 Codex 渠道均不参与出站。 */
+  codex_egress?: CodexEgressSummary
   prompt_filter_enabled: boolean
   prompt_filter_mode: 'monitor' | 'warn' | 'block' | string
   prompt_filter_threshold: number
@@ -3602,6 +3621,10 @@ export interface UsageLog {
   upstream_request_id?: string
   upstream_proxy_id?: number
   upstream_proxy_name?: string
+  /** X-Codex-Turn-State value the gateway injected on this attempt ("" = none). */
+  injected_turn_state?: string
+  /** X-Codex-Turn-State value observed from the upstream response ("" = none). */
+  upstream_turn_state?: string
   id: number
   account_id: number
   // 上游渠道(codex/grok),写入时固化;历史行回填,可能为空

@@ -93,30 +93,32 @@ func (cfg *ResinConfig) platformList() []string {
 var resinCfg atomic.Pointer[ResinConfig]
 
 // SetResinConfig 设置全局 Resin 配置；cfg 为 nil、BaseURL 为空或平台列表为空时禁用 Resin。
-// PlatformName 继续使用原有字段承载多个全局平台（逗号分隔），从而兼容
-// 既有单平台配置和数据库 schema。
+// PlatformName 继续使用原有字段承载多个全局平台（逗号分隔），兼容既有配置。
+// 启用/禁用同步到 auth 包的出口标记；日志隐藏 Resin URL 中的 token。
 func SetResinConfig(cfg *ResinConfig) {
-	if cfg == nil {
-		resinCfg.Store(nil)
-		return
+	wasEnabled := IsResinEnabled()
+	if cfg != nil {
+		baseURL := strings.TrimSpace(cfg.BaseURL)
+		platforms := parseResinPlatforms(cfg.PlatformName)
+		if baseURL != "" && len(platforms) > 0 {
+			// Store an immutable snapshot rather than the caller-owned pointer. Keep
+			// the public struct's original two-field shape for source compatibility.
+			normalized := &ResinConfig{
+				BaseURL:      baseURL,
+				PlatformName: strings.Join(platforms, ","),
+			}
+			resinCfg.Store(normalized)
+			auth.SetResinEgressEnabled(true)
+			log.Printf("[Resin] 已启用: platforms=%s endpoint=%s;Codex 渠道出站全部经 Resin,代理池/分组代理/账号与全局 proxy_url 对 Codex 不再生效",
+				normalized.PlatformName, MaskResinBaseURL(normalized.BaseURL))
+			return
+		}
 	}
-	baseURL := strings.TrimSpace(cfg.BaseURL)
-	platforms := parseResinPlatforms(cfg.PlatformName)
-	if baseURL == "" || len(platforms) == 0 {
-		resinCfg.Store(nil)
-		return
+	resinCfg.Store(nil)
+	auth.SetResinEgressEnabled(false)
+	if wasEnabled {
+		log.Printf("[Resin] 已禁用;Codex 渠道出站恢复按 账号 > 分组 > 代理池 > 全局 > 直连 解析")
 	}
-
-	// Store an immutable snapshot rather than the caller-owned pointer. Keep the
-	// public struct's original two-field shape for source compatibility with
-	// external keyed and positional literals; the canonical comma-separated
-	// string is immutable and parsed on demand.
-	normalized := &ResinConfig{
-		BaseURL:      baseURL,
-		PlatformName: strings.Join(platforms, ","),
-	}
-	resinCfg.Store(normalized)
-	log.Printf("[Resin] 已启用: platforms=%s url=%s", strings.Join(platforms, ","), baseURL)
 }
 
 // GetResinConfig 获取当前 Resin 配置，未配置时返回 nil
@@ -195,11 +197,14 @@ func resinMaintenanceTargetForPlatform(account *auth.Account, targetURL, platfor
 }
 
 func resinMaintenanceTargetForContext(ctx context.Context, account *auth.Account, targetURL, platformName string) (finalURL string, client *http.Client, viaResin bool) {
-	cfg := ResinConfigFromContext(ctx)
-	if cfg == nil || account == nil {
+	if strings.TrimSpace(platformName) != "" {
+		ctx = WithResinPlatform(ctx, platformName)
+	}
+	egress := ResolveCodexEgressForContext(ctx, account, targetURL, "")
+	if !egress.ViaResin() {
 		return targetURL, nil, false
 	}
-	return buildReverseProxyURL(cfg, targetURL, platformName), getResinHTTPClient(account), true
+	return egress.URL, egress.Client(), true
 }
 
 // ==================== 反向代理 URL 构建 ====================
