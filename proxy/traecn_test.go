@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"io"
 	"log"
 	"net/http"
@@ -692,5 +694,270 @@ func TestTraeCNUpstreamRejectLogsShortTextBody(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("拒绝日志缺少 %q:\n%s", want, out)
 		}
+	}
+}
+
+// TRAECN「前置元数据立即下发」开关：默认关闭时上游 provider 通知被丢弃（既有行为，
+// 字节级不变）；开启后它们作为 response.metadata 事件立即下发。
+func TestTraeCNPreflightMetadataPassthrough(t *testing.T) {
+	t.Parallel()
+	provider := strings.Join([]string{
+		`event: queue_begin`,
+		`data: {"type":"queue_begin","data":{"position":3}}`,
+		"",
+		`event: progress_notice`,
+		`data: {"type":"progress_notice","data":{"stage":"thinking"}}`,
+		"",
+		`event: metadata`,
+		`data: {"type":"metadata","data":{"trace_id":"abc"}}`,
+		"",
+		`event: output`,
+		`data: {"type":"text","content":"answer"}`,
+		"",
+		`event: done`,
+		`data: {"type":"done","data":{"finish_reason":"stop"}}`,
+		"",
+	}, "\n")
+	read := func(passthrough bool) ([]byte, []gjson.Result) {
+		stream := traeCNCanonicalStreamWithPreflight(io.NopCloser(strings.NewReader(provider)), "deepseek-v3", nil, nil, passthrough)
+		raw, err := io.ReadAll(stream)
+		if err != nil {
+			t.Fatalf("read canonical stream: %v", err)
+		}
+		return raw, canonicalSSEEvents(t, raw)
+	}
+
+	t.Run("off by default drops provider notices", func(t *testing.T) {
+		raw, events := read(false)
+		if _, ok := findCanonicalEvent(events, "response.metadata"); ok {
+			t.Fatalf("disabled passthrough must not emit response.metadata: %s", raw)
+		}
+		if event, ok := findCanonicalEvent(events, "response.output_text.delta"); !ok || event.Get("delta").String() != "answer" {
+			t.Fatalf("content missing: %s", raw)
+		}
+		if _, ok := findCanonicalEvent(events, "response.completed"); !ok {
+			t.Fatalf("terminal missing: %s", raw)
+		}
+	})
+
+	t.Run("enabled forwards real upstream notices before content", func(t *testing.T) {
+		raw, events := read(true)
+		metadata := make([]gjson.Result, 0, 3)
+		firstContentIndex := -1
+		for index, event := range events {
+			switch event.Get("type").String() {
+			case "response.metadata":
+				metadata = append(metadata, event)
+			case "response.output_text.delta":
+				if firstContentIndex < 0 {
+					firstContentIndex = index
+				}
+			}
+		}
+		if len(metadata) != 3 {
+			t.Fatalf("metadata events = %d, want 3: %s", len(metadata), raw)
+		}
+		for index, want := range []string{"queue_begin", "progress_notice", "metadata"} {
+			if got := metadata[index].Get("sse_event").String(); got != want {
+				t.Fatalf("metadata[%d].sse_event = %q, want %q", index, got, want)
+			}
+			if !metadata[index].Get("metadata").IsObject() {
+				t.Fatalf("metadata[%d] must carry the upstream payload: %s", index, metadata[index].Raw)
+			}
+		}
+		if firstContentIndex < 0 || firstContentIndex < len(metadata) {
+			t.Fatalf("notices must precede the first content event (content=%d metadata=%d): %s", firstContentIndex, len(metadata), raw)
+		}
+		if metadata[0].Get("metadata.data.position").Int() != 3 {
+			t.Fatalf("queue payload not preserved: %s", metadata[0].Raw)
+		}
+		// 内容仍完整，开关只增加前置通知。
+		if event, ok := findCanonicalEvent(events, "response.output_text.delta"); !ok || event.Get("delta").String() != "answer" {
+			t.Fatalf("content missing: %s", raw)
+		}
+	})
+}
+
+// 开关的请求级快照优先于全局配置，保证一次请求内策略不随热更新切换。
+func TestTraeCNPreflightPassthroughContextSnapshot(t *testing.T) {
+	t.Parallel()
+	previous := auth.ConfiguredTraeCNSettings()
+	t.Cleanup(func() { auth.SetConfiguredTraeCNSettings(previous) })
+
+	auth.SetConfiguredTraeCNSettings(auth.TraeCNSettings{PreflightSSEPassthrough: false})
+	if traeCNPreflightPassthroughForContext(t.Context()) {
+		t.Fatal("global default must be off")
+	}
+	if !traeCNPreflightPassthroughForContext(WithTraeCNPreflightPassthrough(t.Context(), true)) {
+		t.Fatal("request snapshot must win over the global default")
+	}
+
+	// 反向：全局开启但本次请求固定关闭时，仍以请求快照为准。
+	auth.SetConfiguredTraeCNSettings(auth.TraeCNSettings{PreflightSSEPassthrough: true})
+	if !traeCNPreflightPassthroughForContext(t.Context()) {
+		t.Fatal("global enable must be honored without a snapshot")
+	}
+	if traeCNPreflightPassthroughForContext(WithTraeCNPreflightPassthrough(t.Context(), false)) {
+		t.Fatal("request snapshot must be able to disable passthrough")
+	}
+}
+
+// withTraeCNPreflightPassthroughSnapshot 只在尚未固定时写入：断线续传 worker 在
+// 受理任务时冻结的决策，不能被执行路径按当前全局配置覆盖。
+func TestTraeCNPreflightSnapshotIsRetainedOnReapply(t *testing.T) {
+	t.Parallel()
+	previous := auth.ConfiguredTraeCNSettings()
+	t.Cleanup(func() { auth.SetConfiguredTraeCNSettings(previous) })
+	auth.SetConfiguredTraeCNSettings(auth.TraeCNSettings{PreflightSSEPassthrough: false})
+
+	// 全局关闭、任务冻结为开启：执行路径再次经过时，覆盖写必须保留冻结值。
+	frozen := WithTraeCNPreflightPassthrough(t.Context(), true)
+	if !traeCNPreflightPassthroughForContext(frozen) {
+		t.Fatal("frozen=true snapshot must be readable")
+	}
+	reapplied := withTraeCNPreflightPassthroughSnapshot(frozen, traeCNPreflightPassthroughForContext(t.Context()))
+	if !traeCNPreflightPassthroughForContext(reapplied) {
+		t.Fatal("reapplying with a different live value must not clobber the frozen snapshot")
+	}
+
+	// 没有快照时则写入——保证非续传路径仍能固定本次请求的决策。
+	fresh := withTraeCNPreflightPassthroughSnapshot(t.Context(), true)
+	if !traeCNPreflightPassthroughForContext(fresh) {
+		t.Fatal("snapshot must be written when none is frozen yet")
+	}
+}
+
+// 只有 response.metadata 在开关开启时绕开默认缓冲；生命周期帧与其余事件不受影响。
+func TestForceFlushTraeCNPreflightMetadata(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		eventType   string
+		passthrough bool
+		want        bool
+	}{
+		{"response.metadata", true, true},
+		{"response.metadata", false, false},
+		{"response.created", true, false},
+		{"response.in_progress", true, false},
+		{"response.output_text.delta", true, false},
+		{"response.failed", true, false},
+	}
+	for _, tc := range cases {
+		if got := forceFlushTraeCNPreflightMetadata(tc.eventType, tc.passthrough); got != tc.want {
+			t.Errorf("forceFlushTraeCNPreflightMetadata(%q, %t) = %t, want %t", tc.eventType, tc.passthrough, got, tc.want)
+		}
+	}
+}
+
+// TRAECN「前置元数据立即下发」必须真的在下游可见：上游在内容生成前发一条
+// metadata、间隔后才发内容，metadata 必须早于首个内容帧到达下游，而不是被
+// 首内容前的默认缓冲压到与内容同时下发。这条断言覆盖 handler 到转换器的整条
+// 接线：只测转换器（见 TestTraeCNPreflightMetadataPassthrough）会漏掉
+// 「快照写错分支 / 忘了强制冲刷」这类接线错误。
+func TestTraeCNPreflightMetadataReachesClientBeforeContent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previous := auth.ConfiguredTraeCNSettings()
+	t.Cleanup(func() { auth.SetConfiguredTraeCNSettings(previous) })
+	auth.SetConfiguredTraeCNSettings(auth.TraeCNSettings{PreflightSSEPassthrough: true})
+
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		_, _ = io.WriteString(w, "event: metadata\ndata: {\"type\":\"metadata\",\"data\":{\"trace_id\":\"abc\"}}\n\n")
+		flusher.Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = io.WriteString(w, "event: output\ndata: {\"type\":\"text\",\"content\":\"answer\"}\n\nevent: done\ndata: {\"finish_reason\":\"stop\"}\n\n")
+		flusher.Flush()
+	}))
+	t.Cleanup(upstream.Close)
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, MaxRetries: 0})
+	t.Cleanup(store.Stop)
+	store.AddAccount(&auth.Account{
+		DBID: 91950, UpstreamType: auth.UpstreamTraeCN,
+		AccessToken: "AT", RefreshToken: "RT", ExpiresAt: time.Now().Add(time.Hour),
+		TraeCNHost: upstream.URL,
+	})
+	handler := NewHandler(store, nil, nil, nil)
+	t.Cleanup(func() { cleanupTraeCNResumeRegistry(t, &handler.traeCNResumeTasks) })
+
+	router := gin.New()
+	router.POST("/v1/responses", func(c *gin.Context) {
+		c.Set(contextAPIKeyID, int64(91950))
+		c.Set(contextAPIKeyRow, &database.APIKeyRow{ID: 91950, Limits: database.APIKeyLimits{UpstreamChannel: database.UpstreamChannelTraeCN}})
+		handler.Responses(c)
+	})
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	// 内容在 metadata 之后放行：若 metadata 被缓冲，它只会与内容同时出现。
+	time.AfterFunc(1200*time.Millisecond, func() { close(release) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/responses",
+		strings.NewReader(`{"model":"DeepSeek-V4-Pro","stream":true,"input":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Authorization", "Bearer traecn-preflight-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	type frame struct {
+		at     time.Duration
+		detail string
+	}
+	frames := make(chan frame, 64)
+	start := time.Now()
+	go func() {
+		resp, err := server.Client().Do(req)
+		if err != nil {
+			close(frames)
+			return
+		}
+		defer resp.Body.Close()
+		frames <- frame{at: time.Since(start), detail: "headers"}
+		reader := bufio.NewReader(resp.Body)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				close(frames)
+				return
+			}
+			trimmed := strings.TrimRight(line, "\r\n")
+			if !strings.HasPrefix(trimmed, "data: ") {
+				continue
+			}
+			payload := strings.TrimSpace(trimmed[6:])
+			frames <- frame{at: time.Since(start), detail: gjson.Get(payload, "type").String()}
+		}
+	}()
+
+	metadataAt := time.Duration(-1)
+	contentAt := time.Duration(-1)
+	for f := range frames {
+		switch f.detail {
+		case "response.metadata":
+			if metadataAt < 0 {
+				metadataAt = f.at
+			}
+		case "response.output_text.delta":
+			if contentAt < 0 {
+				contentAt = f.at
+			}
+		}
+	}
+
+	if metadataAt < 0 {
+		t.Fatal("enabled passthrough must deliver response.metadata downstream")
+	}
+	if contentAt < 0 {
+		t.Fatal("content never reached downstream")
+	}
+	// 内容被压后 1.2s；metadata 若与内容同时到达即说明它被缓冲，开关失效。
+	if metadataAt >= contentAt-500*time.Millisecond {
+		t.Fatalf("metadata must be dispatched before content (metadata=%s content=%s); it was buffered", metadataAt, contentAt)
 	}
 }

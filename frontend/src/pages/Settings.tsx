@@ -6,6 +6,7 @@ import { formatBeijingTime, getTimezone, setTimezone } from '../utils/time'
 import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
 import TraeCNModelMapping from '../components/TraeCNModelMapping'
+import TraeCNPreflightPassthrough from '../components/TraeCNPreflightPassthrough'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
 import type { AntigravityOAuthClientSetting, AntigravitySettingsResponse, ChannelTestSettings, CodexUserAgentCatalog, CodexUserAgentPreview, HealthResponse, ModelInfo, SiteBranding, SystemSettings, UpstreamChannel } from '../types'
@@ -4545,6 +4546,8 @@ export default function Settings() {
                   </SettingField>
                 </div>
               </SettingsCard>
+              {/* 独立读写 /settings/traecn，改动即时保存，不受通用设置保存影响。 */}
+              <TraeCNPreflightPassthrough />
             </SettingsSection>
           ) : null}
 

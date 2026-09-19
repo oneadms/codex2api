@@ -4290,6 +4290,11 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 			// second platform from the translated body and lose the API-key-scoped
 			// hash used by this handler.
 			upstreamCtx = WithResinPlatform(upstreamCtx, resinPlatform)
+			// TRAECN 前置元数据下发：在建立上游 context 时固定本次请求的策略。
+			// 这条 relay 分支正是 Trae CN 账号实际走的路径（IsRelayStyle 对 Trae CN
+			// 恒为真），快照必须在这里写入，否则执行器读不到请求级决策。
+			// 断线续传 worker 已在受理任务时冻结过决策，这里保留那份快照不覆盖。
+			upstreamCtx = withTraeCNPreflightPassthroughSnapshot(upstreamCtx, traeCNPreflightPassthrough(c))
 			readCtx := upstreamResponseReadContext(c.Request.Context(), upstreamCtx, continuousRetryPolicy)
 			upstreamCtx = WithCodexClientModel(upstreamCtx, model)
 			lastUpstreamCancel = upstreamCancel
@@ -4695,6 +4700,11 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 			preflightSettings := CurrentRuntimeSettings()
 			preflightSettings.ContinuousRetryPolicy = continuousRetryPolicy
 			preflightPassthrough := continuousRetryPreflightPassthrough(preflightSettings)
+			// TRAECN 渠道有自己独立的前置元数据开关，与 Codex 的同类开关互不影响。
+			// 读的是上游 context 上的请求级快照（而不是再次读全局配置），保证
+			// 「转换器是否产出 metadata」与「下发时是否强制冲刷」两个决策同源；
+			// 断线续传 worker 冻结的快照也因此被完整遵守。
+			traeCNPassthrough := traeCNPreflightPassthroughForContext(upstreamCtx)
 			gotTerminal := false
 			deltaCharCount := 0
 			var readErr error
@@ -4830,8 +4840,12 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 						// 可重试的 error 帧（上游降载先导帧）与生命周期帧一样缓冲：
 						// 立即写出会置位 wroteAnyBody，随后的 response.failed 就进不了
 						// 首包前静默换号分支。必须写出时改写降载码为客户端可重试码。
-						shouldDefer := shouldDeferPreContentSSEEvent(eventType, contentTokenSeen, gotTerminal, preflightPassthrough) ||
-							(!contentTokenSeen && !visibleBody && !gotTerminal && isRetryableUpstreamErrorFrame(eventType, data, continuousRetryPolicy))
+						// TRAECN 独立的「前置元数据立即下发」开关在这里同样生效：
+						// relay 分支是 Trae CN 实际走的路径，转换器产出的
+						// response.metadata 必须绕开默认缓冲立即写出，否则开关形同虚设。
+						shouldDefer := (shouldDeferPreContentSSEEvent(eventType, contentTokenSeen, gotTerminal, preflightPassthrough) ||
+							(!contentTokenSeen && !visibleBody && !gotTerminal && isRetryableUpstreamErrorFrame(eventType, data, continuousRetryPolicy))) &&
+							!forceFlushTraeCNPreflightMetadata(eventType, traeCNPassthrough)
 						wrote, err := writeDeferredSSEData(streamWriter, &pendingFirstTokenEvents, sanitizeCapacityShedEventForClient(eventType, data), shouldDefer)
 						if err != nil {
 							writeErr = err
@@ -5125,6 +5139,10 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 		}
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
 		upstreamCtx = WithResinPlatform(upstreamCtx, resinPlatform)
+		// TRAECN 前置元数据下发：建立上游 context 时固定本次请求的策略，与 Codex 的
+		// preflight 快照同口径，热更新不改变在途请求。已有快照（断线续传 worker 在
+		// 受理任务时冻结的那份）保持不动。
+		upstreamCtx = withTraeCNPreflightPassthroughSnapshot(upstreamCtx, traeCNPreflightPassthrough(c))
 		readCtx := upstreamResponseReadContext(c.Request.Context(), upstreamCtx, continuousRetryPolicy)
 		upstreamCtx = context.WithValue(upstreamCtx, encryptedContentSessionKey{}, sessionIdentity.affinityID)
 		upstreamCtx = WithCodexClientModel(upstreamCtx, model)
@@ -5426,6 +5444,10 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 			preflightSettings := CurrentRuntimeSettings()
 			preflightSettings.ContinuousRetryPolicy = continuousRetryPolicy
 			preflightPassthrough := continuousRetryPreflightPassthrough(preflightSettings)
+			// TRAECN 渠道有自己独立的前置元数据开关，与 Codex 的同类开关互不影响：
+			// 开启后上游 provider 通知作为真实事件立即下发，代价是提前提交 200。
+			// 与转换器读同一份请求级快照，避免两个决策在热更新时撕裂。
+			traeCNPassthrough := traeCNPreflightPassthroughForContext(upstreamCtx)
 			emptyIncomplete := &emptyIncompleteTracker{}
 			forwardWithEvent := func(sseEvent string, data []byte) bool {
 				streamDiag.markUpstreamFrame()
@@ -5550,8 +5572,9 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 					// 可重试的 error 帧（上游降载先导帧）不受 preflightPassthrough 影响，
 					// 始终缓冲：立即写出会置位 wroteAnyBody，随后的 response.failed 就
 					// 进不了首包前静默换号/超窗压缩分支。必须写出时改写降载码。
-					shouldDefer := shouldDeferPreContentSSEEvent(eventType, contentTokenSeen, gotTerminal, preflightPassthrough) ||
-						(!contentTokenSeen && !visibleBody && !gotTerminal && isRetryableUpstreamErrorFrame(eventType, data, continuousRetryPolicy))
+					shouldDefer := (shouldDeferPreContentSSEEvent(eventType, contentTokenSeen, gotTerminal, preflightPassthrough) ||
+						(!contentTokenSeen && !visibleBody && !gotTerminal && isRetryableUpstreamErrorFrame(eventType, data, continuousRetryPolicy))) &&
+						!forceFlushTraeCNPreflightMetadata(eventType, traeCNPassthrough)
 					wrote, err := writeDeferredSSEData(streamWriter, &pendingFirstTokenEvents, sanitizeCapacityShedEventForClient(eventType, data), shouldDefer)
 					if err != nil {
 						writeErr = err
@@ -7132,6 +7155,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		}
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
 		upstreamCtx = WithResinPlatform(upstreamCtx, resinPlatform)
+		// TRAECN 前置元数据下发：在建立上游 context 时固定本次请求的策略，
+		// 与 Codex 的 preflight 快照同口径，热更新不改变在途请求。
+		upstreamCtx = withTraeCNPreflightPassthroughSnapshot(upstreamCtx, traeCNPreflightPassthrough(c))
 		readCtx := upstreamResponseReadContext(c.Request.Context(), upstreamCtx, continuousRetryPolicy)
 		upstreamCtx = context.WithValue(upstreamCtx, encryptedContentSessionKey{}, sessionIdentity.affinityID)
 		upstreamCtx = WithCodexClientModel(upstreamCtx, model)

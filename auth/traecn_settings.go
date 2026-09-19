@@ -13,6 +13,11 @@ import (
 // TraeCNSettings 保存 TRAECN 独立的渠道配置，不参与其他渠道的模型解析。
 type TraeCNSettings struct {
 	ModelMapping map[string]string `json:"model_mapping"`
+	// PreflightSSEPassthrough 是否把上游在响应内容前发送的元数据通知
+	// （metadata / progress_notice / queue_* 等 provider 事件）立即转发下游，
+	// 而不是丢掉/缓冲到首个真实内容事件（与 Codex 的旧版兼容开关同语义，默认 false）。
+	// 开启后会提前提交 200，首内容前的失败/换号/超窗压缩重试将失效。
+	PreflightSSEPassthrough bool `json:"preflight_sse_passthrough"`
 }
 
 const TraeCNModelMappingMaxEntries = 200
@@ -25,7 +30,7 @@ type traeCNSettingsSnapshot struct {
 var configuredTraeCNSettings atomic.Value // traeCNSettingsSnapshot
 
 func cloneTraeCNSettings(settings TraeCNSettings) TraeCNSettings {
-	out := TraeCNSettings{ModelMapping: make(map[string]string, len(settings.ModelMapping))}
+	out := TraeCNSettings{PreflightSSEPassthrough: settings.PreflightSSEPassthrough, ModelMapping: make(map[string]string, len(settings.ModelMapping))}
 	for from, to := range settings.ModelMapping {
 		out.ModelMapping[from] = to
 	}
@@ -46,8 +51,15 @@ func ConfiguredTraeCNSettings() TraeCNSettings {
 	return cloneTraeCNSettings(snapshot.settings)
 }
 
+// TraeCNPreflightSSEPassthroughEnabled 报告 TRAECN 是否开启「前置元数据立即下发」。
+// 默认关闭：上游 provider 元数据事件被丢弃，生命周期帧缓冲到首个内容事件。
+func TraeCNPreflightSSEPassthroughEnabled() bool {
+	snapshot, _ := configuredTraeCNSettings.Load().(traeCNSettingsSnapshot)
+	return snapshot.settings.PreflightSSEPassthrough
+}
+
 func NormalizeTraeCNSettings(settings TraeCNSettings) (TraeCNSettings, error) {
-	out := TraeCNSettings{ModelMapping: map[string]string{}}
+	out := TraeCNSettings{PreflightSSEPassthrough: settings.PreflightSSEPassthrough, ModelMapping: map[string]string{}}
 	if len(settings.ModelMapping) > TraeCNModelMappingMaxEntries {
 		return out, fmt.Errorf("TRAE 模型映射最多允许 %d 条", TraeCNModelMappingMaxEntries)
 	}

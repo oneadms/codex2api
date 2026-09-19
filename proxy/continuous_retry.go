@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
@@ -50,6 +51,23 @@ func continuousRetryBuffersAttempts(policy database.ContinuousRetryPolicy) bool 
 func continuousRetryPreflightPassthrough(settings RuntimeSettings) bool {
 	policy := database.NormalizeContinuousRetryPolicy(settings.ContinuousRetryPolicy)
 	return settings.CodexPreflightSSEPassthrough && !policy.Enabled
+}
+
+// traeCNPreflightPassthrough 是 TRAECN 渠道独立的前置元数据立即下发开关，
+// 与 Codex 的同类开关互不影响。关闭时上游 provider 元数据事件既不转发也不缓冲；
+// 开启时它们作为真实事件立即下发，代价是提前提交 200，首内容前的
+// response.failed 无法再按真实错误码返回，静默换号与超窗压缩重试同样失效。
+//
+// 与 Codex 同口径：连续重试开启时整体缓冲 attempt，立即下发会让该窗口内的
+// 失败无法再静默换号，因此此时开关自动失效（不 passthrough）。
+func traeCNPreflightPassthrough(c *gin.Context) bool {
+	if c == nil || requestUpstreamChannel(c) != database.UpstreamChannelTraeCN {
+		return false
+	}
+	if !auth.TraeCNPreflightSSEPassthroughEnabled() {
+		return false
+	}
+	return !continuousRetryBuffersAttempts(continuousRetryPolicyForRequest(c))
 }
 
 func continuousRetryHTTPSelected(policy database.ContinuousRetryPolicy, status int, body []byte) bool {

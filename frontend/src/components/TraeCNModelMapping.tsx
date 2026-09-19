@@ -53,7 +53,7 @@ export default function TraeCNModelMapping() {
     setSaving(true)
     setError('')
     try {
-      const response = await api.updateTraeCNSettings(JSON.parse(serialized.value || '{}'))
+      const response = await api.updateTraeCNSettings({ model_mapping: JSON.parse(serialized.value || '{}') })
       setSettings(response)
       setEntries(entriesFrom(response))
       showToast(t('settings.traecnMapping.saved'), 'success')

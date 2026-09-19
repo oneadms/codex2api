@@ -1078,10 +1078,10 @@ export const api = {
       body: JSON.stringify({ channels }),
     }),
   getTraeCNSettings: () => request<TraeCNSettingsResponse>('/settings/traecn'),
-  updateTraeCNSettings: (modelMapping: Record<string, string>) =>
+  updateTraeCNSettings: (patch: { model_mapping?: Record<string, string>; preflight_sse_passthrough?: boolean }) =>
     request<TraeCNSettingsResponse>('/settings/traecn', {
       method: 'PUT',
-      body: JSON.stringify({ model_mapping: modelMapping }),
+      body: JSON.stringify(patch),
     }),
   getAntigravitySettings: () => request<AntigravitySettingsResponse>('/settings/antigravity'),
   updateAntigravitySettings: (patch: { model_redirects?: Record<string, string>; redirect_overrides_effort?: boolean }) =>

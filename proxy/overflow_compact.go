@@ -115,6 +115,16 @@ func shouldDeferPreContentSSEEvent(eventType string, contentTokenSeen, gotTermin
 			(!preflightPassthrough && isCodexPreflightSSEEvent(eventType)))
 }
 
+// forceFlushTraeCNPreflightMetadata 报告 TRAECN「前置元数据立即下发」开关下，
+// 本事件是否必须绕开默认缓冲立即写出。TRAE 转换器开启该开关时会把上游 provider
+// 通知包装成 response.metadata 事件；这些事件默认落在
+// shouldDeferPreContentSSEEvent 的缓冲分支里，若不再显式强制冲刷，开关形同虚设。
+// 开关关闭（默认）时恒为 false，行为与改动前逐字节一致。
+// 生命周期事件（response.created / in_progress）不受本开关影响，仍始终缓冲。
+func forceFlushTraeCNPreflightMetadata(eventType string, passthrough bool) bool {
+	return passthrough && strings.TrimSpace(eventType) == "response.metadata"
+}
+
 // isContextLengthExceededBody 判断上游错误体（HTTP 错误响应或 response.failed
 // 的 error 对象）是否为上下文超窗。
 func isContextLengthExceededBody(body []byte) bool {

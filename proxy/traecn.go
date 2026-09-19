@@ -980,6 +980,10 @@ type traeCNCanonicalState struct {
 	bridges traeCNBridges
 	// contracts 记录每个函数的声明契约（顶层必填字段），用于修复模型多包一层的参数。
 	contracts traeCNContracts
+	// preflightPassthrough 为真时，把上游在内容生成前发出的 provider 通知
+	// （metadata / progress_notice / queue_* 等）作为真实事件立即转发下游，
+	// 而不是丢弃。默认关闭（见 auth.TraeCNPreflightSSEPassthroughEnabled）。
+	preflightPassthrough bool
 }
 
 func newTraeCNCanonicalState(model string) *traeCNCanonicalState {
@@ -1025,6 +1029,25 @@ func marshalTraeCanonicalEvent(eventType string, fields map[string]any) []byte {
 func (s *traeCNCanonicalState) emitCreated(writer io.Writer) error {
 	return writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent("response.created", map[string]any{
 		"response": map[string]any{"id": s.responseID, "object": "response", "status": "in_progress", "model": s.model},
+	}))
+}
+
+// passthroughMetadata 把一条上游 provider 元数据通知作为真实事件立即转发下游。
+// Trae CN 上游在内容生成前会发 metadata / progress_notice / queue_* 等通知；
+// 默认丢弃它们，以保留「首内容前失败可按真实错误码返回 / 静默换号 / 超窗压缩重试」
+// 的语义。开启 preflightPassthrough（默认关）后这些通知立即下发，模拟把「首条
+// SSE 数据帧」当作首响应时间的多层网关。
+func (s *traeCNCanonicalState) passthroughMetadata(writer io.Writer, name string, payload []byte) error {
+	if !s.preflightPassthrough || s.terminal {
+		return nil
+	}
+	if !json.Valid(payload) {
+		return nil
+	}
+	return writeTraeCanonicalEvent(writer, marshalTraeCanonicalEvent("response.metadata", map[string]any{
+		"response_id": s.responseID,
+		"sse_event":   name,
+		"metadata":    json.RawMessage(payload),
 	}))
 }
 
@@ -1697,7 +1720,10 @@ func (s *traeCNCanonicalState) consume(writer io.Writer, eventName string, data 
 		finishReason := traeFirstText(parsed, "finish_reason", "stop_reason", "reason")
 		return s.emitCompleted(writer, finishReason)
 	case "metadata", "timing_cost", "extra_info", "progress_notice", "queue_begin", "request_wait_in_queue", "queue_end":
-		// Provider lifecycle/diagnostic events do not carry model output.
+		// Provider lifecycle/diagnostic events do not carry model output. They are
+		// dropped by default; with the opt-in passthrough they are forwarded as
+		// real pre-content notifications instead (see passthroughMetadata).
+		return s.passthroughMetadata(writer, name, data)
 	default:
 		// Forward-compatible fallback for a renamed output event.
 		content := traeFirstText(parsed, "response", "content", "text", "message.content")
@@ -1728,6 +1754,42 @@ func (s *traeCNCanonicalState) consume(writer io.Writer, eventName string, data 
 // canonical Responses stream consumed by all three existing HTTP handlers.
 func traeCNCanonicalStream(source io.ReadCloser, model string) io.ReadCloser {
 	return traeCNCanonicalStreamForTools(source, model, nil, nil)
+}
+
+// traeCNPreflightContextKey 携带本次请求的「前置元数据立即下发」决策快照。
+// 由 handler 在建立上游 context 时写入，保证一次请求内策略不随热更新切换。
+type traeCNPreflightContextKey struct{}
+
+// WithTraeCNPreflightPassthrough 固定本次请求的前置元数据下发策略。
+func WithTraeCNPreflightPassthrough(ctx context.Context, enabled bool) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, traeCNPreflightContextKey{}, enabled)
+}
+
+// withTraeCNPreflightPassthroughSnapshot 只在尚未固定策略时写入快照。
+// 断线续传 worker 在受理任务时已冻结过一次决策（它的 context 不继承上游 context，
+// 必须自己固定）；执行路径再次经过这里时若重新按当前全局配置取值，会把那份冻结
+// 覆盖掉，同一条逻辑请求就会「前段按旧策略、续传段按新策略」。已有快照则原样保留。
+func withTraeCNPreflightPassthroughSnapshot(ctx context.Context, enabled bool) context.Context {
+	if ctx != nil {
+		if _, frozen := ctx.Value(traeCNPreflightContextKey{}).(bool); frozen {
+			return ctx
+		}
+	}
+	return WithTraeCNPreflightPassthrough(ctx, enabled)
+}
+
+// traeCNPreflightPassthroughForContext 读取请求快照；未固定时回落到全局配置，
+// 供直接调用执行器的场景与测试使用。
+func traeCNPreflightPassthroughForContext(ctx context.Context) bool {
+	if ctx != nil {
+		if enabled, ok := ctx.Value(traeCNPreflightContextKey{}).(bool); ok {
+			return enabled
+		}
+	}
+	return auth.TraeCNPreflightSSEPassthroughEnabled()
 }
 
 // traeCNCanonicalStreamForTools 额外接收客户端声明为 custom 的工具名，把这些工具的
@@ -1800,6 +1862,12 @@ func (w *traeCNKeepaliveWriter) Close() error {
 }
 
 func traeCNCanonicalStreamForTools(source io.ReadCloser, model string, bridges traeCNBridges, contracts traeCNContracts) io.ReadCloser {
+	return traeCNCanonicalStreamWithPreflight(source, model, bridges, contracts, auth.TraeCNPreflightSSEPassthroughEnabled())
+}
+
+// traeCNCanonicalStreamWithPreflight 允许调用方显式指定前置元数据下发策略，
+// 使转换器与本次请求的出口决策（含连续重试抑制）保持一致。
+func traeCNCanonicalStreamWithPreflight(source io.ReadCloser, model string, bridges traeCNBridges, contracts traeCNContracts, preflightPassthrough bool) io.ReadCloser {
 	reader, writer := io.Pipe()
 	go func() {
 		defer source.Close()
@@ -1810,6 +1878,7 @@ func traeCNCanonicalStreamForTools(source io.ReadCloser, model string, bridges t
 		keepalive := startTraeCNKeepalive(pipeWriter)
 		defer keepalive.Close()
 		state := newTraeCNCanonicalStateWithBridges(model, bridges, contracts)
+		state.preflightPassthrough = preflightPassthrough
 		if err := state.emitCreated(keepalive); err != nil {
 			return
 		}
@@ -2083,7 +2152,7 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 		return resp, nil
 	}
 	upstreamBody := wrapTraeCNCreditsRemainScanner(wrapTraeCNResumeUpstream(ctx, client, req, resp.Body), account)
-	canonicalStream := traeCNCanonicalStreamForTools(upstreamBody, model, bridges, contracts)
+	canonicalStream := traeCNCanonicalStreamWithPreflight(upstreamBody, model, bridges, contracts, traeCNPreflightPassthroughForContext(ctx))
 	// Chat and Messages handlers deliberately aggregate canonical SSE for their
 	// non-stream response types. Native Responses non-stream instead expects one
 	// response JSON object, so aggregate only that inbound protocol here.

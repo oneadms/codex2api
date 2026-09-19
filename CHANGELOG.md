@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **TRAECN gets its own default-off "immediate preflight metadata dispatch" switch.** The TRAECN channel previously dropped the provider notifications it receives before content generation (`metadata`, `progress_notice`, `queue_begin`, `request_wait_in_queue`, `queue_end`, `timing_cost`, `extra_info`) inside the canonical stream converter, so a downstream gateway that treats the first SSE data frame as time-to-first-response saw nothing until the model produced its first token. The new `preflight_sse_passthrough` flag on `PUT /api/admin/settings/traecn` (returned by the matching `GET`, persisted in the standalone `traecn_config` row, default `false`) forwards those notifications as real `response.metadata` events immediately, carrying the upstream `sse_event` name and payload. The TRAECN settings tab exposes it as an always-visible switch whose help text states the cost: enabling it commits HTTP 200 before the first content event, so an upstream failure inside that window can only be delivered as a 200 + SSE `response.failed` frame — real HTTP error codes, pre-first-token silent account rotation and overflow auto-compact are all unavailable there. Enabling continuous retry disables the switch automatically because that mode buffers the whole attempt; the decision is snapshotted per request so a hot update never changes an in-flight stream, and it is independent of the Codex-wide `codex_preflight_sse_passthrough`. The endpoint is now a partial update: `model_mapping` and the new flag can be submitted separately without resetting each other. Disabled (the default) the converter's output is byte-for-byte unchanged.
+
 ## v2.9.8 - 2026-09-16
 
 ### Features

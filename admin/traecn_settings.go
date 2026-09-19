@@ -11,27 +11,48 @@ import (
 )
 
 type traeCNSettingsResponse struct {
-	ModelMapping map[string]string `json:"model_mapping"`
-	Models       []string          `json:"models"`
+	ModelMapping            map[string]string `json:"model_mapping"`
+	PreflightSSEPassthrough bool              `json:"preflight_sse_passthrough"`
+	Models                  []string          `json:"models"`
 }
 
 func (h *Handler) GetTraeCNSettings(c *gin.Context) {
+	settings := auth.ConfiguredTraeCNSettings()
 	c.JSON(http.StatusOK, traeCNSettingsResponse{
-		ModelMapping: auth.ConfiguredTraeCNSettings().ModelMapping,
-		Models:       h.traeCNChannelModels(),
+		ModelMapping:            settings.ModelMapping,
+		PreflightSSEPassthrough: settings.PreflightSSEPassthrough,
+		Models:                  h.traeCNChannelModels(),
 	})
 }
 
-// UpdateTraeCNSettings 整体替换映射；空对象表示清空，未传字段不修改。
+// UpdateTraeCNSettings 局部更新：只替换请求里出现的字段，未传字段保持原值；
+// 传空对象表示清空映射。模型映射与「前置元数据立即下发」开关共用该接口，
+// 因此两者都可单独提交，互不覆盖。
 func (h *Handler) UpdateTraeCNSettings(c *gin.Context) {
 	var req struct {
-		ModelMapping *map[string]string `json:"model_mapping"`
+		ModelMapping            *map[string]string `json:"model_mapping"`
+		PreflightSSEPassthrough *bool              `json:"preflight_sse_passthrough"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.ModelMapping == nil {
-		writeError(c, http.StatusBadRequest, "model_mapping 必须是模型名称到目标模型的对象")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "请求体必须是包含 model_mapping 或 preflight_sse_passthrough 的对象")
 		return
 	}
-	settings, err := auth.NormalizeTraeCNSettings(auth.TraeCNSettings{ModelMapping: *req.ModelMapping})
+	if req.ModelMapping == nil && req.PreflightSSEPassthrough == nil {
+		writeError(c, http.StatusBadRequest, "至少需要提供 model_mapping 或 preflight_sse_passthrough")
+		return
+	}
+	current := auth.ConfiguredTraeCNSettings()
+	next := auth.TraeCNSettings{
+		ModelMapping:            current.ModelMapping,
+		PreflightSSEPassthrough: current.PreflightSSEPassthrough,
+	}
+	if req.PreflightSSEPassthrough != nil {
+		next.PreflightSSEPassthrough = *req.PreflightSSEPassthrough
+	}
+	if req.ModelMapping != nil {
+		next.ModelMapping = *req.ModelMapping
+	}
+	settings, err := auth.NormalizeTraeCNSettings(next)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err.Error())
 		return
@@ -64,6 +85,10 @@ func (h *Handler) UpdateTraeCNSettings(c *gin.Context) {
 		return
 	}
 	auth.SetConfiguredTraeCNSettings(settings)
-	log.Printf("设置已更新: traecn_config mappings=%d", len(settings.ModelMapping))
-	c.JSON(http.StatusOK, traeCNSettingsResponse{ModelMapping: settings.ModelMapping, Models: models})
+	log.Printf("设置已更新: traecn_config mappings=%d preflight_sse_passthrough=%t", len(settings.ModelMapping), settings.PreflightSSEPassthrough)
+	c.JSON(http.StatusOK, traeCNSettingsResponse{
+		ModelMapping:            settings.ModelMapping,
+		PreflightSSEPassthrough: settings.PreflightSSEPassthrough,
+		Models:                  models,
+	})
 }

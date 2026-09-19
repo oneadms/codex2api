@@ -287,6 +287,10 @@ func (h *Handler) serveTraeCNResumableResponses(c *gin.Context, validated respon
 		worker := c.Copy()
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 20*time.Minute)
 		ctx = context.WithValue(ctx, traeCNResumeUpstreamContextKey{}, traeCNResumeUpstreamEnabled())
+		// 前置元数据下发策略随任务冻结：worker 用 WithoutCancel 克隆出独立 context，
+		// 不继承上游 context 的快照，若在此刻之后热更新开关，同一条逻辑请求会出现
+		// 「前段按旧策略、续传段按新策略」的割裂。在受理时取一次快照固定下来。
+		ctx = WithTraeCNPreflightPassthrough(ctx, traeCNPreflightPassthrough(c))
 		worker.Request = c.Request.Clone(ctx)
 		writer := newTraeCNResumeWriter(task)
 		worker.Writer = writer

@@ -32,6 +32,8 @@ export interface AntigravitySettingsResponse {
 
 export interface TraeCNSettingsResponse {
   model_mapping: Record<string, string>
+  /** 默认关闭：开启后把上游内容生成前的元数据通知立即下发（会提前提交 200）。 */
+  preflight_sse_passthrough: boolean
   models: string[]
 }
 

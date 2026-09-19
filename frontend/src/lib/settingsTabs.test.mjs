@@ -48,7 +48,9 @@ test('channel-specific cards live in their channel tab, shared cards in general'
   assert.ok(panel('grok').includes('settings.grokSettingsTitle'))
   assert.ok(panel('traecn').includes('<TraeCNModelMapping />'))
   assert.ok(panel('traecn').includes('settings.traecnDefaultModel'))
+  assert.ok(panel('traecn').includes('<TraeCNPreflightPassthrough />'))
   assert.ok(!codex.includes('settings.traecnDefaultModel'))
+  assert.ok(!codex.includes('settings.traecnPreflightSSEPassthrough'), 'TRAECN preflight switch must not live in the Codex tab')
   const appearance = panel('appearance')
   assert.ok(appearance.includes('settings.display') && appearance.includes('settings.backgroundImage'))
   const general = panel('general')
@@ -170,6 +172,18 @@ test('single-toggle compatibility settings are one row-list card, not three narr
   for (const locale of [zh, en]) {
     assert.equal(typeof locale.settings.codexCompatToggles, 'string')
     assert.equal(typeof locale.settings.codexCompatTogglesDesc, 'string')
+  }
+})
+
+test('TRAECN preflight metadata switch documents its cost in both locales', () => {
+  assert.match(settings, /<TraeCNPreflightPassthrough \/>/)
+  for (const locale of [zh, en]) {
+    for (const key of ['traecnPreflightSSEPassthrough', 'traecnPreflightSSEPassthroughDesc', 'traecnPreflightSSEPassthroughEnabled', 'traecnPreflightSSEPassthroughWarning', 'traecnPreflightSSEPassthroughSaved']) {
+      assert.equal(typeof locale.settings?.[key], 'string', `settings.${key}`)
+    }
+    // 界面说明必须点明对首内容前错误处理与重试的影响，否则管理员看不到代价。
+    assert.match(locale.settings.traecnPreflightSSEPassthroughWarning, /200/, 'warning must state the early 200 commit')
+    assert.match(locale.settings.traecnPreflightSSEPassthroughWarning, /连续重试|continuous retry/, 'warning must state the continuous-retry interaction')
   }
 })
 
