@@ -8,6 +8,9 @@ codex2api
 
 # Go
 /vendor/
+# 本地 Go 构建/模块缓存（仓库内自定义 GOCACHE/GOMODCACHE 时产生，勿入库）
+/.gocache/
+/.gomodcache/
 
 # Frontend
 frontend/node_modules/

@@ -1,0 +1,61 @@
+# ============================================================
+# 本地 IDEA Debug 专用：只起依赖（PostgreSQL + Redis），不起应用容器
+# 应用本体由 IDEA / dlv 在宿主机上跑，直接连下面的端口。
+#
+#   make dev-up      # 启动依赖
+#   make dev-down    # 停止依赖
+#   make dev-reset   # 清空数据卷重来
+#
+# 与 docker-compose.yml / docker-compose.local.yml 的区别：
+#   - 不构建、不运行 codex2api 容器，避免占用 8080 导致 IDEA 起不来
+#   - 端口只绑定 127.0.0.1，不对局域网暴露
+#   - 独立容器名与数据卷，不和线上/compose 部署互相覆盖
+# ============================================================
+name: codex2api-dev
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: codex2api-dev-postgres
+    environment:
+      POSTGRES_USER: ${DATABASE_USER:-codex2api}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-codex2api}
+      POSTGRES_DB: ${DATABASE_NAME:-codex2api}
+      PGDATA: /var/lib/postgresql/data
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      # 只监听本机回环，避免把开发库暴露到局域网
+      - "127.0.0.1:${DATABASE_PORT:-5432}:5432"
+    volumes:
+      - pgdata-dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-codex2api} -d ${DATABASE_NAME:-codex2api}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: codex2api-dev-redis
+    command: redis-server --appendonly yes
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata-dev:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    restart: unless-stopped
+
+volumes:
+  pgdata-dev:
+    name: codex2api-dev_pgdata
+  redisdata-dev:
+    name: codex2api-dev_redisdata
