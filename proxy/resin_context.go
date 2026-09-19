@@ -75,10 +75,6 @@ func BuildReverseProxyURLForContext(ctx context.Context, targetURL, platformName
 	return buildReverseProxyURL(ResinConfigFromContext(ctx), targetURL, platformName)
 }
 
-func BuildWebSocketURLForContext(ctx context.Context, targetURL, platformName string) string {
-	return buildWebSocketURL(ResinConfigFromContext(ctx), targetURL, platformName)
-}
-
 // WithFreshCodexConnection 让手工测连重新握手，避免复用连接掩盖当前出口状态。
 func WithFreshCodexConnection(ctx context.Context) context.Context {
 	if ctx == nil {
