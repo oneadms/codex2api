@@ -274,8 +274,8 @@ func runCodexTicketHarvestOnce(ctx context.Context, db *database.DB, store *auth
 	refreshCodexTickets(ctx, db, store, settings)
 }
 
-// refreshCodexTickets 逐个账号、逐个门控模型打票。已有可用门票且未进入重打窗口的
-// 直接跳过；其余用专用代理铸造一张并发布。
+// refreshCodexTickets 逐个账号、逐个门控模型打票。已有可用的账号本地门票且未进入重打窗口的
+// 直接跳过，并将其登记到同套餐共享池；本地票不可用时仍尝试为账号自己打票。
 func refreshCodexTickets(ctx context.Context, db *database.DB, store *auth.Store, settings auth.CodexTicketSettings) {
 	proxyURL := strings.TrimSpace(settings.HarvestProxyURL)
 	if proxyURL == "" || len(settings.Models) == 0 {
@@ -297,13 +297,14 @@ func refreshCodexTickets(ctx context.Context, db *database.DB, store *auth.Store
 		if !acc.CanHarvestCodexTicket(time.Now()) {
 			continue
 		}
-		targetLen := auth.CodexTicketTargetLengthFor(acc.GetPlanType())
 		for _, model := range settings.Models {
 			if ctx.Err() != nil || budget <= 0 {
 				return
 			}
 			now := time.Now()
+			targetLen := auth.CodexTicketTargetLengthFor(acc.GetPlanType())
 			if ticket := acc.CodexTicketForModel(model, now, targetLen); ticket != nil {
+				auth.PublishCodexTicketToSharedPool(acc, ticket)
 				if !ticket.NeedsRefresh(now, auth.CodexTicketRefreshBefore()) {
 					continue
 				}

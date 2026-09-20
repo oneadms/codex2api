@@ -104,8 +104,8 @@ func prepareCodexTurnStateInjection(ctx context.Context, account *auth.Account, 
 	return ctx, requestBody, headers
 }
 
-// codexTicketInjection 从后台打票捕获的门票里取本次要注入的值。门控生效、模型命中、
-// 且该 (账号, 模型) 上存在未过期门票时返回门票；否则返回 ok=false。
+// codexTicketInjection 从账号自己的门票或同套餐共享池里取本次要注入的门票。门控生效、模型命中、
+// 且该账号本地或共享池存在未过期门票时返回门票；否则返回 ok=false。
 //
 // 门控的判定顺序刻意与注入一致：先看开关/代理/名单是否齐备，再看模型是否在名单内，
 // 最后才查票。FailClosed 的拒绝发生在 Executor 里（需要返回错误），这里只负责取值。
@@ -123,7 +123,7 @@ func codexTicketInjection(account *auth.Account, models ...string) (string, bool
 		return "", false
 	}
 	targetLen := auth.CodexTicketTargetLengthFor(account.GetPlanType())
-	return account.CodexTicketInjection(time.Now(), targetLen, gated...)
+	return account.CodexTicketInjectionWithShared(time.Now(), targetLen, gated...)
 }
 
 // CodexTicketGateBlocked 判定本次是否应被 FailClosed 门控拒绝：开关打开、已配置代理
@@ -147,7 +147,7 @@ func CodexTicketGateBlocked(ctx context.Context, account *auth.Account, clientMo
 		return "", false
 	}
 	targetLen := auth.CodexTicketTargetLengthFor(account.GetPlanType())
-	if _, ok := account.CodexTicketInjection(time.Now(), targetLen, gated...); ok {
+	if _, ok := account.CodexTicketInjectionWithShared(time.Now(), targetLen, gated...); ok {
 		return "", false
 	}
 	return gated[0], true

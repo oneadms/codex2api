@@ -68,7 +68,7 @@ func (h *Handler) codexTicketReadyAccountCounts(models []string) (ready, total i
 		}
 		total++
 		targetLen := auth.CodexTicketTargetLengthFor(account.GetPlanType())
-		if _, ok := account.CodexTicketInjection(now, targetLen, models...); ok {
+		if _, ok := account.CodexTicketInjectionWithShared(now, targetLen, models...); ok {
 			ready++
 		}
 	}

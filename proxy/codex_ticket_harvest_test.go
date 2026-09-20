@@ -334,6 +334,54 @@ func TestCodexTicketGateSkipsUnsupportedAccounts(t *testing.T) {
 	}
 }
 
+func TestCodexTicketInjectionUsesSharedSamePlanFallback(t *testing.T) {
+	withCodexTicketGate(t, "gpt-6-astra")
+	auth.ResetCodexTicketSharedPoolForTest()
+	t.Cleanup(auth.ResetCodexTicketSharedPoolForTest)
+	now := time.Now()
+	state := testTicketState(now, auth.CodexTicketTeamBlocks)
+	source := &auth.Account{DBID: 201, PlanType: "self_serve_business_prolite"}
+	auth.PublishCodexTicketToSharedPool(source, &auth.CodexTicket{
+		Model: "gpt-6-astra", State: state, Length: len(state), IssuedAt: now,
+		CapturedAt: now, ExpiresAt: now.Add(50 * time.Minute),
+	})
+	destination := &auth.Account{DBID: 202, PlanType: "self_serve_business_prolite"}
+	if got, ok := codexTicketInjection(destination, "gpt-6-astra"); !ok || got != state {
+		t.Fatalf("same-plan account must use shared ticket: got=%q ok=%v", got, ok)
+	}
+	ownState := testTicketState(now, auth.CodexTicketTeamBlocks)
+	ownState = ownState[:len(ownState)-1] + "B"
+	destination.CodexTickets = map[string]*auth.CodexTicket{
+		"gpt-6-astra": {Model: "gpt-6-astra", State: ownState, Length: len(ownState), IssuedAt: now, ExpiresAt: now.Add(time.Hour)},
+	}
+	if got, ok := codexTicketInjection(destination, "gpt-6-astra"); !ok || got != ownState {
+		t.Fatalf("own ticket must take priority: got=%q ok=%v", got, ok)
+	}
+	if _, ok := codexTicketInjection(&auth.Account{PlanType: "team"}, "gpt-6-astra"); ok {
+		t.Fatal("different plan type must not use the shared ticket")
+	}
+}
+
+func TestCodexTicketGateUsesSharedSamePlanFallback(t *testing.T) {
+	withCodexTicketGate(t, "gpt-6-astra")
+	auth.ResetCodexTicketSharedPoolForTest()
+	t.Cleanup(auth.ResetCodexTicketSharedPoolForTest)
+	now := time.Now()
+	state := testTicketState(now, auth.CodexTicketTeamBlocks)
+	source := &auth.Account{DBID: 203, PlanType: "self_serve_business_prolite"}
+	auth.PublishCodexTicketToSharedPool(source, &auth.CodexTicket{
+		Model: "gpt-6-astra", State: state, Length: len(state), IssuedAt: now,
+		CapturedAt: now, ExpiresAt: now.Add(50 * time.Minute),
+	})
+	destination := &auth.Account{DBID: 204, PlanType: "self_serve_business_prolite"}
+	if model, blocked := CodexTicketGateBlocked(context.Background(), destination, "", "gpt-6-astra"); blocked {
+		t.Fatalf("shared ticket must satisfy FailClosed gate, blocked on %q", model)
+	}
+	if got, ok := codexTicketInjection(destination, "gpt-6-astra"); !ok || got != state {
+		t.Fatalf("shared ticket injection = %q, ok=%v; want source ticket", got, ok)
+	}
+}
+
 func TestFireCodexTicketHarvestTeam5x(t *testing.T) {
 	withCodexTicketGate(t, "gpt-6-astra")
 	// A small positive clock skew is within the existing tolerance.

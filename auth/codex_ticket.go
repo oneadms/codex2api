@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -14,8 +15,7 @@ import (
 //
 // 与 codex_turn_state.go 的手工注入互补：
 //   - 手工注入：运维把上游铸造的值粘到账号上，一份值 + 模型名单；
-//   - 自动打票：后台用合成请求向上游「铸造」门票，按 (账号, 模型) 分别持有，
-//     临期前自动重打，业务请求上覆盖客户端回带值与手工配置值。
+//   - 自动打票：后台用合成请求向上游「铸造」门票，优先归属铸造账号；同套餐账号在本地票不可用时可按模型回退到共享池，临期前自动重打。
 //
 // 门票不是身份：它只影响上游的回合状态校验，不进调度、不影响请求归属。
 //
@@ -173,7 +173,8 @@ type CodexTicket struct {
 	CapturedAt time.Time `json:"captured_at"`
 	// ExpiresAt 是网关侧的失效时刻（TTL 与签发时刻+有效期取较早者）。
 	ExpiresAt time.Time `json:"expires_at"`
-	// Identity 是铸造该门票的账号指纹，防止账号换凭据后拿到别人的票。
+	// Identity 记录铸造该门票的来源账号指纹，便于诊断与后续身份策略使用。共享回退
+	// 不会把门票复制到其他账号的持久化凭据中。
 	Identity string `json:"identity,omitempty"`
 	// Standby 是热备门票：新票落库时旧票仍未过期，则降级为备用，
 	// 当前票被上游拒绝时立刻顶上，不必等下一个探测周期。
@@ -232,8 +233,8 @@ func CodexTicketExpiry(capturedAt, issuedAt time.Time, ttl time.Duration) time.T
 	return expires
 }
 
-// CodexTicketIdentity 返回账号指纹：工作区 ID + 邮箱的哈希。门票与铸造账号的出站
-// 身份绑定，账号被重新授权成另一个工作区后旧票必须作废。
+// CodexTicketIdentity 返回账号指纹：工作区 ID + 邮箱的哈希。它记录门票来源，
+// 共享池是否允许回退由套餐类型与模型键决定。
 func CodexTicketIdentity(accountID, email string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.TrimSpace(accountID)+"\x00"+strings.TrimSpace(email))))
 }
@@ -293,7 +294,7 @@ func (a *Account) CodexTicketForModel(model string, now time.Time, targetLen int
 		return nil
 	}
 	a.mu.RLock()
-	ticket := a.CodexTickets[key]
+	ticket := cloneCodexTicket(a.CodexTickets[key])
 	a.mu.RUnlock()
 	if ticket == nil {
 		return nil
@@ -307,8 +308,8 @@ func (a *Account) CodexTicketForModel(model string, now time.Time, targetLen int
 	return nil
 }
 
-// CodexTicketInjection 返回本次请求该注入的门票。models 传入客户端模型与上游模型，
-// 任一命中即可——映射改写之后两者常常不是同一个名字。
+// CodexTicketInjection 返回该账号本次请求该注入的门票。
+// 仅查询账号自己的门票；需要共享池回退时使用 CodexTicketInjectionWithShared。
 func (a *Account) CodexTicketInjection(now time.Time, targetLen int, models ...string) (string, bool) {
 	if a == nil {
 		return "", false
@@ -319,6 +320,126 @@ func (a *Account) CodexTicketInjection(now time.Time, targetLen int, models ...s
 		}
 	}
 	return "", false
+}
+
+const codexTicketSharedPoolKeySeparator = "\x00"
+
+var codexTicketSharedPool = struct {
+	sync.RWMutex
+	tickets map[string]*CodexTicket
+}{tickets: make(map[string]*CodexTicket)}
+
+func codexTicketSharedPoolKey(planType, model string) string {
+	return strings.ToLower(strings.TrimSpace(planType)) + codexTicketSharedPoolKeySeparator + NormalizeCodexTicketModel(model)
+}
+
+func cloneCodexTicket(ticket *CodexTicket) *CodexTicket {
+	if ticket == nil {
+		return nil
+	}
+	copy := *ticket
+	copy.Standby = cloneCodexTicket(ticket.Standby)
+	return &copy
+}
+
+func publishCodexTicketToSharedPool(planType string, ticket *CodexTicket) {
+	if ticket == nil || NormalizeCodexTicketModel(ticket.Model) == "" {
+		return
+	}
+	key := codexTicketSharedPoolKey(planType, ticket.Model)
+	copy := cloneCodexTicket(ticket)
+	copy.Model = NormalizeCodexTicketModel(copy.Model)
+	codexTicketSharedPool.Lock()
+	defer codexTicketSharedPool.Unlock()
+	current := codexTicketSharedPool.tickets[key]
+	if current == nil || copy.CapturedAt.After(current.CapturedAt) || (copy.CapturedAt.Equal(current.CapturedAt) && copy.State != current.State) {
+		if current != nil && !current.Revoked && current.State != copy.State && copy.Standby == nil {
+			copy.Standby = cloneCodexTicket(current)
+		}
+		codexTicketSharedPool.tickets[key] = copy
+	}
+}
+
+// PublishCodexTicketToSharedPool registers an account's valid ticket for same-plan
+// fallback without copying it into another account's credentials.
+func PublishCodexTicketToSharedPool(account *Account, ticket *CodexTicket) {
+	if account == nil || ticket == nil {
+		return
+	}
+	publishCodexTicketToSharedPool(account.GetPlanType(), ticket)
+}
+
+func sharedCodexTicketForModel(planType, model string, now time.Time, targetLen int) *CodexTicket {
+	key := codexTicketSharedPoolKey(planType, model)
+	codexTicketSharedPool.RLock()
+	ticket := cloneCodexTicket(codexTicketSharedPool.tickets[key])
+	codexTicketSharedPool.RUnlock()
+	if ticket == nil {
+		return nil
+	}
+	if ticket.Valid(now, targetLen) {
+		return ticket
+	}
+	if ticket.Standby != nil && ticket.Standby.Valid(now, targetLen) {
+		return ticket.Standby
+	}
+	codexTicketSharedPool.Lock()
+	if current := codexTicketSharedPool.tickets[key]; current != nil && !current.Valid(now, targetLen) && (current.Standby == nil || !current.Standby.Valid(now, targetLen)) {
+		delete(codexTicketSharedPool.tickets, key)
+	}
+	codexTicketSharedPool.Unlock()
+	return nil
+}
+
+// CodexTicketInjectionWithShared prefers the account's own ticket and falls back
+// to a ticket captured by another account with the exact same plan type and model.
+func (a *Account) CodexTicketInjectionWithShared(now time.Time, targetLen int, models ...string) (string, bool) {
+	if a == nil {
+		return "", false
+	}
+	if state, ok := a.CodexTicketInjection(now, targetLen, models...); ok {
+		return state, true
+	}
+	for _, model := range models {
+		if ticket := sharedCodexTicketForModel(a.GetPlanType(), model, now, targetLen); ticket != nil {
+			return ticket.State, true
+		}
+	}
+	return "", false
+}
+
+// RevokeSharedCodexTicket removes the matching shared ticket and its standby.
+// Matching the state prevents a stale 401 from revoking a newer replacement.
+func RevokeSharedCodexTicket(planType, model, state string) bool {
+	key := codexTicketSharedPoolKey(planType, model)
+	codexTicketSharedPool.Lock()
+	defer codexTicketSharedPool.Unlock()
+	current := codexTicketSharedPool.tickets[key]
+	if current == nil {
+		return false
+	}
+	if current.State == state {
+		if current.Standby != nil && current.Standby.Valid(time.Now(), current.Length) {
+			promoted := cloneCodexTicket(current.Standby)
+			promoted.Standby = nil
+			codexTicketSharedPool.tickets[key] = promoted
+		} else {
+			delete(codexTicketSharedPool.tickets, key)
+		}
+		return true
+	}
+	if current.Standby != nil && current.Standby.State == state {
+		current.Standby = nil
+		return true
+	}
+	return false
+}
+
+// ResetCodexTicketSharedPoolForTest clears process-global ticket state between tests.
+func ResetCodexTicketSharedPoolForTest() {
+	codexTicketSharedPool.Lock()
+	defer codexTicketSharedPool.Unlock()
+	codexTicketSharedPool.tickets = make(map[string]*CodexTicket)
 }
 
 // CodexTicketStatus 是单个模型的门票状态投影，供管理端展示。
@@ -493,12 +614,12 @@ func (s *Store) PublishCodexTicket(id int64, ticket *CodexTicket) {
 		return
 	}
 	account.mu.Lock()
-	defer account.mu.Unlock()
 	if account.CodexTickets == nil {
 		account.CodexTickets = map[string]*CodexTicket{}
 	}
 	key := NormalizeCodexTicketModel(ticket.Model)
 	if key == "" {
+		account.mu.Unlock()
 		return
 	}
 	next := *ticket
@@ -508,6 +629,8 @@ func (s *Store) PublishCodexTicket(id int64, ticket *CodexTicket) {
 		next.Standby = &previous
 	}
 	account.CodexTickets[key] = &next
+	account.mu.Unlock()
+	PublishCodexTicketToSharedPool(account, &next)
 }
 
 // RevokeCodexTicket 把该模型上当前门票标记为已撤销，并在有热备票时立即启用它。
@@ -535,6 +658,33 @@ func (s *Store) RevokeCodexTicket(id int64, model string) bool {
 		next.Revoked = true
 	}
 	account.CodexTickets[key] = &next
+	return true
+}
+
+// RevokeCodexTicketForState revokes the account-local ticket only when it still
+// matches state. This prevents a stale response from removing a newer ticket.
+func (s *Store) RevokeCodexTicketForState(id int64, model, state string) bool {
+	if s == nil {
+		return false
+	}
+	account := s.FindByID(id)
+	if account == nil {
+		return false
+	}
+	account.mu.Lock()
+	defer account.mu.Unlock()
+	key := NormalizeCodexTicketModel(model)
+	current := account.CodexTickets[key]
+	if current == nil || current.State != state {
+		return false
+	}
+	if current.Standby != nil {
+		next := *current.Standby
+		next.Standby = nil
+		account.CodexTickets[key] = &next
+	} else {
+		current.Revoked = true
+	}
 	return true
 }
 

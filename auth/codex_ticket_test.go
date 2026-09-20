@@ -121,6 +121,45 @@ func TestCodexTicketTargetLengthTeam5xAliases(t *testing.T) {
 	}
 }
 
+func TestCodexTicketSharedPoolPrefersOwnAndFallsBackByPlanAndModel(t *testing.T) {
+	ResetCodexTicketSharedPoolForTest()
+	t.Cleanup(ResetCodexTicketSharedPoolForTest)
+	now := time.Now()
+	state := buildTestTicketState(now, CodexTicketTeamBlocks)
+	shared := &CodexTicket{
+		Model: "gpt-6-astra", State: state, Length: len(state), IssuedAt: now,
+		CapturedAt: now, ExpiresAt: now.Add(50 * time.Minute),
+	}
+	source := &Account{DBID: 101, PlanType: "self_serve_business_prolite"}
+	PublishCodexTicketToSharedPool(source, shared)
+
+	destination := &Account{DBID: 102, PlanType: "self_serve_business_prolite"}
+	if got, ok := destination.CodexTicketInjectionWithShared(now, CodexTicketExpectedLength(CodexTicketTeamBlocks), "gpt-6-astra"); !ok || got != state {
+		t.Fatalf("same-plan account must fall back to shared ticket: got=%q ok=%v", got, ok)
+	}
+	if _, ok := (&Account{PlanType: "team"}).CodexTicketInjectionWithShared(now, CodexTicketExpectedLength(CodexTicketTeamBlocks), "gpt-6-astra"); ok {
+		t.Fatal("a different raw plan type must not use the shared ticket")
+	}
+	if _, ok := destination.CodexTicketInjectionWithShared(now, CodexTicketExpectedLength(CodexTicketTeamBlocks), "gpt-5.5"); ok {
+		t.Fatal("a different model must not use the shared ticket")
+	}
+
+	ownState := buildTestTicketState(now, CodexTicketTeamBlocks)
+	ownState = ownState[:len(ownState)-1] + "B"
+	destination.CodexTickets = map[string]*CodexTicket{
+		"gpt-6-astra": {Model: "gpt-6-astra", State: ownState, Length: len(ownState), IssuedAt: now, ExpiresAt: now.Add(time.Hour)},
+	}
+	if got, ok := destination.CodexTicketInjectionWithShared(now, CodexTicketExpectedLength(CodexTicketTeamBlocks), "gpt-6-astra"); !ok || got != ownState {
+		t.Fatalf("own ticket must take priority: got=%q ok=%v", got, ok)
+	}
+	if !RevokeSharedCodexTicket(source.GetPlanType(), "gpt-6-astra", state) {
+		t.Fatal("matching shared ticket must be revocable")
+	}
+	if _, ok := (&Account{PlanType: source.GetPlanType()}).CodexTicketInjectionWithShared(now, CodexTicketExpectedLength(CodexTicketTeamBlocks), "gpt-6-astra"); ok {
+		t.Fatal("revoked shared ticket must no longer be available")
+	}
+}
+
 func TestCodexTicketInjection(t *testing.T) {
 	blocks := CodexTicketPersonalBlocks
 	now := time.Now()

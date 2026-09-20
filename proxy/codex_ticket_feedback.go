@@ -71,28 +71,34 @@ func observeCodexTicketFeedback(account *auth.Account, injected, upstream string
 
 	// 规则 2：注入的票被上游拒绝 → 撤销，让热备票顶上。
 	if injected != "" && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
-		model := codexTicketFeedbackModel(account, targetLen)
+		model := codexTicketFeedbackModel(account, targetLen, injected)
 		if model == "" {
 			return
 		}
-		if sink.store.RevokeCodexTicket(account.ID(), model) {
-			log.Printf("[codex-ticket] 账号 %d %s 门票被上游拒绝(status=%d)，已撤销", account.ID(), model, status)
+		localRevoked := sink.store.RevokeCodexTicketForState(account.ID(), model, injected)
+		sharedRevoked := auth.RevokeSharedCodexTicket(account.GetPlanType(), model, injected)
+		if localRevoked || sharedRevoked {
+			log.Printf("[codex-ticket] 账号 %d %s 门票被上游拒绝(status=%d)，已撤销%s", account.ID(), model, status, map[bool]string{true: "（含共享池）", false: ""}[sharedRevoked])
 		}
 	}
 }
 
-// codexTicketFeedbackModel 找出该账号当前持有门票、且命中门控名单的模型。反馈路径
-// 拿不到请求模型（响应阶段只有账号），只能按"账号手上有票的模型"反查。
-func codexTicketFeedbackModel(account *auth.Account, targetLen int) string {
+// codexTicketFeedbackModel 找出本次被注入的门控模型。共享票可能不在当前账号的
+// CodexTickets 中，因此必须同时检查账号本地票和同套餐共享池。
+func codexTicketFeedbackModel(account *auth.Account, targetLen int, expected ...string) string {
 	if account == nil {
 		return ""
+	}
+	match := ""
+	if len(expected) > 0 {
+		match = expected[0]
 	}
 	now := time.Now()
 	for _, model := range auth.ConfiguredCodexTicketSettings().Models {
 		if !auth.CodexTicketModelGated(model) {
 			continue
 		}
-		if account.CodexTicketForModel(model, now, targetLen) != nil {
+		if state, ok := account.CodexTicketInjectionWithShared(now, targetLen, model); ok && (match == "" || state == match) {
 			return model
 		}
 	}
