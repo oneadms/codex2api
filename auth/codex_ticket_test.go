@@ -95,6 +95,32 @@ func TestCodexTicketExpectedLength(t *testing.T) {
 	}
 }
 
+func TestCodexTicketTargetLengthTeam5xAliases(t *testing.T) {
+	for _, plan := range []string{
+		"team", "teamplus", "business", "enterprise", "team5x", "team-5x", "team_5x", "team 5x", " TEAM5X ",
+		"self_serve_business_prolite", " SELF_SERVE_BUSINESS_PROLITE ",
+	} {
+		t.Run(plan, func(t *testing.T) {
+			if got := CodexTicketExpectedBlocks(plan); got != CodexTicketTeamBlocks {
+				t.Fatalf("plan %q blocks = %d, want %d", plan, got, CodexTicketTeamBlocks)
+			}
+			for _, configured := range []int{0, CodexTicketDefaultTargetLength} {
+				if got := CodexTicketTargetLength(plan, configured); got != 332 {
+					t.Fatalf("plan %q configured=%d length=%d, want 332", plan, configured, got)
+				}
+			}
+			if got := CodexTicketTargetLength(plan, 400); got != 400 {
+				t.Fatalf("explicit target length must be preserved, got %d", got)
+			}
+		})
+	}
+	for _, plan := range []string{"", "free", "plus", "pro", "prolite", "pro_lite", "pro-lite", "personal", "unknown", "teamwork"} {
+		if got := CodexTicketTargetLength(plan, 0); got != CodexTicketDefaultTargetLength {
+			t.Errorf("unrelated plan %q must retain the personal default, got %d", plan, got)
+		}
+	}
+}
+
 func TestCodexTicketInjection(t *testing.T) {
 	blocks := CodexTicketPersonalBlocks
 	now := time.Now()

@@ -334,20 +334,69 @@ func TestCodexTicketGateSkipsUnsupportedAccounts(t *testing.T) {
 	}
 }
 
-func TestFireCodexTicketHarvestRejectsUnusableTickets(t *testing.T) {
+func TestFireCodexTicketHarvestTeam5x(t *testing.T) {
 	withCodexTicketGate(t, "gpt-6-astra")
+	// A small positive clock skew is within the existing tolerance.
+	issuedAt := time.Now().Add(10 * time.Second)
+	state := testTicketState(issuedAt, auth.CodexTicketTeamBlocks)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(codexTurnStateHeader, state)
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
+	}))
+	t.Cleanup(server.Close)
+	previousURL := codexTicketProbeURLForTest
+	codexTicketProbeURLForTest = server.URL
+	t.Cleanup(func() { codexTicketProbeURLForTest = previousURL })
+	for _, plan := range []string{
+		"team", "teamplus", "business", "enterprise", "team5x", "team-5x", "team_5x", "team 5x", " TEAM5X ",
+		"self_serve_business_prolite", " SELF_SERVE_BUSINESS_PROLITE ",
+	} {
+		t.Run(plan, func(t *testing.T) {
+			account := &auth.Account{AccessToken: "team-test-at", PlanType: plan}
+			res := fireCodexTicketHarvest(context.Background(), account, "gpt-6-astra", server.URL, 5*time.Second)
+			if res.Result != "success" || res.HTTPStatus != http.StatusOK || res.State != state || res.Err != nil {
+				t.Fatalf("Team 5x harvest result=%s status=%d err=%v", res.Result, res.HTTPStatus, res.Err)
+			}
+			account.CodexTickets = map[string]*auth.CodexTicket{
+				"gpt-6-astra": {State: res.State, Length: len(res.State), IssuedAt: issuedAt, ExpiresAt: time.Now().Add(time.Hour)},
+			}
+			if _, blocked := CodexTicketGateBlocked(context.Background(), account, "", "gpt-6-astra"); blocked {
+				t.Fatal("fresh Team 5x ticket must pass the same plan-derived length gate")
+			}
+			if got, ok := codexTicketInjection(account, "gpt-6-astra"); !ok || got != state {
+				t.Fatal("fresh Team 5x ticket must be injectable")
+			}
+		})
+	}
+}
+
+func TestFireCodexTicketHarvestRejectsUnusableTickets(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		state string
+		name           string
+		state          string
+		plan           string
+		configured     int
+		expectedLength int
+		validation     string
 	}{
-		{name: "missing"},
-		{name: "wrong length", state: "gAAAAAshort"},
-		{name: "malformed envelope", state: "gAAAAA" + strings.Repeat("a", 286)},
-		{name: "wrong plan length", state: testTicketState(time.Now(), auth.CodexTicketTeamBlocks)},
-		{name: "expired", state: testTicketState(time.Now().Add(-2*time.Hour), auth.CodexTicketPersonalBlocks)},
-		{name: "future issue time", state: testTicketState(time.Now().Add(time.Hour), auth.CodexTicketPersonalBlocks)},
+		{name: "missing", plan: "plus", expectedLength: 292, validation: "missing"},
+		{name: "wrong length", state: "gAAAAAshort", plan: "plus", expectedLength: 292, validation: "shape"},
+		{name: "malformed envelope", state: "gAAAAA" + strings.Repeat("a", 286), plan: "plus", expectedLength: 292, validation: "shape"},
+		{name: "wrong plan length", state: testTicketState(time.Now(), auth.CodexTicketTeamBlocks), plan: "plus", expectedLength: 292, validation: "length"},
+		{name: "teamplus receives personal length", state: testTicketState(time.Now(), auth.CodexTicketPersonalBlocks), plan: "teamplus", expectedLength: 332, validation: "length"},
+		{name: "team5x receives personal length", state: testTicketState(time.Now(), auth.CodexTicketPersonalBlocks), plan: "team5x", expectedLength: 332, validation: "length"},
+		{name: "self-serve Team 5x receives personal length", state: testTicketState(time.Now(), auth.CodexTicketPersonalBlocks), plan: "self_serve_business_prolite", expectedLength: 332, validation: "length"},
+		{name: "explicit length override", state: testTicketState(time.Now(), auth.CodexTicketTeamBlocks), plan: "self_serve_business_prolite", configured: 400, expectedLength: 400, validation: "length"},
+		{name: "expired", state: testTicketState(time.Now().Add(-2*time.Hour), auth.CodexTicketPersonalBlocks), plan: "plus", expectedLength: 292, validation: "time"},
+		{name: "future issue time", state: testTicketState(time.Now().Add(time.Hour), auth.CodexTicketPersonalBlocks), plan: "plus", expectedLength: 292, validation: "time"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			withCodexTicketGate(t, "gpt-6-astra")
+			if tc.configured > 0 {
+				settings := auth.ConfiguredCodexTicketSettings()
+				settings.TargetLength = tc.configured
+				auth.SetConfiguredCodexTicketSettings(settings)
+			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set(codexTurnStateHeader, tc.state)
 				_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
@@ -356,13 +405,33 @@ func TestFireCodexTicketHarvestRejectsUnusableTickets(t *testing.T) {
 			previousURL := codexTicketProbeURLForTest
 			codexTicketProbeURLForTest = server.URL
 			t.Cleanup(func() { codexTicketProbeURLForTest = previousURL })
-			account := &auth.Account{AccessToken: "at", PlanType: "plus"}
+			account := &auth.Account{AccessToken: "harvest-private-access-token", PlanType: tc.plan}
 			res := fireCodexTicketHarvest(context.Background(), account, "gpt-6-astra", server.URL, 5*time.Second)
-			if res.Result != "invalid_state" || res.State != "" || res.Err == nil {
-				t.Fatalf("invalid ticket result=%s err=%v", res.Result, res.Err)
+			if res.Result != "invalid_state" || res.HTTPStatus != http.StatusOK || res.State != "" || res.Err == nil {
+				t.Fatalf("invalid ticket result=%s status=%d err=%v", res.Result, res.HTTPStatus, res.Err)
+			}
+			diagnostic := res.Err.Error()
+			for _, want := range []string{
+				"validation=" + tc.validation,
+				fmt.Sprintf("plan_type=%q", tc.plan),
+				fmt.Sprintf("actual_length=%d", len(tc.state)),
+				fmt.Sprintf("expected_length=%d", tc.expectedLength),
+				fmt.Sprintf("configured_length=%d", auth.ConfiguredCodexTicketSettings().TargetLength),
+			} {
+				if !strings.Contains(diagnostic, want) {
+					t.Errorf("diagnostic missing %q: %s", want, diagnostic)
+				}
+			}
+			if tc.validation == "time" {
+				for _, field := range []string{"issued_at=", "expires_at=", "now=", "age_seconds="} {
+					if !strings.Contains(diagnostic, field) {
+						t.Errorf("time diagnostic missing %s", field)
+					}
+				}
+			}
+			if strings.Contains(diagnostic, account.AccessToken) || (tc.state != "" && strings.Contains(diagnostic, tc.state)) {
+				t.Fatal("diagnostic must not contain access tokens or ticket contents")
 			}
 		})
 	}
 }
-
-var _ = fmt.Sprintf

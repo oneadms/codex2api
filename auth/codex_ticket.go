@@ -96,7 +96,10 @@ func ParseCodexTicketShape(value string) (CodexTicketShape, error) {
 // CodexTicketExpectedBlocks 返回该账号套餐应有的信封块数。
 func CodexTicketExpectedBlocks(planType string) int {
 	switch strings.ToLower(strings.TrimSpace(planType)) {
-	case "team", "teamplus", "business", "enterprise":
+	case "team", "teamplus", "business", "enterprise", "self_serve_business_prolite",
+		"team5x", "team-5x", "team_5x", "team 5x":
+		// self_serve_business_prolite is a Team 5x workspace plan, not personal Prolite.
+		// Keep these aliases local to tickets; preserve the account's plan metadata.
 		return CodexTicketTeamBlocks
 	}
 	return CodexTicketPersonalBlocks

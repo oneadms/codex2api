@@ -135,17 +135,41 @@ func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, p
 	if !valid {
 		return codexTicketHarvestResult{HTTPStatus: status, Result: harvestResultForTerminal(gotTerminal), Err: fmt.Errorf("打票响应未到成功终态")}
 	}
+	settings := auth.ConfiguredCodexTicketSettings()
+	planType := account.GetPlanType()
+	targetLen := auth.CodexTicketTargetLength(planType, settings.TargetLength)
+	// Explain rejections without logging the opaque ticket, access token or proxy.
+	// Capture the plan/config once so the diagnostic matches the actual check.
+	invalidState := func(validation string, err error) codexTicketHarvestResult {
+		return codexTicketHarvestResult{
+			HTTPStatus: status,
+			Result:     "invalid_state",
+			Err: fmt.Errorf("%w (validation=%s plan_type=%q actual_length=%d expected_length=%d configured_length=%d)",
+				err, validation, planType, len(state), targetLen, settings.TargetLength),
+		}
+	}
 	if state == "" {
-		return codexTicketHarvestResult{HTTPStatus: status, Result: "invalid_state", Err: fmt.Errorf("响应未回带 turn state")}
+		return invalidState("missing", fmt.Errorf("响应未回带 turn state"))
+	}
+	shape, err := auth.ParseCodexTicketShape(state)
+	if err != nil {
+		return invalidState("shape", fmt.Errorf("响应门票信封解析失败: %w", err))
+	}
+	if !strings.HasPrefix(state, auth.CodexTicketStatePrefix) {
+		return invalidState("prefix", fmt.Errorf("响应门票前缀不符合要求"))
+	}
+	if len(state) != targetLen {
+		return invalidState("length", fmt.Errorf("响应门票长度与账号套餐或目标长度配置不匹配"))
 	}
 	now := time.Now()
-	shape, err := auth.ParseCodexTicketShape(state)
 	ticket := &auth.CodexTicket{
 		State: state, Length: len(state), IssuedAt: shape.IssuedAt,
-		ExpiresAt: auth.CodexTicketExpiry(now, shape.IssuedAt, time.Duration(auth.ConfiguredCodexTicketSettings().TTLSeconds)*time.Second),
+		ExpiresAt: auth.CodexTicketExpiry(now, shape.IssuedAt, time.Duration(settings.TTLSeconds)*time.Second),
 	}
-	if err != nil || !ticket.Valid(now, auth.CodexTicketTargetLengthFor(account.GetPlanType())) {
-		return codexTicketHarvestResult{HTTPStatus: status, Result: "invalid_state", Err: fmt.Errorf("响应门票形状、长度或有效期不符合要求")}
+	if !ticket.Valid(now, targetLen) {
+		return invalidState("time", fmt.Errorf("响应门票时间校验失败: issued_at=%s expires_at=%s now=%s age_seconds=%d",
+			shape.IssuedAt.UTC().Format(time.RFC3339), ticket.ExpiresAt.UTC().Format(time.RFC3339),
+			now.UTC().Format(time.RFC3339), int64(now.Sub(shape.IssuedAt)/time.Second)))
 	}
 	return codexTicketHarvestResult{HTTPStatus: status, State: state, Result: "success"}
 }
