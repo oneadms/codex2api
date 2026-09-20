@@ -30,6 +30,24 @@ export interface AntigravitySettingsResponse {
   choices: AntigravityRedirectChoice[]
 }
 
+export interface CodexTicketSettingsResponse {
+  enabled: boolean
+  harvest_proxy_url: string
+  harvest_proxy_masked: boolean
+  target_length: number
+  ttl_seconds: number
+  refresh_before_seconds: number
+  probe_interval_seconds: number
+  cooldown_seconds: number
+  max_probes_per_round: number
+  probe_timeout_seconds: number
+  fail_closed: boolean
+  models: string[]
+  gate_active: boolean
+  ready_accounts: number
+  total_accounts: number
+}
+
 export interface TraeCNSettingsResponse {
   model_mapping: Record<string, string>
   /** 默认关闭：开启后把上游内容生成前的元数据通知立即下发（会提前提交 200）。 */

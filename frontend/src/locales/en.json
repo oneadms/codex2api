@@ -5248,7 +5248,28 @@
     "claudeMaxToolCount": "Maximum tool count",
     "claudeMaxToolCountDesc": "0 means no gateway tool-count cap; non-zero protects operator resources.",
     "claudeMaxToolSchemaBytes": "Tool schema limit",
-    "claudeMaxToolSchemaBytesDesc": "0 means no gateway schema cap; request and upstream limits still apply."
+    "claudeMaxToolSchemaBytesDesc": "0 means no gateway schema cap; request and upstream limits still apply.",
+    "codexTicket": {
+      "sectionTitle": "Codex Turn-State Tickets (Auto Harvest)",
+      "sectionDescription": "Mint X-Codex-Turn-State tickets from the upstream through a dedicated proxy, hold them per account and model, and overwrite whatever the client sent. Complements the manual value stored in account credentials: the manual value wins.",
+      "enabled": "Enable background harvesting",
+      "enabledDesc": "When off, nothing is probed or injected and requests pass through unchanged. When on, a harvest proxy and at least one gated model are also required for gating to take effect.",
+      "gateInactive": "Gating is inactive: a harvest proxy and at least one gated model are still required.",
+      "ready": "{{ready}} / {{total}} accounts already hold a usable ticket for a gated model.",
+      "proxy": "Harvest proxy",
+      "proxyDesc": "Dedicated egress for harvesting (http / https / socks5 / socks5h), kept separate from the account's residential proxy. Leaving it empty never falls back to the business proxy: repeatedly harvesting from one residential IP burns it quickly and the minted tickets get rejected. Passwords display as ***; submitting the mask unchanged keeps the stored password.",
+      "models": "Gated models",
+      "modelsDesc": "Comma-separated upstream model names. Only listed models are harvested and injected. Empty means the switch is on but no model is gated.",
+      "failClosed": "Reject requests with no ticket (fail closed)",
+      "failClosedDesc": "When on, an account with no usable ticket for a gated model is rejected outright (503) instead of hitting the upstream bare — the upstream treats ticketless requests as anomalous. A manual injection value bypasses the gate.",
+      "probeInterval": "Probe interval (s)",
+      "probeIntervalDesc": "Delay between harvest rounds; minimum 30 seconds.",
+      "cooldown": "Failure cooldown (s)",
+      "cooldownDesc": "Cooldown after a failed harvest for the same account and model, so a bad account is not retried in a tight loop.",
+      "maxProbes": "Probes per round",
+      "maxProbesDesc": "Maximum harvest requests per round, so a long model list cannot overwhelm the harvest proxy.",
+      "saved": "Codex ticket settings updated"
+    }
   },
   "proxies": {
     "filterAll": "All Proxies",

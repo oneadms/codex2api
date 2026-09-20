@@ -163,6 +163,7 @@ import type {
   ChannelTestSettingsResponse,
   AntigravitySettingsResponse,
   TraeCNSettingsResponse,
+  CodexTicketSettingsResponse,
 } from './types'
 
 const BASE = '/api/admin'
@@ -1086,6 +1087,12 @@ export const api = {
   getAntigravitySettings: () => request<AntigravitySettingsResponse>('/settings/antigravity'),
   updateAntigravitySettings: (patch: { model_redirects?: Record<string, string>; redirect_overrides_effort?: boolean }) =>
     request<AntigravitySettingsResponse>('/settings/antigravity', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }),
+  getCodexTicketSettings: () => request<CodexTicketSettingsResponse>('/settings/codex-ticket'),
+  updateCodexTicketSettings: (patch: Partial<Omit<CodexTicketSettingsResponse, 'gate_active' | 'ready_accounts' | 'total_accounts' | 'harvest_proxy_masked'>>) =>
+    request<CodexTicketSettingsResponse>('/settings/codex-ticket', {
       method: 'PUT',
       body: JSON.stringify(patch),
     }),

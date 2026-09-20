@@ -246,6 +246,18 @@ func main() {
 		auth.SetConfiguredTraeCNSettings(parsed)
 	}
 	traeCNCfgCancel()
+	codexTicketCfgCtx, codexTicketCfgCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	if raw, err := db.LoadCodexTicketConfig(codexTicketCfgCtx); err != nil {
+		log.Printf("加载 Codex 打票配置失败(自动打票不生效): %v", err)
+	} else if parsed, parseErr := auth.ParseCodexTicketSettings(raw); parseErr != nil {
+		log.Printf("Codex 打票配置解析失败，请在设置页重新保存: %v", parseErr)
+	} else {
+		auth.SetConfiguredCodexTicketSettings(parsed)
+		if auth.CodexTicketGateEnabled() {
+			log.Printf("Codex 自动打票已启用: 门控模型 %v", parsed.Models)
+		}
+	}
+	codexTicketCfgCancel()
 
 	appliedResponseCache := proxy.GetResponseCacheAppliedConfig()
 	log.Printf(
@@ -394,6 +406,9 @@ func main() {
 
 	// Claude Code CLI 版本同步：启动先用生效版本回写账号指纹，再按 ClaudeConfig 开关/间隔联网同步。
 	proxy.StartClaudeCLIVersionSync(backgroundCtx, db, store, store.GetProxyURL)
+	// Codex turn state 后台打票：门控模型上没有可用门票时，用专用打票代理向上游
+	// 铸造门票。开关/代理/名单/周期均在设置页可调，未启用时循环空转。
+	proxy.StartCodexTicketHarvestLoop(backgroundCtx, db, store)
 	// Trae CN 每日自动签到（随机时段，每账号每天一次；TRAECN_CHECKIN_DISABLED=1 可关）。
 	proxy.StartTraeCNCheckinScheduler(backgroundCtx, store, db)
 	// Trae CN 每日额度探针：额度不足被限流的账号，每天随机时段查一次积分，

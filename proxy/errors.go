@@ -236,6 +236,23 @@ func ErrNoAvailableAccount() *Error {
 	}
 }
 
+// ErrCodexTicketUnavailable creates a fail-closed error for gated models that have
+// no usable turn-state ticket. 503 + Retryable so callers back off rather than
+// burning the account with a request the upstream is known to reject.
+func ErrCodexTicketUnavailable(model string) *Error {
+	message := "No turn-state ticket available for this model, please retry later"
+	if strings.TrimSpace(model) != "" {
+		message = fmt.Sprintf("No turn-state ticket available for model %q, please retry later", strings.TrimSpace(model))
+	}
+	return &Error{
+		Code:       ErrorCodeNoAvailableAccount,
+		Message:    message,
+		Type:       ErrorTypeServerError,
+		Retryable:  true,
+		HTTPStatus: http.StatusServiceUnavailable,
+	}
+}
+
 // ErrInternalError creates an internal server error
 func ErrInternalError(message string, cause error) *Error {
 	if message == "" {

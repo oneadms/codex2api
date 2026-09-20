@@ -618,6 +618,12 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// 凭据级 turn state 强制注入：模型已由入口映射/规则定稿，传输方式也已定。
 	// 未配置的账号这里是空操作。
 	ctx, requestBody, headers = prepareCodexTurnStateInjection(ctx, account, requestBody, headers, wantWebsocket && WebsocketExecuteFunc != nil)
+	// FailClosed 门控：门控模型上没有可用门票时拒绝出站。放在注入之后——注入已经
+	// 决定过本次取值，这里只对"确实没注入到东西"的请求收口。裸打上游会让上游把
+	// 无票请求当成异常行为，宁可报错也不发。
+	if blocked, ok := CodexTicketGateBlocked(ctx, account, codexClientModelFromContext(ctx), strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())); ok {
+		return nil, ErrCodexTicketUnavailable(blocked)
+	}
 	poolRouteKey := ""
 	if wantWebsocket {
 		sessionID = strings.TrimSpace(sessionID)
@@ -1062,6 +1068,11 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	requestBody = ApplyCodexTimezoneToBody(requestBody, account, time.Now())
 	// 凭据级 turn state 强制注入：compact 与普通轮共用同一条回合状态。
 	ctx, requestBody, headers = prepareCodexTurnStateInjection(ctx, account, requestBody, headers, false)
+	// FailClosed 门控与 ExecuteRequest 同源：compact 也是打到同一个上游回合状态校验，
+	// 无票同样会被拒，必须在发出前拦下。
+	if blocked, ok := CodexTicketGateBlocked(ctx, account, codexClientModelFromContext(ctx), strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())); ok {
+		return nil, ErrCodexTicketUnavailable(blocked)
+	}
 
 	existingCacheKey := strings.TrimSpace(gjson.GetBytes(requestBody, "prompt_cache_key").String())
 	cacheKey := existingCacheKey

@@ -5,6 +5,15 @@ import (
 	"strings"
 )
 
+// CredentialEntries 返回凭据的原始键值对。用于需要遍历全部凭据的场合
+// （例如按动态键名装载的多份门票），而不是一个个 GetCredential 拉取。
+func (a *AccountRow) CredentialEntries() map[string]any {
+	if a == nil || a.Credentials == nil {
+		return nil
+	}
+	return a.Credentials
+}
+
 func (a *AccountRow) GetCredentialFloat64(key string) (float64, bool) {
 	if a == nil || a.Credentials == nil {
 		return 0, false

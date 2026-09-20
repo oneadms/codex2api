@@ -1305,6 +1305,7 @@ func (db *DB) migrate(ctx context.Context) error {
 				channel_test_config TEXT DEFAULT '{}',
 				antigravity_config TEXT DEFAULT '{}',
 				traecn_config TEXT DEFAULT '{}',
+				codex_ticket_config TEXT DEFAULT '{}',
 				max_concurrency    INT DEFAULT 2,
 			global_rpm         INT DEFAULT 0,
 			test_model         VARCHAR(100) DEFAULT 'gpt-5.5',
@@ -1378,6 +1379,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS channel_test_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS antigravity_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS traecn_config TEXT DEFAULT '{}';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ticket_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS test_content TEXT DEFAULT 'hi';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS traecn_default_model VARCHAR(100) DEFAULT 'auto';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS traecn_test_model VARCHAR(100) DEFAULT 'auto';

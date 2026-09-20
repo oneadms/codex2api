@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/codex2api/auth"
@@ -67,15 +68,24 @@ func CodexTurnStateInjectionFromContext(ctx context.Context) string {
 }
 
 // prepareCodexTurnStateInjection 决定并落定注入：返回携带决策的 ctx、（可能克隆的）
-// 下游头与（WS 时改写了帧体的）请求体。未配置或名单未命中时全部原样返回。
+// 下游头与（WS 时改写了帧体的）请求体。未配置且无可用门票时全部原样返回。
+//
+// 取值优先级：手工配置的强制注入值 > 后台打票捕获的门票 > 客户端回带值（不动）。
+// 顺序是有意的：手工值是运维显式指定的，应当压过自动值；自动值只在手工值缺席时
+// 补位，且同样需要压过客户端回带值——否则 FailClosed 门控与实际上游收到的头会不一致。
 func prepareCodexTurnStateInjection(ctx context.Context, account *auth.Account, requestBody []byte, headers http.Header, websocket bool) (context.Context, []byte, http.Header) {
 	if account == nil {
 		return ctx, requestBody, headers
 	}
+	clientModel := codexClientModelFromContext(ctx)
 	upstreamModel := strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())
-	injected := account.CodexTurnStateInjection(codexClientModelFromContext(ctx), upstreamModel)
+	injected := account.CodexTurnStateInjection(clientModel, upstreamModel)
 	if injected == "" {
-		return ctx, requestBody, headers
+		var ok bool
+		injected, ok = codexTicketInjection(account, clientModel, upstreamModel)
+		if !ok {
+			return ctx, requestBody, headers
+		}
 	}
 	ctx = withCodexTurnStateInjection(ctx, injected)
 	if headers == nil {
@@ -92,6 +102,55 @@ func prepareCodexTurnStateInjection(ctx context.Context, account *auth.Account, 
 		}
 	}
 	return ctx, requestBody, headers
+}
+
+// codexTicketInjection 从后台打票捕获的门票里取本次要注入的值。门控生效、模型命中、
+// 且该 (账号, 模型) 上存在未过期门票时返回门票；否则返回 ok=false。
+//
+// 门控的判定顺序刻意与注入一致：先看开关/代理/名单是否齐备，再看模型是否在名单内，
+// 最后才查票。FailClosed 的拒绝发生在 Executor 里（需要返回错误），这里只负责取值。
+func codexTicketInjection(account *auth.Account, models ...string) (string, bool) {
+	if account == nil || !auth.CodexTicketGateEnabled() {
+		return "", false
+	}
+	gated := make([]string, 0, len(models))
+	for _, model := range models {
+		if auth.CodexTicketModelGated(model) {
+			gated = append(gated, model)
+		}
+	}
+	if len(gated) == 0 {
+		return "", false
+	}
+	targetLen := auth.CodexTicketTargetLengthFor(account.GetPlanType())
+	return account.CodexTicketInjection(time.Now(), targetLen, gated...)
+}
+
+// CodexTicketGateBlocked 判定本次是否应被 FailClosed 门控拒绝：开关打开、已配置代理
+// 与名单、请求模型命中门控名单、且无手工注入值也没有可用门票。返回命中的门控模型。
+// 手工注入优先于自动门票，所以手工值存在时绝不门控。
+func CodexTicketGateBlocked(ctx context.Context, account *auth.Account, clientModel, upstreamModel string) (string, bool) {
+	if account == nil || !auth.CodexTicketGateEnabled() || !auth.ConfiguredCodexTicketSettings().FailClosed {
+		return "", false
+	}
+	// 手工注入存在即放行：运维显式配的值压过自动票，也越过门控。
+	if account.CodexTurnStateInjection(clientModel, upstreamModel) != "" {
+		return "", false
+	}
+	var gated []string
+	for _, model := range []string{clientModel, upstreamModel} {
+		if auth.CodexTicketModelGated(model) {
+			gated = append(gated, model)
+		}
+	}
+	if len(gated) == 0 {
+		return "", false
+	}
+	targetLen := auth.CodexTicketTargetLengthFor(account.GetPlanType())
+	if _, ok := account.CodexTicketInjection(time.Now(), targetLen, gated...); ok {
+		return "", false
+	}
+	return gated[0], true
 }
 
 // applyCodexTurnStateInjectionHeader 在账号自定义头装配之后落定注入值：自定义头不该

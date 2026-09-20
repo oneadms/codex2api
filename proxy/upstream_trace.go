@@ -140,13 +140,18 @@ func beginUpstreamTrace(ctx context.Context, account *auth.Account, proxyURL str
 		}
 		id = security.SafeTruncate(strings.TrimSpace(id), 128)
 		a.mu.Lock()
-		defer a.mu.Unlock()
 		if a.current == attempt {
 			attempt.requestID = id
 			if turnState != "" {
 				attempt.upstreamTurnState = turnState
 			}
 		}
+		injected := attempt.injectedTurnState
+		a.mu.Unlock()
+		// 反馈自愈：业务响应也在向上游铸造门票，顺手把新票收下、把被拒的票撤掉。
+		// 必须在解锁之后调用——observeCodexTicketFeedback 会反查账号门票，走的是
+		// 账号自己的锁，不能与 trace 锁嵌套。
+		observeCodexTicketFeedback(account, injected, turnState, resp.StatusCode)
 	}
 }
 
