@@ -110,7 +110,7 @@ func prepareCodexTurnStateInjection(ctx context.Context, account *auth.Account, 
 // 门控的判定顺序刻意与注入一致：先看开关/代理/名单是否齐备，再看模型是否在名单内，
 // 最后才查票。FailClosed 的拒绝发生在 Executor 里（需要返回错误），这里只负责取值。
 func codexTicketInjection(account *auth.Account, models ...string) (string, bool) {
-	if account == nil || !auth.CodexTicketGateEnabled() {
+	if !account.SupportsCodexTickets() || !auth.CodexTicketGateEnabled() {
 		return "", false
 	}
 	gated := make([]string, 0, len(models))
@@ -130,7 +130,7 @@ func codexTicketInjection(account *auth.Account, models ...string) (string, bool
 // 与名单、请求模型命中门控名单、且无手工注入值也没有可用门票。返回命中的门控模型。
 // 手工注入优先于自动门票，所以手工值存在时绝不门控。
 func CodexTicketGateBlocked(ctx context.Context, account *auth.Account, clientModel, upstreamModel string) (string, bool) {
-	if account == nil || !auth.CodexTicketGateEnabled() || !auth.ConfiguredCodexTicketSettings().FailClosed {
+	if !account.SupportsCodexTickets() || !auth.CodexTicketGateEnabled() || !auth.ConfiguredCodexTicketSettings().FailClosed {
 		return "", false
 	}
 	// 手工注入存在即放行：运维显式配的值压过自动票，也越过门控。

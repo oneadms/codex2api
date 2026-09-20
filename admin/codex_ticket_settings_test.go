@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/gin-gonic/gin"
@@ -141,6 +142,28 @@ func TestCodexTicketSettingsRejectsIncompleteEnable(t *testing.T) {
 	}
 	if auth.CodexTicketGateEnabled() {
 		t.Fatal("rejected updates must not enable the gate")
+	}
+}
+
+func TestCodexTicketReadyAccountCountsOnlyEligibleCodexAccounts(t *testing.T) {
+	ticket := &auth.CodexTicket{
+		Model: "gpt-6-astra", State: "gAAAAA" + strings.Repeat("a", 286), Length: 292,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	store := &auth.Store{}
+	store.SetAccountsForTest([]*auth.Account{
+		nil,
+		{DBID: 1, UpstreamType: "grok", AccessToken: "grok-at"},
+		{DBID: 2, UpstreamType: "openai_responses", APIKey: "relay-key"},
+		{DBID: 3, AccessToken: "disabled-at", Disabled: 1},
+		{DBID: 4, CodexAuthMode: auth.CodexAuthModeAgentIdentity},
+		{DBID: 5, AccessToken: "codex-at", CodexTickets: map[string]*auth.CodexTicket{"gpt-6-astra": ticket}},
+		{DBID: 6, RefreshToken: "codex-rt"},
+	})
+	handler := &Handler{store: store}
+	ready, total := handler.codexTicketReadyAccountCounts([]string{"gpt-6-astra"})
+	if ready != 1 || total != 2 {
+		t.Fatalf("ready/total = %d/%d, want 1/2", ready, total)
 	}
 }
 

@@ -81,6 +81,9 @@ func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, p
 	if account == nil {
 		return fail("error", fmt.Errorf("账号为空"))
 	}
+	if !account.CanHarvestCodexTicket(time.Now()) {
+		return fail("error", fmt.Errorf("账号不支持 Codex 自动打票或当前不可用"))
+	}
 	accessToken := account.GetAccessToken()
 	if strings.TrimSpace(accessToken) == "" {
 		return fail("token_error", fmt.Errorf("账号无 access token"))
@@ -134,6 +137,15 @@ func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, p
 	}
 	if state == "" {
 		return codexTicketHarvestResult{HTTPStatus: status, Result: "invalid_state", Err: fmt.Errorf("响应未回带 turn state")}
+	}
+	now := time.Now()
+	shape, err := auth.ParseCodexTicketShape(state)
+	ticket := &auth.CodexTicket{
+		State: state, Length: len(state), IssuedAt: shape.IssuedAt,
+		ExpiresAt: auth.CodexTicketExpiry(now, shape.IssuedAt, time.Duration(auth.ConfiguredCodexTicketSettings().TTLSeconds)*time.Second),
+	}
+	if err != nil || !ticket.Valid(now, auth.CodexTicketTargetLengthFor(account.GetPlanType())) {
+		return codexTicketHarvestResult{HTTPStatus: status, Result: "invalid_state", Err: fmt.Errorf("响应门票形状、长度或有效期不符合要求")}
 	}
 	return codexTicketHarvestResult{HTTPStatus: status, State: state, Result: "success"}
 }
@@ -258,7 +270,7 @@ func refreshCodexTickets(ctx context.Context, db *database.DB, store *auth.Store
 		if ctx.Err() != nil || budget <= 0 {
 			return
 		}
-		if acc == nil {
+		if !acc.CanHarvestCodexTicket(time.Now()) {
 			continue
 		}
 		targetLen := auth.CodexTicketTargetLengthFor(acc.GetPlanType())
@@ -275,19 +287,56 @@ func refreshCodexTickets(ctx context.Context, db *database.DB, store *auth.Store
 			if acc.CodexTicketProbeCoolingDown(model, now) {
 				continue
 			}
-			budget--
-			harvestOneTicket(ctx, db, store, acc, model, proxyURL, targetLen, timeout)
+			harvestOneTicket(ctx, db, store, acc, model, proxyURL, timeout, &budget)
 		}
 	}
 }
 
+// probeCodexTicketWithRefresh prepares credentials before probing and permits
+// one forced refresh after a 401. Both HTTP attempts count toward the round's
+// budget. A 403 may be a proxy/WAF rejection and must not rotate OAuth tokens.
+func probeCodexTicketWithRefresh(ctx context.Context, store *auth.Store, acc *auth.Account, model, proxyURL string, timeout time.Duration, budget *int) codexTicketHarvestResult {
+	if budget == nil || *budget <= 0 {
+		return codexTicketHarvestResult{Result: "error", Err: fmt.Errorf("本轮打票次数已用完")}
+	}
+	*budget--
+	if timeout <= 0 {
+		timeout = time.Duration(auth.CodexTicketDefaultProbeTimeoutSecs) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := store.EnsureCodexTicketAccessToken(ctx, acc, false); err != nil {
+		return codexTicketHarvestResult{Result: "token_error", Err: err}
+	}
+	result := fireCodexTicketHarvest(ctx, acc, model, proxyURL, timeout)
+	if result.HTTPStatus != http.StatusUnauthorized || ctx.Err() != nil {
+		return result
+	}
+	if err := store.EnsureCodexTicketAccessToken(ctx, acc, true); err != nil {
+		result.Err = fmt.Errorf("%v；%w", result.Err, err)
+		return result
+	}
+	if *budget <= 0 {
+		result.Err = fmt.Errorf("%v；凭据已刷新，本轮打票次数已用完，冷却后重试", result.Err)
+		return result
+	}
+	*budget--
+	return fireCodexTicketHarvest(ctx, acc, model, proxyURL, timeout)
+}
+
 // harvestOneTicket 为 (账号, 模型) 铸造并发布一张门票。
-func harvestOneTicket(ctx context.Context, db *database.DB, store *auth.Store, acc *auth.Account, model, proxyURL string, targetLen int, timeout time.Duration) bool {
-	if acc == nil {
+func harvestOneTicket(ctx context.Context, db *database.DB, store *auth.Store, acc *auth.Account, model, proxyURL string, timeout time.Duration, budget *int) bool {
+	if !acc.CanHarvestCodexTicket(time.Now()) {
 		return false
 	}
 	checkedAt := time.Now()
-	res := fireCodexTicketHarvest(ctx, acc, model, proxyURL, timeout)
+	res := probeCodexTicketWithRefresh(ctx, store, acc, model, proxyURL, timeout, budget)
+	// Persist before declaring success: a failed write must not leave a success
+	// summary or log while the fail-closed gate still has no usable ticket.
+	if res.Result == "success" && !publishCodexTicket(db, store, acc, model, res.State, codexTicketIssuedAt(res.State)) {
+		res.Result = "error"
+		res.Err = fmt.Errorf("门票落库失败")
+	}
 	summary := &auth.CodexTicketProbeSummary{
 		Result:     res.Result,
 		HTTPStatus: res.HTTPStatus,
@@ -301,7 +350,6 @@ func harvestOneTicket(ctx context.Context, db *database.DB, store *auth.Store, a
 		return false
 	}
 	store.PublishCodexTicketProbe(acc.ID(), model, summary)
-	publishCodexTicket(db, store, acc, model, res.State, codexTicketIssuedAt(res.State))
 	log.Printf("[codex-ticket] 账号 %d %s 打票成功", acc.ID(), model)
 	return true
 }

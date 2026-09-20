@@ -61,12 +61,12 @@ func (h *Handler) codexTicketReadyAccountCounts(models []string) (ready, total i
 		return 0, 0
 	}
 	accounts := h.store.Accounts()
-	total = len(accounts)
 	now := time.Now()
 	for _, account := range accounts {
-		if account == nil {
+		if !account.CanHarvestCodexTicket(now) {
 			continue
 		}
+		total++
 		targetLen := auth.CodexTicketTargetLengthFor(account.GetPlanType())
 		if _, ok := account.CodexTicketInjection(now, targetLen, models...); ok {
 			ready++

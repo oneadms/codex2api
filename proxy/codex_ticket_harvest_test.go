@@ -314,4 +314,55 @@ func TestRevokeCodexTicketPromotesStandby(t *testing.T) {
 	}
 }
 
+func TestCodexTicketGateSkipsUnsupportedAccounts(t *testing.T) {
+	withCodexTicketGate(t, "gpt-6-astra")
+	for _, account := range []*auth.Account{
+		{UpstreamType: "grok", AccessToken: "grok-at"},
+		{UpstreamType: "claude", AccessToken: "claude-at"},
+		{UpstreamType: "openai_responses", APIKey: "relay-key"},
+		{UpstreamType: "future-provider", AccessToken: "other-at"},
+		{CodexAuthMode: auth.CodexAuthModeAgentIdentity},
+	} {
+		if _, blocked := CodexTicketGateBlocked(context.Background(), account, "", "gpt-6-astra"); blocked {
+			t.Fatal("ticket gate must not block an unsupported account")
+		}
+		// Old tickets from before the account-scope fix must not be injected.
+		account.CodexTickets = newTicketAccount(1, "gpt-6-astra").CodexTickets
+		if _, ok := codexTicketInjection(account, "gpt-6-astra"); ok {
+			t.Fatal("ticket must not be injected into an unsupported account")
+		}
+	}
+}
+
+func TestFireCodexTicketHarvestRejectsUnusableTickets(t *testing.T) {
+	withCodexTicketGate(t, "gpt-6-astra")
+	for _, tc := range []struct {
+		name  string
+		state string
+	}{
+		{name: "missing"},
+		{name: "wrong length", state: "gAAAAAshort"},
+		{name: "malformed envelope", state: "gAAAAA" + strings.Repeat("a", 286)},
+		{name: "wrong plan length", state: testTicketState(time.Now(), auth.CodexTicketTeamBlocks)},
+		{name: "expired", state: testTicketState(time.Now().Add(-2*time.Hour), auth.CodexTicketPersonalBlocks)},
+		{name: "future issue time", state: testTicketState(time.Now().Add(time.Hour), auth.CodexTicketPersonalBlocks)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set(codexTurnStateHeader, tc.state)
+				_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
+			}))
+			t.Cleanup(server.Close)
+			previousURL := codexTicketProbeURLForTest
+			codexTicketProbeURLForTest = server.URL
+			t.Cleanup(func() { codexTicketProbeURLForTest = previousURL })
+			account := &auth.Account{AccessToken: "at", PlanType: "plus"}
+			res := fireCodexTicketHarvest(context.Background(), account, "gpt-6-astra", server.URL, 5*time.Second)
+			if res.Result != "invalid_state" || res.State != "" || res.Err == nil {
+				t.Fatalf("invalid ticket result=%s err=%v", res.Result, res.Err)
+			}
+		})
+	}
+}
+
 var _ = fmt.Sprintf
