@@ -67,7 +67,7 @@ export default function CodexHarvest() {
       {tab === 'overview' && <>
         <p className="text-sm leading-relaxed text-muted-foreground">{t('harvest.cookiePolicy')}</p>
         <HarvestControlsPanel snapshot={snapshot.controls} scope={snapshot.scope} busy={busy} onAction={onAction} />
-        <HarvestSection title={t('harvest.configuration')}><CodexTicketSettings key={configRevision} hideTiming /></HarvestSection>
+        <HarvestSection title={t('harvest.configuration')}><CodexTicketSettings key={configRevision} /></HarvestSection>
         <HarvestSection title={t('harvest.accounts')}>
           <p className="mb-4 text-xs leading-relaxed text-muted-foreground">{t('harvest.binding')}</p>
           {snapshot.accounts.length === 0 ? <p className="py-6 text-sm text-muted-foreground">{t('harvest.noAccounts')}</p> : <div className="overflow-x-auto"><table className={harvestTableClass}><thead><tr>{['account', 'model', 'tickets', 'cookies', 'standby', 'skip'].map(key => <th key={key}>{t(`harvest.${key}`)}</th>)}</tr></thead><tbody>{snapshot.accounts.map(account => <tr key={account.id}><td className="min-w-40 max-w-64 break-words"><span>{account.email || 'Codex'}</span><span className="mt-1 block text-xs text-muted-foreground">#{account.id} {account.busy ? `· ${t('harvest.busyAccount')}` : ''}</span></td>

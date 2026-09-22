@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Link } from 'react-router-dom'
 import { Loader2, RefreshCw, RotateCcw, Ticket } from 'lucide-react'
 import { api } from '../api'
 import type { CodexTicketSettingsResponse } from '../types'
@@ -16,7 +15,7 @@ import { Switch } from './ui/switch'
 // 界面要传达两件容易被误解的事：
 //   1. 采票使用专用代理，票据携带出口快照，业务注入后沿用该快照。
 //   2. FailClosed 打开时，门控模型上没票的账号会被直接拒绝出站，而不是裸打上游。
-export default function CodexTicketSettings({ hideTiming = false }: { hideTiming?: boolean }) {
+export default function CodexTicketSettings() {
   const { t } = useTranslation()
   const { showToast } = useToast()
   const [settings, setSettings] = useState<CodexTicketSettingsResponse | null>(null)
@@ -147,8 +146,6 @@ export default function CodexTicketSettings({ hideTiming = false }: { hideTiming
           onCheckedChange={(checked) => void patch({ fail_closed: checked })}
         />
       </div>
-
-      {!hideTiming && <Link className="inline-flex text-sm text-primary underline underline-offset-4" to="/codex-harvest">{t('harvest.title')} · {t('harvest.controls')} · Mihomo</Link>}
 
       {error ? (
         <div className="flex items-center justify-between gap-3">
