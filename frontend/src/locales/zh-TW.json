@@ -759,7 +759,7 @@
     "claudeMaxToolSchemaBytesDesc": "0 表示不設閘道 Schema 上限；請求體仍受系統大小與上游限制。",
     "codexTicket": {
       "sectionTitle": "Codex 回合门票（自动打票）",
-      "sectionDescription": "用专用代理向上游铸造 X-Codex-Turn-State 门票，按账号与模型分别持有，并在业务请求上覆盖客户端回带值。与账号凭据里的手工注入互补：手工值优先。",
+      "sectionDescription": "透過專用代理取得 X-Codex-Turn-State 門票與配套 Cookie，並在業務請求中一起傳送。門票有效期約 240 秒，提前 30 秒停止使用；缺少 Cookie 的舊票會重新取得。手動注入值仍優先。",
       "enabled": "启用后台自动打票",
       "enabledDesc": "关闭时既不探测也不注入，按原链路转发。开启后需要同时配置打票代理与门控模型，三者齐备门控才生效。",
       "gateInactive": "门控当前未生效：还需要配置打票代理与至少一个门控模型。",
@@ -771,7 +771,7 @@
       "failClosed": "无票时拒绝出站（FailClosed）",
       "failClosedDesc": "开启后，门控模型上没有可用门票的账号会被直接拒绝（503），而不是裸打上游——上游会把无票请求当成异常行为。手工注入值存在时不受门控影响。",
       "probeInterval": "探测周期（秒）",
-      "probeIntervalDesc": "每轮打票的间隔，下限 30 秒。",
+      "probeIntervalDesc": "預設每 30 秒檢查一次，剩餘有效期不足 60 秒時刷新。過長的間隔會依刷新視窗自動縮短，下限 30 秒。",
       "cooldown": "失败冷却（秒）",
       "cooldownDesc": "同一账号与模型打票失败后的冷却时长，避免坏号被反复打。",
       "maxProbes": "每轮打票上限",

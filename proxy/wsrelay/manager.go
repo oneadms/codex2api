@@ -39,6 +39,8 @@ type WsConnection struct {
 	// 不能用当前配置重新推导，否则设置变更后会记录并未发送的 UA。
 	upstreamUserAgent      string
 	upstreamUserAgentKnown bool
+	// 握手 Cookie 的摘要用于续链复用校验，Cookie 原文不保存在连接池元数据中。
+	upstreamCookieKey string
 
 	// 创建/复用该连接的账号。仅用于读取当前动态并发上限，让 response_id
 	// 续链复用路径也能在账号上限下调后收敛空闲连接数。
@@ -1259,6 +1261,7 @@ func (m *Manager) createConnection(
 	wc.PoolKey = poolKey
 	wc.upstreamUserAgent = strings.TrimSpace(headers.Get("User-Agent"))
 	wc.upstreamUserAgentKnown = true
+	wc.upstreamCookieKey = websocketCookieKey(headers.Get("Cookie"))
 	wc.httpResp = resp
 	wc.onDisconnected = m.getOnDisconnected()
 	wc.onReadFailure = m.DiscardConnection
@@ -1437,17 +1440,15 @@ func (m *Manager) AcquirePreferredConnection(responseID string, accountID int64,
 	return m.acquirePreferredConnection(responseID, accountID, apiKey, "")
 }
 
-// AcquirePreferredConnectionForURL is the URL-aware continuation variant.
-// It keeps the legacy AcquirePreferredConnection API intact for embedded callers
-// while preventing a response_id binding from crossing Resin platform/proxy
-// boundaries when a request has a different effective upstream URL.
-func (m *Manager) AcquirePreferredConnectionForURL(responseID string, accountID int64, apiKey, expectedURL string) (*WsConnection, *PendingRequest, string) {
-	return m.acquirePreferredConnection(responseID, accountID, apiKey, expectedURL)
+// AcquirePreferredConnectionForURL 校验续链连接的上游地址；传入 Cookie 摘要时还须匹配握手身份。
+// 未传摘要的调用方保留原有行为，业务执行器始终传入当前请求的摘要。
+func (m *Manager) AcquirePreferredConnectionForURL(responseID string, accountID int64, apiKey, expectedURL string, cookieKey ...string) (*WsConnection, *PendingRequest, string) {
+	return m.acquirePreferredConnection(responseID, accountID, apiKey, expectedURL, cookieKey...)
 }
 
-func (m *Manager) acquirePreferredConnection(responseID string, accountID int64, apiKey, expectedURL string) (*WsConnection, *PendingRequest, string) {
+func (m *Manager) acquirePreferredConnection(responseID string, accountID int64, apiKey, expectedURL string, cookieKey ...string) (*WsConnection, *PendingRequest, string) {
 	wc, sessionKey := m.lookupResponseConn(responseID, accountID, apiKey, expectedURL)
-	if wc == nil {
+	if wc == nil || (len(cookieKey) > 0 && wc.upstreamCookieKey != cookieKey[0]) {
 		return nil, nil, ""
 	}
 	accountLock, releaseAccountLock := m.accountLock(accountID)

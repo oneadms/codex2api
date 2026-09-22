@@ -38,6 +38,7 @@ func TestCodexTicketsFromRow(t *testing.T) {
 			"codex_ticket:gpt-5.5": map[string]any{
 				"model":      "gpt-5.5",
 				"state":      state,
+				"cookie":     "ticket=stored",
 				"length":     len(state),
 				"issued_at":  now.Format(time.RFC3339),
 				"expires_at": now.Add(50 * time.Minute).Format(time.RFC3339),

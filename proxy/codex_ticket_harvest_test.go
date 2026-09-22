@@ -50,6 +50,7 @@ func newTicketAccount(id int64, model string) *auth.Account {
 			model: {
 				Model:     model,
 				State:     state,
+				Cookie:    "ticket=local",
 				Length:    len(state),
 				IssuedAt:  time.Now(),
 				ExpiresAt: time.Now().Add(50 * time.Minute),
@@ -188,6 +189,7 @@ func TestHarvestOneTicketPublishesTicket(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(codexTurnStateHeader, state)
+		w.Header().Add("Set-Cookie", "ticket=harvest; Path=/; HttpOnly")
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
@@ -253,7 +255,7 @@ func TestCodexTicketFeedbackAdoptsUpstreamState(t *testing.T) {
 	previousSink := codexTicketFeedback.Load()
 	codexTicketFeedback.Store(nil)
 	t.Cleanup(func() { codexTicketFeedback.Store(previousSink) })
-	observeCodexTicketFeedback(account, "old", state, http.StatusOK)
+	observeCodexTicketFeedback(account, "old", state, http.StatusOK, codexTicketCookies{Header: "ticket=feedback"})
 	if got := account.CodexTickets["gpt-5.5"].State; got != "old" {
 		t.Fatalf("without a registered sink the ticket must be untouched, got %q", got)
 	}
@@ -262,7 +264,7 @@ func TestCodexTicketFeedbackAdoptsUpstreamState(t *testing.T) {
 	store := &auth.Store{}
 	store.SetAccountsForTest([]*auth.Account{account})
 	registerCodexTicketFeedback(nil, store)
-	observeCodexTicketFeedback(account, "old", state, http.StatusOK)
+	observeCodexTicketFeedback(account, "old", state, http.StatusOK, codexTicketCookies{Header: "ticket=feedback"})
 	if got := account.CodexTickets["gpt-5.5"].State; got != "old" {
 		t.Fatalf("without a database the ticket must not be published, got %q", got)
 	}
@@ -279,7 +281,7 @@ func TestCodexTicketFeedbackRejectsMalformedState(t *testing.T) {
 	codexTicketFeedback.Store(nil)
 	t.Cleanup(func() { codexTicketFeedback.Store(previousSink) })
 
-	observeCodexTicketFeedback(account, "old", "gAAAAAshort", http.StatusOK)
+	observeCodexTicketFeedback(account, "old", "gAAAAAshort", http.StatusOK, codexTicketCookies{Header: "ticket=feedback"})
 	if got := account.CodexTickets["gpt-5.5"].State; got != "old" {
 		t.Fatalf("malformed upstream state must be ignored, got %q", got)
 	}
@@ -343,16 +345,16 @@ func TestCodexTicketInjectionUsesSharedSamePlanFallback(t *testing.T) {
 	source := &auth.Account{DBID: 201, PlanType: "self_serve_business_prolite"}
 	auth.PublishCodexTicketToSharedPool(source, &auth.CodexTicket{
 		Model: "gpt-6-astra", State: state, Length: len(state), IssuedAt: now,
+		Cookie:     "ticket=shared",
 		CapturedAt: now, ExpiresAt: now.Add(50 * time.Minute),
 	})
 	destination := &auth.Account{DBID: 202, PlanType: "self_serve_business_prolite"}
 	if got, ok := codexTicketInjection(destination, "gpt-6-astra"); !ok || got != state {
 		t.Fatalf("same-plan account must use shared ticket: got=%q ok=%v", got, ok)
 	}
-	ownState := testTicketState(now, auth.CodexTicketTeamBlocks)
-	ownState = ownState[:len(ownState)-1] + "B"
+	ownState := testTicketState(now.Add(time.Second), auth.CodexTicketTeamBlocks)
 	destination.CodexTickets = map[string]*auth.CodexTicket{
-		"gpt-6-astra": {Model: "gpt-6-astra", State: ownState, Length: len(ownState), IssuedAt: now, ExpiresAt: now.Add(time.Hour)},
+		"gpt-6-astra": {Model: "gpt-6-astra", State: ownState, Cookie: "ticket=own", Length: len(ownState), IssuedAt: now, ExpiresAt: now.Add(time.Hour)},
 	}
 	if got, ok := codexTicketInjection(destination, "gpt-6-astra"); !ok || got != ownState {
 		t.Fatalf("own ticket must take priority: got=%q ok=%v", got, ok)
@@ -371,6 +373,7 @@ func TestCodexTicketGateUsesSharedSamePlanFallback(t *testing.T) {
 	source := &auth.Account{DBID: 203, PlanType: "self_serve_business_prolite"}
 	auth.PublishCodexTicketToSharedPool(source, &auth.CodexTicket{
 		Model: "gpt-6-astra", State: state, Length: len(state), IssuedAt: now,
+		Cookie:     "ticket=shared",
 		CapturedAt: now, ExpiresAt: now.Add(50 * time.Minute),
 	})
 	destination := &auth.Account{DBID: 204, PlanType: "self_serve_business_prolite"}
@@ -389,6 +392,7 @@ func TestFireCodexTicketHarvestTeam5x(t *testing.T) {
 	state := testTicketState(issuedAt, auth.CodexTicketTeamBlocks)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(codexTurnStateHeader, state)
+		w.Header().Add("Set-Cookie", "ticket=team; Path=/")
 		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
 	}))
 	t.Cleanup(server.Close)
@@ -406,7 +410,7 @@ func TestFireCodexTicketHarvestTeam5x(t *testing.T) {
 				t.Fatalf("Team 5x harvest result=%s status=%d err=%v", res.Result, res.HTTPStatus, res.Err)
 			}
 			account.CodexTickets = map[string]*auth.CodexTicket{
-				"gpt-6-astra": {State: res.State, Length: len(res.State), IssuedAt: issuedAt, ExpiresAt: time.Now().Add(time.Hour)},
+				"gpt-6-astra": {State: res.State, Cookie: res.Cookies.Header, Length: len(res.State), IssuedAt: issuedAt, ExpiresAt: time.Now().Add(time.Hour)},
 			}
 			if _, blocked := CodexTicketGateBlocked(context.Background(), account, "", "gpt-6-astra"); blocked {
 				t.Fatal("fresh Team 5x ticket must pass the same plan-derived length gate")
@@ -447,6 +451,7 @@ func TestFireCodexTicketHarvestRejectsUnusableTickets(t *testing.T) {
 			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set(codexTurnStateHeader, tc.state)
+				w.Header().Add("Set-Cookie", "ticket=invalid-state-test; Path=/")
 				_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
 			}))
 			t.Cleanup(server.Close)

@@ -41,12 +41,11 @@ const (
 	// CodexTicketProbeCredentialKeySuffix 是探测结果摘要的键后缀。
 	CodexTicketProbeCredentialKeySuffix = ":probe"
 
-	// codexTicketValidity 是上游实测的门票有效期：签发后约 1 小时失效。
-	codexTicketValidity = time.Hour
+	// codexTicketValidity 按当前门票协议限制为签发后约 240 秒。
+	codexTicketValidity = 240 * time.Second
 	// codexTicketIssuedSkew 允许签发时刻比本地时间超前这么多（时钟漂移容差）。
 	codexTicketIssuedSkew = 30 * time.Second
-	// codexTicketValidityMargin 是有效性判定预留的安全边界：门票在 59.5 分钟处即视为
-	// 不可用，避免把「刚好过期」的票发出去换来一次必然失败的上游请求。
+	// codexTicketValidityMargin 预留传输与时钟误差，签发后 210 秒即停止使用。
 	codexTicketValidityMargin = 30 * time.Second
 
 	// maxCodexTicketBytes 是门票编码后的长度上限（团队版 332，留一个数量级余量）。
@@ -163,6 +162,10 @@ type CodexTicket struct {
 	Model string `json:"model"`
 	// State 是门票 blob 本身。
 	State string `json:"state"`
+	// Cookie 是签发门票时配套的请求 Cookie，必须随门票一起保存、切换和注入。
+	Cookie string `json:"cookie,omitempty"`
+	// CookieExpiresAt 单独保留 Cookie 的期限，业务响应换票时不能误用旧门票的期限。
+	CookieExpiresAt time.Time `json:"cookie_expires_at,omitempty"`
 	// Length 是 State 的长度，落库后用于快速校验（不信任序列化后的长度）。
 	Length int `json:"length"`
 	// Blocks 是信封块数。
@@ -185,7 +188,7 @@ type CodexTicket struct {
 
 // Valid 报告门票在 now 时刻是否可用：形状正确、未撤销、未过期、签发时刻合理。
 func (t *CodexTicket) Valid(now time.Time, targetLen int) bool {
-	if t == nil || t.Revoked {
+	if t == nil || t.Revoked || NormalizeCodexTicketCookie(t.Cookie) == "" {
 		return false
 	}
 	state := strings.TrimSpace(t.State)
@@ -195,10 +198,14 @@ func (t *CodexTicket) Valid(now time.Time, targetLen int) bool {
 	if len(state) != targetLen || t.Length != targetLen || !strings.HasPrefix(state, CodexTicketStatePrefix) {
 		return false
 	}
+	shape, err := ParseCodexTicketShape(state)
+	if err != nil || !codexTicketIssuedAtPlausible(shape.IssuedAt, now) {
+		return false
+	}
 	if t.ExpiresAt.IsZero() || !now.Before(t.ExpiresAt) {
 		return false
 	}
-	if !t.IssuedAt.IsZero() && !codexTicketIssuedAtPlausible(t.IssuedAt, now) {
+	if !t.CookieExpiresAt.IsZero() && !now.Before(t.CookieExpiresAt) {
 		return false
 	}
 	return true
@@ -206,10 +213,33 @@ func (t *CodexTicket) Valid(now time.Time, targetLen int) bool {
 
 // NeedsRefresh 报告门票是否已进入重打窗口（TTL 即将耗尽）。
 func (t *CodexTicket) NeedsRefresh(now time.Time, refreshBefore time.Duration) bool {
-	if t == nil || t.ExpiresAt.IsZero() {
+	if t == nil || !t.Valid(now, t.Length) {
 		return true
 	}
-	return !t.ExpiresAt.After(now.Add(refreshBefore))
+	return !t.EffectiveExpiry().After(now.Add(refreshBefore))
+}
+
+// EffectiveExpiry 统一缓存票、刷新调度和管理端的时效口径，旧版一小时缓存也受新上限约束。
+func (t *CodexTicket) EffectiveExpiry() time.Time {
+	if t == nil || t.ExpiresAt.IsZero() {
+		return time.Time{}
+	}
+	shape, err := ParseCodexTicketShape(t.State)
+	if err != nil {
+		return time.Time{}
+	}
+	expires := minCodexTicketExpiry(t.ExpiresAt, shape.IssuedAt.Add(codexTicketValidity-codexTicketValidityMargin))
+	if !t.CookieExpiresAt.IsZero() {
+		expires = minCodexTicketExpiry(expires, t.CookieExpiresAt)
+	}
+	return expires
+}
+
+func minCodexTicketExpiry(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
 }
 
 // codexTicketIssuedAtPlausible 校验签发时刻：不能来自未来（允许时钟漂移），
@@ -224,6 +254,9 @@ func codexTicketIssuedAtPlausible(issuedAt, now time.Time) bool {
 // CodexTicketExpiry 把配置 TTL 与信封自带的签发时刻+有效期取较早者：
 // 上游才是有效期的最终裁决者，本地 TTL 调大不能让过期票复活。
 func CodexTicketExpiry(capturedAt, issuedAt time.Time, ttl time.Duration) time.Time {
+	if ttl <= 0 || ttl > codexTicketValidity-codexTicketValidityMargin {
+		ttl = codexTicketValidity - codexTicketValidityMargin
+	}
 	expires := capturedAt.Add(ttl)
 	if !issuedAt.IsZero() {
 		if upstream := issuedAt.Add(codexTicketValidity - codexTicketValidityMargin); upstream.Before(expires) {
@@ -253,6 +286,7 @@ func ParseCodexTicket(model string, raw any) *CodexTicket {
 		return nil
 	}
 	ticket.State = strings.TrimSpace(ticket.State)
+	ticket.Cookie = NormalizeCodexTicketCookie(ticket.Cookie)
 	if ticket.State == "" {
 		return nil
 	}
@@ -263,6 +297,7 @@ func ParseCodexTicket(model string, raw any) *CodexTicket {
 	if ticket.Standby != nil {
 		standby := *ticket.Standby
 		standby.State = strings.TrimSpace(standby.State)
+		standby.Cookie = NormalizeCodexTicketCookie(standby.Cookie)
 		if standby.Length == 0 {
 			standby.Length = len(standby.State)
 		}
@@ -394,18 +429,28 @@ func sharedCodexTicketForModel(planType, model string, now time.Time, targetLen 
 // CodexTicketInjectionWithShared prefers the account's own ticket and falls back
 // to a ticket captured by another account with the exact same plan type and model.
 func (a *Account) CodexTicketInjectionWithShared(now time.Time, targetLen int, models ...string) (string, bool) {
-	if a == nil {
-		return "", false
+	if ticket := a.CodexTicketWithShared(now, targetLen, models...); ticket != nil {
+		return ticket.State, true
 	}
-	if state, ok := a.CodexTicketInjection(now, targetLen, models...); ok {
-		return state, true
+	return "", false
+}
+
+// CodexTicketWithShared 返回完整快照，保证共享池与热备切换时门票和 Cookie 始终来自同一张票。
+func (a *Account) CodexTicketWithShared(now time.Time, targetLen int, models ...string) *CodexTicket {
+	if a == nil {
+		return nil
+	}
+	for _, model := range models {
+		if ticket := a.CodexTicketForModel(model, now, targetLen); ticket != nil {
+			return ticket
+		}
 	}
 	for _, model := range models {
 		if ticket := sharedCodexTicketForModel(a.GetPlanType(), model, now, targetLen); ticket != nil {
-			return ticket.State, true
+			return ticket
 		}
 	}
-	return "", false
+	return nil
 }
 
 // RevokeSharedCodexTicket removes the matching shared ticket and its standby.
@@ -492,10 +537,10 @@ func (a *Account) CodexTicketStatuses(models []string, now time.Time, targetLen 
 		if active.Valid(now, targetLen) {
 			status.Ready = true
 			status.Length = active.Length
-			if remaining := int64(active.ExpiresAt.Sub(now) / time.Second); remaining > 0 {
+			expires := active.EffectiveExpiry()
+			if remaining := int64(expires.Sub(now) / time.Second); remaining > 0 {
 				status.RemainingSeconds = remaining
 			}
-			expires := active.ExpiresAt
 			status.ExpiresAt = &expires
 			if !active.IssuedAt.IsZero() {
 				issued := active.IssuedAt

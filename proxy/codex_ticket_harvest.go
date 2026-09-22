@@ -63,6 +63,7 @@ func codexTicketHarvestProbeBody(model string) []byte {
 // codexTicketHarvestResult 是一次打票的结果。Err 非空表示本轮未取到可用门票。
 type codexTicketHarvestResult struct {
 	State      string
+	Cookies    codexTicketCookies
 	HTTPStatus int
 	// Result 是探测结论，取值与 auth.CodexTicketProbeSummary.Result 一致：
 	// success / token_error / error / invalid_state / response_incomplete_or_error。
@@ -131,6 +132,7 @@ func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, p
 	}
 
 	state := observedCodexTurnState(resp.Header.Get(codexTurnStateHeader))
+	cookies := captureCodexTicketCookies(req.URL, codexTicketCookies{Header: req.Header.Get("Cookie")}, resp)
 	gotTerminal, valid := validateCodexHarvestStream(resp.Body)
 	if !valid {
 		return codexTicketHarvestResult{HTTPStatus: status, Result: harvestResultForTerminal(gotTerminal), Err: fmt.Errorf("打票响应未到成功终态")}
@@ -161,17 +163,23 @@ func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, p
 	if len(state) != targetLen {
 		return invalidState("length", fmt.Errorf("响应门票长度与账号套餐或目标长度配置不匹配"))
 	}
+	if cookies.Header == "" {
+		return invalidState("cookie", fmt.Errorf("响应门票缺少配套的有效 Cookie"))
+	}
 	now := time.Now()
 	ticket := &auth.CodexTicket{
-		State: state, Length: len(state), IssuedAt: shape.IssuedAt,
+		State: state, Cookie: cookies.Header, Length: len(state), IssuedAt: shape.IssuedAt,
 		ExpiresAt: auth.CodexTicketExpiry(now, shape.IssuedAt, time.Duration(settings.TTLSeconds)*time.Second),
+	}
+	if !cookies.ExpiresAt.IsZero() && cookies.ExpiresAt.Before(ticket.ExpiresAt) {
+		ticket.ExpiresAt = cookies.ExpiresAt
 	}
 	if !ticket.Valid(now, targetLen) {
 		return invalidState("time", fmt.Errorf("响应门票时间校验失败: issued_at=%s expires_at=%s now=%s age_seconds=%d",
 			shape.IssuedAt.UTC().Format(time.RFC3339), ticket.ExpiresAt.UTC().Format(time.RFC3339),
 			now.UTC().Format(time.RFC3339), int64(now.Sub(shape.IssuedAt)/time.Second)))
 	}
-	return codexTicketHarvestResult{HTTPStatus: status, State: state, Result: "success"}
+	return codexTicketHarvestResult{HTTPStatus: status, State: state, Cookies: cookies, Result: "success"}
 }
 
 func harvestResultForHTTPStatus(status int) string {
@@ -358,7 +366,7 @@ func harvestOneTicket(ctx context.Context, db *database.DB, store *auth.Store, a
 	res := probeCodexTicketWithRefresh(ctx, store, acc, model, proxyURL, timeout, budget)
 	// Persist before declaring success: a failed write must not leave a success
 	// summary or log while the fail-closed gate still has no usable ticket.
-	if res.Result == "success" && !publishCodexTicket(db, store, acc, model, res.State, codexTicketIssuedAt(res.State)) {
+	if res.Result == "success" && !publishCodexTicket(db, store, acc, model, res.State, codexTicketIssuedAt(res.State), res.Cookies) {
 		res.Result = "error"
 		res.Err = fmt.Errorf("门票落库失败")
 	}
@@ -379,8 +387,7 @@ func harvestOneTicket(ctx context.Context, db *database.DB, store *auth.Store, a
 	return true
 }
 
-// codexTicketIssuedAt 从门票信封里取上游签发时刻；解析不出返回零值（有效期内
-// 仍可用，只是失效时刻退化为 TTL 决定）。
+// codexTicketIssuedAt 从门票信封里取上游签发时刻；解析不出返回零值，发布前仍须通过信封校验。
 func codexTicketIssuedAt(state string) time.Time {
 	shape, err := auth.ParseCodexTicketShape(state)
 	if err != nil {

@@ -43,8 +43,8 @@ func registerCodexTicketFeedback(db *database.DB, store *auth.Store) {
 // 注入的门票（空表示未注入），upstream 是上游回带的 turn state，status 是响应状态码。
 //
 // 这是尽力而为的旁路：任何失败只记日志，绝不影响请求本身的处理。
-func observeCodexTicketFeedback(account *auth.Account, injected, upstream string, status int) {
-	if account == nil || !auth.CodexTicketGateEnabled() {
+func observeCodexTicketFeedback(account *auth.Account, injected, upstream string, status int, cookies codexTicketCookies) {
+	if !account.SupportsCodexTickets() || !auth.CodexTicketGateEnabled() {
 		return
 	}
 	injected = observedCodexTurnState(injected)
@@ -59,11 +59,11 @@ func observeCodexTicketFeedback(account *auth.Account, injected, upstream string
 	targetLen := auth.CodexTicketTargetLengthFor(account.GetPlanType())
 
 	// 规则 1：采纳上游新签发的票。
-	if upstream != "" && upstream != injected && len(upstream) == targetLen {
+	if status >= 200 && status < 300 && upstream != "" && upstream != injected && len(upstream) == targetLen && cookies.Header != "" {
 		if shape, err := auth.ParseCodexTicketShape(upstream); err == nil && shape.Blocks == auth.CodexTicketExpectedBlocks(account.GetPlanType()) {
-			model := codexTicketFeedbackModel(account, targetLen)
+			model := codexTicketFeedbackModel(account, targetLen, injected)
 			if model != "" {
-				publishCodexTicket(sink.db, sink.store, account, model, upstream, shape.IssuedAt)
+				publishCodexTicket(sink.db, sink.store, account, model, upstream, shape.IssuedAt, cookies)
 				return
 			}
 		}
@@ -107,7 +107,7 @@ func codexTicketFeedbackModel(account *auth.Account, targetLen int, expected ...
 
 // publishCodexTicket 落库并即时发布一张门票。落库先行：写失败时内存里就不该出现
 // 一张重启即丢的票。
-func publishCodexTicket(db *database.DB, store *auth.Store, account *auth.Account, model, state string, issuedAt time.Time) bool {
+func publishCodexTicket(db *database.DB, store *auth.Store, account *auth.Account, model, state string, issuedAt time.Time, cookies codexTicketCookies) bool {
 	if db == nil || store == nil || account == nil {
 		return false
 	}
@@ -117,16 +117,24 @@ func publishCodexTicket(db *database.DB, store *auth.Store, account *auth.Accoun
 	}
 	capturedAt := time.Now()
 	ticket := &auth.CodexTicket{
-		Model:      model,
-		State:      state,
-		Length:     len(state),
-		IssuedAt:   issuedAt,
-		CapturedAt: capturedAt,
-		ExpiresAt:  auth.CodexTicketExpiry(capturedAt, issuedAt, time.Duration(auth.ConfiguredCodexTicketSettings().TTLSeconds)*time.Second),
-		Identity:   auth.CodexTicketIdentity(account.EffectiveAccountID(), account.Email),
+		Model:           model,
+		State:           state,
+		Cookie:          auth.NormalizeCodexTicketCookie(cookies.Header),
+		CookieExpiresAt: cookies.ExpiresAt,
+		Length:          len(state),
+		IssuedAt:        issuedAt,
+		CapturedAt:      capturedAt,
+		ExpiresAt:       auth.CodexTicketExpiry(capturedAt, issuedAt, time.Duration(auth.ConfiguredCodexTicketSettings().TTLSeconds)*time.Second),
+		Identity:        auth.CodexTicketIdentity(account.EffectiveAccountID(), account.Email),
 	}
 	if shape, err := auth.ParseCodexTicketShape(state); err == nil {
 		ticket.Blocks = shape.Blocks
+	}
+	if !cookies.ExpiresAt.IsZero() && cookies.ExpiresAt.Before(ticket.ExpiresAt) {
+		ticket.ExpiresAt = cookies.ExpiresAt
+	}
+	if !ticket.Valid(capturedAt, auth.CodexTicketTargetLengthFor(account.GetPlanType())) {
+		return false
 	}
 	if err := db.UpdateCredentials(context.Background(), account.ID(), map[string]interface{}{
 		auth.CodexTicketCredentialKey(model): ticket,

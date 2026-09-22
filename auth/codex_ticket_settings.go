@@ -25,13 +25,13 @@ type CodexTicketSettings struct {
 	// TargetLength 是门票目标长度。等于 CodexTicketDefaultTargetLength 或未配置时
 	// 按账号套餐推导（个人版 292 / 团队版 332）。
 	TargetLength int `json:"target_length"`
-	// TTLSeconds 是门票在网关侧的缓存时长（默认 3600）。
+	// TTLSeconds 是门票在网关侧的缓存时长上限（默认 240）。
 	TTLSeconds int `json:"ttl_seconds"`
-	// RefreshBeforeSeconds 是提前重打窗口（默认 600）：剩余寿命进入该窗口即视为待刷新。
+	// RefreshBeforeSeconds 是提前重打窗口（默认 60）：剩余寿命进入该窗口即视为待刷新。
 	RefreshBeforeSeconds int `json:"refresh_before_seconds"`
-	// ProbeIntervalSeconds 是探测周期（默认 180，下限 30）。
+	// ProbeIntervalSeconds 是探测周期（默认 30，下限 30）。
 	ProbeIntervalSeconds int `json:"probe_interval_seconds"`
-	// CooldownSeconds 是单次探测失败后的冷却时长（默认 180）。
+	// CooldownSeconds 是单次探测失败后的冷却时长（默认 60）。
 	CooldownSeconds int `json:"cooldown_seconds"`
 	// MaxProbesPerRound 是每轮探测的请求数上限（默认 6）。
 	MaxProbesPerRound int `json:"max_probes_per_round"`
@@ -47,11 +47,11 @@ type CodexTicketSettings struct {
 
 // 归一化后的默认值。
 const (
-	CodexTicketDefaultTTLSeconds        = 3600
-	CodexTicketDefaultRefreshBeforeSecs = 600
-	CodexTicketDefaultProbeIntervalSecs = 180
+	CodexTicketDefaultTTLSeconds        = 240
+	CodexTicketDefaultRefreshBeforeSecs = 60
+	CodexTicketDefaultProbeIntervalSecs = 30
 	CodexTicketMinProbeIntervalSecs     = 30
-	CodexTicketDefaultCooldownSecs      = 180
+	CodexTicketDefaultCooldownSecs      = 60
 	CodexTicketDefaultMaxProbesPerRound = 6
 	CodexTicketDefaultProbeTimeoutSecs  = 25
 	// CodexTicketMaxModels 限制门控模型数量，避免配置面被滥用。
@@ -107,11 +107,14 @@ func NormalizeCodexTicketSettings(settings CodexTicketSettings) (CodexTicketSett
 		out.RefreshBeforeSeconds = CodexTicketDefaultRefreshBeforeSecs
 	}
 	if out.RefreshBeforeSeconds >= out.TTLSeconds {
-		out.RefreshBeforeSeconds = out.TTLSeconds / 6
+		out.RefreshBeforeSeconds = min(CodexTicketDefaultRefreshBeforeSecs, out.TTLSeconds/2)
 	}
 	if out.ProbeIntervalSeconds < CodexTicketMinProbeIntervalSecs {
 		out.ProbeIntervalSeconds = CodexTicketDefaultProbeIntervalSecs
 	}
+	// 旧版探测间隔可能长达数分钟；刷新窗口内至少保留两次检查机会。
+	maxInterval := max(CodexTicketMinProbeIntervalSecs, out.RefreshBeforeSeconds/2)
+	out.ProbeIntervalSeconds = min(out.ProbeIntervalSeconds, maxInterval)
 	if out.CooldownSeconds <= 0 {
 		out.CooldownSeconds = CodexTicketDefaultCooldownSecs
 	}

@@ -28,6 +28,7 @@ import (
 const codexTurnStateMetadataKey = "x-codex-turn-state"
 
 type codexTurnStateInjectionKey struct{}
+type codexTicketInjectionKey struct{}
 type codexClientModelKey struct{}
 
 // WithCodexClientModel 记录下游请求的原始模型名，供模型名单与上游模型名一并匹配：
@@ -67,6 +68,14 @@ func CodexTurnStateInjectionFromContext(ctx context.Context) string {
 	return value
 }
 
+func codexTicketFromContext(ctx context.Context) *auth.CodexTicket {
+	if ctx == nil {
+		return nil
+	}
+	ticket, _ := ctx.Value(codexTicketInjectionKey{}).(*auth.CodexTicket)
+	return ticket
+}
+
 // prepareCodexTurnStateInjection 决定并落定注入：返回携带决策的 ctx、（可能克隆的）
 // 下游头与（WS 时改写了帧体的）请求体。未配置且无可用门票时全部原样返回。
 //
@@ -77,15 +86,19 @@ func prepareCodexTurnStateInjection(ctx context.Context, account *auth.Account, 
 	if account == nil {
 		return ctx, requestBody, headers
 	}
+	// 每次出站重新选择完整凭据快照，不能沿用上一次尝试的 Cookie。
+	ctx = withCodexTurnStateInjection(ctx, "")
+	ctx = context.WithValue(ctx, codexTicketInjectionKey{}, (*auth.CodexTicket)(nil))
 	clientModel := codexClientModelFromContext(ctx)
 	upstreamModel := strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())
 	injected := account.CodexTurnStateInjection(clientModel, upstreamModel)
 	if injected == "" {
-		var ok bool
-		injected, ok = codexTicketInjection(account, clientModel, upstreamModel)
-		if !ok {
+		ticket := codexTicketForInjection(account, clientModel, upstreamModel)
+		if ticket == nil {
 			return ctx, requestBody, headers
 		}
+		injected = ticket.State
+		ctx = context.WithValue(ctx, codexTicketInjectionKey{}, ticket)
 	}
 	ctx = withCodexTurnStateInjection(ctx, injected)
 	if headers == nil {
@@ -93,7 +106,7 @@ func prepareCodexTurnStateInjection(ctx context.Context, account *auth.Account, 
 	} else {
 		headers = headers.Clone()
 	}
-	headers.Set(codexTurnStateHeader, injected)
+	applyCodexTurnStateInjectionHeader(ctx, headers)
 	if websocket {
 		// 帧体承载：WS 的握手头逐连接冻结，复用连接根本发不出新值，官方客户端因此把
 		// turn state 放进 response.create 的 client_metadata——WS 路径必须写。
@@ -110,8 +123,15 @@ func prepareCodexTurnStateInjection(ctx context.Context, account *auth.Account, 
 // 门控的判定顺序刻意与注入一致：先看开关/代理/名单是否齐备，再看模型是否在名单内，
 // 最后才查票。FailClosed 的拒绝发生在 Executor 里（需要返回错误），这里只负责取值。
 func codexTicketInjection(account *auth.Account, models ...string) (string, bool) {
+	if ticket := codexTicketForInjection(account, models...); ticket != nil {
+		return ticket.State, true
+	}
+	return "", false
+}
+
+func codexTicketForInjection(account *auth.Account, models ...string) *auth.CodexTicket {
 	if !account.SupportsCodexTickets() || !auth.CodexTicketGateEnabled() {
-		return "", false
+		return nil
 	}
 	gated := make([]string, 0, len(models))
 	for _, model := range models {
@@ -120,10 +140,10 @@ func codexTicketInjection(account *auth.Account, models ...string) (string, bool
 		}
 	}
 	if len(gated) == 0 {
-		return "", false
+		return nil
 	}
 	targetLen := auth.CodexTicketTargetLengthFor(account.GetPlanType())
-	return account.CodexTicketInjectionWithShared(time.Now(), targetLen, gated...)
+	return account.CodexTicketWithShared(time.Now(), targetLen, gated...)
 }
 
 // CodexTicketGateBlocked 判定本次是否应被 FailClosed 门控拒绝：开关打开、已配置代理
@@ -147,6 +167,15 @@ func CodexTicketGateBlocked(ctx context.Context, account *auth.Account, clientMo
 		return "", false
 	}
 	targetLen := auth.CodexTicketTargetLengthFor(account.GetPlanType())
+	if ctx != nil {
+		if _, prepared := ctx.Value(codexTurnStateInjectionKey{}).(string); prepared {
+			// 门控必须检查本次实际选中的票，不能因共享池刚好换票而放行未注入的请求。
+			if ticket := codexTicketFromContext(ctx); ticket != nil && ticket.Valid(time.Now(), targetLen) {
+				return "", false
+			}
+			return gated[0], true
+		}
+	}
 	if _, ok := account.CodexTicketInjectionWithShared(time.Now(), targetLen, gated...); ok {
 		return "", false
 	}
@@ -161,6 +190,9 @@ func applyCodexTurnStateInjectionHeader(ctx context.Context, headers http.Header
 	}
 	if value := CodexTurnStateInjectionFromContext(ctx); value != "" {
 		headers.Set(codexTurnStateHeader, value)
+		if ticket := codexTicketFromContext(ctx); ticket != nil {
+			headers.Set("Cookie", ticket.Cookie)
+		}
 	}
 }
 

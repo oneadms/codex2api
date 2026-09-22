@@ -5251,7 +5251,7 @@
     "claudeMaxToolSchemaBytesDesc": "0 means no gateway schema cap; request and upstream limits still apply.",
     "codexTicket": {
       "sectionTitle": "Codex Turn-State Tickets (Auto Harvest)",
-      "sectionDescription": "Mint X-Codex-Turn-State tickets from the upstream through a dedicated proxy, hold them per account and model, and overwrite whatever the client sent. Complements the manual value stored in account credentials: the manual value wins.",
+      "sectionDescription": "Capture X-Codex-Turn-State tickets and their matching cookies through a dedicated proxy, then send them together on upstream requests. Tickets last about 240 seconds and stop being used 30 seconds early. Legacy tickets without cookies are refreshed. Manual injection still takes priority.",
       "enabled": "Enable background harvesting",
       "enabledDesc": "When off, nothing is probed or injected and requests pass through unchanged. When on, a harvest proxy and at least one gated model are also required for gating to take effect.",
       "gateInactive": "Gating is inactive: a harvest proxy and at least one gated model are still required.",
@@ -5263,7 +5263,7 @@
       "failClosed": "Reject requests with no ticket (fail closed)",
       "failClosedDesc": "When on, an account with no usable ticket for a gated model is rejected outright (503) instead of hitting the upstream bare — the upstream treats ticketless requests as anomalous. A manual injection value bypasses the gate.",
       "probeInterval": "Probe interval (s)",
-      "probeIntervalDesc": "Delay between harvest rounds; minimum 30 seconds.",
+      "probeIntervalDesc": "Check every 30 seconds by default and refresh when less than 60 seconds remain. Longer intervals are capped to fit the refresh window. Minimum 30 seconds.",
       "cooldown": "Failure cooldown (s)",
       "cooldownDesc": "Cooldown after a failed harvest for the same account and model, so a bad account is not retried in a tight loop.",
       "maxProbes": "Probes per round",

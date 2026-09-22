@@ -25,12 +25,12 @@ func TestNormalizeCodexTicketSettings(t *testing.T) {
 		t.Fatalf("defaults not filled: %+v", settings)
 	}
 
-	// TTL 超过上游有效期没有意义，被钳到信封自带的 1 小时。
+	// 旧版长 TTL 必须收敛到当前 240 秒上限。
 	clamped, err := NormalizeCodexTicketSettings(CodexTicketSettings{TTLSeconds: 99999, RefreshBeforeSeconds: 99999})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if clamped.TTLSeconds > int(time.Hour/time.Second) {
+	if clamped.TTLSeconds != 240 {
 		t.Fatalf("TTL not clamped: %d", clamped.TTLSeconds)
 	}
 	if clamped.RefreshBeforeSeconds >= clamped.TTLSeconds {
@@ -154,11 +154,11 @@ func TestCodexTicketExpiry(t *testing.T) {
 	if !stale.Before(captured.Add(ttl)) {
 		t.Fatalf("stale ticket expiry must be bounded by the envelope: %v", stale)
 	}
-	// 信封时刻缺失时退回 TTL。
-	if got := CodexTicketExpiry(captured, time.Time{}, ttl); !got.Equal(captured.Add(ttl)) {
+	// 信封时刻缺失时也不能突破当前有效期。
+	if got := CodexTicketExpiry(captured, time.Time{}, ttl); !got.Equal(captured.Add(210 * time.Second)) {
 		t.Fatalf("expiry without issued time = %v", got)
 	}
-	// 刚签发的票：信封自带的有效期（1h - 30s 安全边界）早于 TTL，取信封值。
+	// 刚签发的票：有效期为 240 秒，预留 30 秒安全边界。
 	fresh := CodexTicketExpiry(captured, captured, ttl)
 	if !fresh.Equal(captured.Add(codexTicketValidity - codexTicketValidityMargin)) {
 		t.Fatalf("fresh ticket expiry = %v", fresh)

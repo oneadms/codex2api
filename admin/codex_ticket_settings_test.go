@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -146,8 +148,11 @@ func TestCodexTicketSettingsRejectsIncompleteEnable(t *testing.T) {
 }
 
 func TestCodexTicketReadyAccountCountsOnlyEligibleCodexAccounts(t *testing.T) {
+	raw := make([]byte, auth.CodexTicketEnvelopeHeaderBytes+auth.CodexTicketBlockBytes*auth.CodexTicketPersonalBlocks)
+	raw[0] = 0x80
+	binary.BigEndian.PutUint64(raw[1:9], uint64(time.Now().Unix()))
 	ticket := &auth.CodexTicket{
-		Model: "gpt-6-astra", State: "gAAAAA" + strings.Repeat("a", 286), Length: 292,
+		Model: "gpt-6-astra", State: base64.URLEncoding.EncodeToString(raw), Length: 292, Cookie: "ticket=ready",
 		ExpiresAt: time.Now().Add(time.Hour),
 	}
 	store := &auth.Store{}

@@ -126,6 +126,7 @@ func TestHarvestOneTicketRefreshesCredentialsAndPublishes(t *testing.T) {
 					t.Error("probe did not use the refreshed access token")
 				}
 				w.Header().Set(codexTurnStateHeader, state)
+				w.Header().Add("Set-Cookie", "ticket=harvest; Path=/")
 				w.Header().Set("Content-Type", "text/event-stream")
 				_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
 			}))
@@ -181,7 +182,7 @@ func TestHarvestOneTicketRefreshesCredentialsAndPublishes(t *testing.T) {
 			}
 			if tc.wantSuccess {
 				persisted := auth.ParseCodexTicket("gpt-6-astra", row.Credentials[auth.CodexTicketCredentialKey("gpt-6-astra")])
-				if persisted == nil || persisted.State != state || account.CodexTicketForModel("gpt-6-astra", time.Now(), 292) == nil {
+				if persisted == nil || persisted.State != state || persisted.Cookie != "ticket=harvest" || account.CodexTicketForModel("gpt-6-astra", time.Now(), 292) == nil {
 					t.Fatal("ticket missing from database or runtime")
 				}
 				if probe.Result != "success" || probe.NextProbeAt != nil {
@@ -199,6 +200,7 @@ func TestHarvestOneTicketPersistenceFailureIsNotSuccess(t *testing.T) {
 	state := testTicketState(time.Now(), auth.CodexTicketPersonalBlocks)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(codexTurnStateHeader, state)
+		w.Header().Add("Set-Cookie", "ticket=harvest; Path=/")
 		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
 	}))
 	t.Cleanup(server.Close)

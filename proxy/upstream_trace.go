@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -151,7 +152,18 @@ func beginUpstreamTrace(ctx context.Context, account *auth.Account, proxyURL str
 		// 反馈自愈：业务响应也在向上游铸造门票，顺手把新票收下、把被拒的票撤掉。
 		// 必须在解锁之后调用——observeCodexTicketFeedback 会反查账号门票，走的是
 		// 账号自己的锁，不能与 trace 锁嵌套。
-		observeCodexTicketFeedback(account, injected, turnState, resp.StatusCode)
+		if !account.SupportsCodexTickets() || !auth.CodexTicketGateEnabled() {
+			return
+		}
+		cookies := codexTicketCookies{}
+		if ticket := codexTicketFromContext(ctx); ticket != nil {
+			cookies.Header = ticket.Cookie
+			cookies.ExpiresAt = ticket.CookieExpiresAt
+		}
+		// Resin 会改写实际请求地址；Cookie 的域和路径仍按 Codex 上游判断。
+		endpoint, _ := url.Parse(CodexBaseURL + "/responses")
+		cookies = captureCodexTicketCookies(endpoint, cookies, resp)
+		observeCodexTicketFeedback(account, injected, turnState, resp.StatusCode, cookies)
 	}
 }
 

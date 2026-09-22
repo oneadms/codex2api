@@ -23,6 +23,7 @@ func TestCodexTicketValidityAndRefresh(t *testing.T) {
 	now := time.Now()
 	valid := &CodexTicket{
 		State:     buildTestTicketState(now, blocks),
+		Cookie:    "ticket=fresh",
 		Length:    expectedLen,
 		IssuedAt:  now,
 		ExpiresAt: now.Add(50 * time.Minute),
@@ -53,11 +54,11 @@ func TestCodexTicketValidityAndRefresh(t *testing.T) {
 		t.Fatal("revoked ticket must be invalid")
 	}
 	// NeedsRefresh：进入重打窗口。
-	if valid.NeedsRefresh(now, 10*time.Minute) {
-		t.Fatal("ticket 60min TTL with 10min pre-window should not refresh at 50min-valid")
+	if valid.NeedsRefresh(now, 60*time.Second) {
+		t.Fatal("fresh ticket should not need a refresh")
 	}
-	late := now.Add(50 * time.Minute)
-	if !valid.NeedsRefresh(late, 10*time.Minute) {
+	late := now.Add(151 * time.Second)
+	if !valid.NeedsRefresh(late, 60*time.Second) {
 		t.Fatal("ticket entering refresh window must report NeedsRefresh")
 	}
 }
@@ -128,6 +129,7 @@ func TestCodexTicketSharedPoolPrefersOwnAndFallsBackByPlanAndModel(t *testing.T)
 	state := buildTestTicketState(now, CodexTicketTeamBlocks)
 	shared := &CodexTicket{
 		Model: "gpt-6-astra", State: state, Length: len(state), IssuedAt: now,
+		Cookie:     "ticket=shared",
 		CapturedAt: now, ExpiresAt: now.Add(50 * time.Minute),
 	}
 	source := &Account{DBID: 101, PlanType: "self_serve_business_prolite"}
@@ -144,10 +146,9 @@ func TestCodexTicketSharedPoolPrefersOwnAndFallsBackByPlanAndModel(t *testing.T)
 		t.Fatal("a different model must not use the shared ticket")
 	}
 
-	ownState := buildTestTicketState(now, CodexTicketTeamBlocks)
-	ownState = ownState[:len(ownState)-1] + "B"
+	ownState := buildTestTicketState(now.Add(time.Second), CodexTicketTeamBlocks)
 	destination.CodexTickets = map[string]*CodexTicket{
-		"gpt-6-astra": {Model: "gpt-6-astra", State: ownState, Length: len(ownState), IssuedAt: now, ExpiresAt: now.Add(time.Hour)},
+		"gpt-6-astra": {Model: "gpt-6-astra", State: ownState, Cookie: "ticket=own", Length: len(ownState), IssuedAt: now, ExpiresAt: now.Add(time.Hour)},
 	}
 	if got, ok := destination.CodexTicketInjectionWithShared(now, CodexTicketExpectedLength(CodexTicketTeamBlocks), "gpt-6-astra"); !ok || got != ownState {
 		t.Fatalf("own ticket must take priority: got=%q ok=%v", got, ok)
@@ -169,6 +170,7 @@ func TestCodexTicketInjection(t *testing.T) {
 		CodexTickets: map[string]*CodexTicket{
 			"gpt-5.5": {
 				State:     state,
+				Cookie:    "ticket=local",
 				Length:    len(state),
 				IssuedAt:  now,
 				ExpiresAt: now.Add(50 * time.Minute),
@@ -208,6 +210,7 @@ func TestCodexTicketInjection(t *testing.T) {
 				ExpiresAt: now.Add(-time.Hour),
 				Standby: &CodexTicket{
 					State:     state,
+					Cookie:    "ticket=standby",
 					Length:    len(state),
 					IssuedAt:  now,
 					ExpiresAt: now.Add(50 * time.Minute),

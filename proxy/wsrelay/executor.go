@@ -188,12 +188,15 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	// 同线程上的后台副请求（request_kind=memory、guardian 子代理）另成一道，
 	// 不与用户在飞轮次同键排队；Desktop 走 HTTP 时元数据只在请求体里。
 	poolSessionID := proxy.ResolveCodexWebsocketTransportSessionKeyWithBody(sessionID, ginHeaders, wsBody)
+	// Cookie 只在握手时发送。换 Cookie 后必须换连接，帧内更新 turn state 无法替代握手。
+	cookieKey := websocketCookieKey(headers.Get("Cookie"))
+	poolSessionID = withWebsocketCookieKey(poolSessionID, cookieKey)
 	var wc *WsConnection
 	var pr *PendingRequest
 	var err2 error
 	acquireStart := time.Now()
 	if prevRespID := strings.TrimSpace(gjson.GetBytes(wsBody, "previous_response_id").String()); prevRespID != "" && !freshConnection {
-		if pwc, ppr, slotKey := e.manager.AcquirePreferredConnectionForURL(prevRespID, account.ID(), apiKey, wsURL); pwc != nil {
+		if pwc, ppr, slotKey := e.manager.AcquirePreferredConnectionForURL(prevRespID, account.ID(), apiKey, wsURL, cookieKey); pwc != nil {
 			wc, pr, poolSessionID = pwc, ppr, slotKey
 		}
 	}
@@ -201,9 +204,10 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	if baseKey == "" && headerSessionID != sessionID {
 		baseKey = headerSessionID
 	}
+	baseKey = withWebsocketCookieKey(baseKey, cookieKey)
 	if wc == nil {
 		if proxy.IsStatelessWebsocketSessionID(sessionID) && baseKey != "" && !statelessOneShotEnabled() && !freshConnection {
-			wc, pr, poolSessionID, err2 = e.manager.AcquireReusableConnection(ctx, account, wsURL, baseKey, sessionID, statelessConnectionSlots(), headers, proxyOverride)
+			wc, pr, poolSessionID, err2 = e.manager.AcquireReusableConnection(ctx, account, wsURL, baseKey, withWebsocketCookieKey(sessionID, cookieKey), statelessConnectionSlots(), headers, proxyOverride)
 		} else {
 			wc, pr, err2 = e.manager.AcquireConnection(ctx, account, wsURL, poolSessionID, headers, proxyOverride)
 		}
