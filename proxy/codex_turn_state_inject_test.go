@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/codex2api/auth"
@@ -40,9 +41,14 @@ func TestExecuteRequestInjectsCredentialTurnState(t *testing.T) {
 				account.CustomHeaders = map[string]string{"X-Codex-Turn-State": tc.customHeader}
 			}
 
-			var capturedHeader http.Header
+			capturedHeaders := make(chan http.Header, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				capturedHeader = r.Header.Clone()
+				// 后台遥测也可能经过 Resin，只观测本例要验证的业务请求。
+				if !strings.HasSuffix(r.URL.Path, "/responses") {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				capturedHeaders <- r.Header.Clone()
 				w.Header().Set("X-Codex-Turn-State", "minted-by-upstream")
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(`{}`))
@@ -62,6 +68,12 @@ func TestExecuteRequestInjectsCredentialTurnState(t *testing.T) {
 				t.Fatalf("ExecuteRequest: %v", err)
 			}
 			_ = resp.Body.Close()
+			var capturedHeader http.Header
+			select {
+			case capturedHeader = <-capturedHeaders:
+			default:
+				t.Fatal("未捕获业务请求")
+			}
 			if got := capturedHeader.Get("X-Codex-Turn-State"); got != tc.wantHeader {
 				t.Fatalf("outbound X-Codex-Turn-State = %q, want %q", got, tc.wantHeader)
 			}
