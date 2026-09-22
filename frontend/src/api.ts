@@ -1,4 +1,5 @@
 import { qualityTestFilterQuery, type QualityTestJob, type QualityTestJobsFilter, type QualityTestJobsResponse, type QualityTestPrompt } from './lib/qualityTest.ts'
+import type { HarvestSnapshot, HarvestControls, HarvestControlSnapshot, HarvestScope, HarvestPage, HarvestNodeRecord, HarvestEvent, HarvestManualRequest, HarvestJob, MihomoStatus, MihomoAction } from './lib/codexHarvest'
 import type {
   AccountEventTrendPoint,
   AccountPortalAuthURLResponse,
@@ -1091,6 +1092,17 @@ export const api = {
       body: JSON.stringify(patch),
     }),
   getCodexTicketSettings: () => request<CodexTicketSettingsResponse>('/settings/codex-ticket'),
+  getMihomo: () => request<MihomoStatus>('/system/mihomo'),
+  updateMihomo: (body: MihomoAction) => request<MihomoStatus>('/system/mihomo', { method: 'POST', body: JSON.stringify(body) }),
+  getCodexHarvest: () => request<HarvestSnapshot>('/codex-harvest'),
+  updateHarvestControls: (body: HarvestControls) => request<HarvestControlSnapshot>('/codex-harvest/controls', { method: 'PUT', body: JSON.stringify(body) }),
+  updateHarvestScope: (body: HarvestScope) => request<HarvestScope>('/codex-harvest/scope', { method: 'PUT', body: JSON.stringify(body) }),
+  kickHarvest: () => request('/codex-harvest/kick', { method: 'POST' }),
+  getHarvestNodes: (offset = 0) => request<HarvestPage<HarvestNodeRecord>>(`/codex-harvest/nodes?offset=${offset}&limit=25`),
+  resetHarvestNodes: (id: number) => request(`/codex-harvest/nodes/${id}`, { method: 'DELETE' }),
+  getHarvestEvents: (offset = 0, accountID = 0, jobID = '') => request<HarvestPage<HarvestEvent>>(`/codex-harvest/events?offset=${offset}&limit=25&account_id=${accountID}&job_id=${encodeURIComponent(jobID)}`),
+  startManualHarvest: (body: HarvestManualRequest) => request<HarvestJob>('/codex-harvest/manual', { method: 'POST', body: JSON.stringify(body) }),
+  stopManualHarvest: (id: string) => request(`/codex-harvest/manual/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   updateCodexTicketSettings: (patch: Partial<Omit<CodexTicketSettingsResponse, 'gate_active' | 'ready_accounts' | 'total_accounts' | 'harvest_proxy_masked'>>) =>
     request<CodexTicketSettingsResponse>('/settings/codex-ticket', {
       method: 'PUT',

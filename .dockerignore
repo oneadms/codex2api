@@ -22,6 +22,9 @@ Thumbs.db
 
 # Local credentials and account-test fixtures must never enter a build context.
 .private-account-fixtures/
+.codex-tmp/
+data/
+index.html
 *.zip
 
 # Docker

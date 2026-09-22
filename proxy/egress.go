@@ -18,10 +18,11 @@ import (
 //     (由 auth.Store.ResolveProxyForAccount 按 账号 > 分组 > 代理池 > 全局 选出一条)
 //  3. 直连
 //
-// 优先级固定为 Resin > 代理 > 直连,且 Resin 是整层覆盖:一旦启用,Codex 渠道
+// 普通请求的优先级为 Resin > 代理 > 直连,且 Resin 是整层覆盖:一旦启用,Codex 渠道
 // 所有携带账号身份的出站(/responses、compact、WS、wham 用量、订阅查询、遥测、
 // 令牌刷新)全部改经 Resin,第 2 层选出的代理只保留在日志/审计里、不参与拨号。
 // Claude / Grok / Antigravity 等中继型账号不经 Resin,继续走第 2 层。
+// 已注入门票的业务请求优先使用该票保存的采票代理，保持票据所需的出口绑定。
 //
 // 所有 Codex 出站选客户端的地方都必须经过本文件的解析器,禁止各自再写
 // `if IsResinEnabled()` 分支——分支散落正是"三套互相覆盖、看不出谁在生效"的根源。
@@ -48,8 +49,9 @@ type CodexEgress struct {
 	// DialProxyURL 是实际参与拨号的代理:Resin 模式恒为空。
 	DialProxyURL string
 
-	account *auth.Account
-	client  *http.Client
+	account         *auth.Account
+	client          *http.Client
+	freshTicketNode bool
 }
 
 // ResolveCodexEgress 为一次携带账号身份的 Codex HTTP 出站决定链路。
@@ -62,6 +64,9 @@ func ResolveCodexEgress(account *auth.Account, targetURL, proxyURL string) Codex
 // ResolveCodexEgressForContext 沿用请求固定的 Resin 配置与平台，保证热更新时
 // URL、客户端、身份头与审计仍对应同一次出口决策。
 func ResolveCodexEgressForContext(ctx context.Context, account *auth.Account, targetURL, proxyURL string) CodexEgress {
+	if pinned := CodexTicketProxyForRequest(ctx, ""); pinned != "" {
+		return CodexEgress{Kind: CodexEgressProxy, URL: targetURL, ProxyURL: pinned, DialProxyURL: pinned, account: account, freshTicketNode: codexTicketFromContext(ctx).HarvestNodeID != ""}
+	}
 	proxyURL = strings.TrimSpace(proxyURL)
 	cfg := ResinConfigFromContext(ctx)
 	if cfg != nil && AccountSupportsResin(account) {
@@ -89,7 +94,7 @@ func ResolveCodexEgressForContext(ctx context.Context, account *auth.Account, ta
 // resinCarriesEgressForContext 与出口解析使用相同的账号范围与请求配置快照。
 // TRAE CN 保留二开的 Resin 支持，其余中继型账号仍按代理链解析。
 func resinCarriesEgressForContext(ctx context.Context, account *auth.Account) bool {
-	return IsResinEnabledForContext(ctx) && AccountSupportsResin(account)
+	return CodexTicketProxyForRequest(ctx, "") == "" && IsResinEnabledForContext(ctx) && AccountSupportsResin(account)
 }
 
 // ViaResin 报告本次出站是否经 Resin。
@@ -101,6 +106,16 @@ func (e CodexEgress) ViaResin() bool {
 // 其余模式复用网关主池(uTLS + 代理)。account 为 nil 且非 Resin 时返回 nil,
 // 由调用方按自己的兜底 transport 处理。
 func (e CodexEgress) Client() *http.Client {
+	if e.freshTicketNode {
+		// Selector 切换后的请求必须重新 CONNECT，不能复用指向其他节点的 TCP 连接。
+		client, err := auth.BuildHTTPClientChecked(e.DialProxyURL)
+		if err == nil {
+			if transport, ok := client.Transport.(*http.Transport); ok {
+				transport.DisableKeepAlives = true
+			}
+			return client
+		}
+	}
 	if e.client != nil {
 		return e.client
 	}
@@ -128,6 +143,9 @@ func ResolveCodexWebsocketEgress(account *auth.Account, wsURL, proxyURL string) 
 
 // ResolveCodexWebsocketEgressForContext 为 WS URL 改写沿用请求固定的配置与平台。
 func ResolveCodexWebsocketEgressForContext(ctx context.Context, account *auth.Account, wsURL, proxyURL string) CodexEgress {
+	if pinned := CodexTicketProxyForRequest(ctx, ""); pinned != "" {
+		return CodexEgress{Kind: CodexEgressProxy, URL: wsURL, ProxyURL: pinned, DialProxyURL: pinned, account: account}
+	}
 	proxyURL = strings.TrimSpace(proxyURL)
 	cfg := ResinConfigFromContext(ctx)
 	if cfg != nil && AccountSupportsResin(account) {

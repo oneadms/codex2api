@@ -41,6 +41,8 @@ type WsConnection struct {
 	upstreamUserAgentKnown bool
 	// 握手 Cookie 的摘要用于续链复用校验，Cookie 原文不保存在连接池元数据中。
 	upstreamCookieKey string
+	// 旧握手只能读取一次，连接复用不延长 Cookie 的新鲜期。
+	ticketCookieObserved atomic.Bool
 
 	// 创建/复用该连接的账号。仅用于读取当前动态并发上限，让 response_id
 	// 续链复用路径也能在账号上限下调后收敛空闲连接数。
@@ -1247,6 +1249,9 @@ func (m *Manager) createConnection(
 	// 拨号连接
 	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
 	if err != nil {
+		if resp != nil {
+			proxy.ObserveCodexTicketRejection(ctx, resp.StatusCode)
+		}
 		m.sessions.Delete(poolKey)
 		session.Close()
 		// bad handshake 时 resp 常非空：附带上游 HTTP 状态/ body，便于测试连接定位。
@@ -1261,7 +1266,7 @@ func (m *Manager) createConnection(
 	wc.PoolKey = poolKey
 	wc.upstreamUserAgent = strings.TrimSpace(headers.Get("User-Agent"))
 	wc.upstreamUserAgentKnown = true
-	wc.upstreamCookieKey = websocketCookieKey(headers.Get("Cookie"))
+	wc.upstreamCookieKey = websocketCookieKey(headers.Get("Cookie"), proxy.CodexTicketSessionForRequest(ctx))
 	wc.httpResp = resp
 	wc.onDisconnected = m.getOnDisconnected()
 	wc.onReadFailure = m.DiscardConnection

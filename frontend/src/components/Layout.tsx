@@ -27,6 +27,7 @@ const navDefs: NavDef[] = [
   { to: '/accounts', labelKey: 'nav.accounts', icon: <Users className="size-[18px]" /> },
   { to: '/api-keys', labelKey: 'nav.apiKeys', icon: <KeyRound className="size-[18px]" /> },
   { to: '/proxies', labelKey: 'nav.proxies', icon: <Globe className="size-[18px]" /> },
+  { to: '/codex-harvest', labelKey: 'harvest.title', icon: <FlaskConical className="size-[18px]" /> },
   { to: '/images/studio', labelKey: 'nav.images', icon: <ImageIcon className="size-[18px]" />, activePrefix: '/images' },
   { to: '/quality-test', labelKey: 'nav.qualityTest', icon: <FlaskConical className="size-[18px]" /> },
   { to: '/prompt-filter/overview', labelKey: 'nav.promptFilter', icon: <ShieldAlert className="size-[18px]" />, activePrefix: '/prompt-filter' },

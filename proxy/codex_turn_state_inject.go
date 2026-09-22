@@ -99,6 +99,7 @@ func prepareCodexTurnStateInjection(ctx context.Context, account *auth.Account, 
 		}
 		injected = ticket.State
 		ctx = context.WithValue(ctx, codexTicketInjectionKey{}, ticket)
+		ctx = withCodexTicketFeedbackAttempt(ctx, account, ticket)
 	}
 	ctx = withCodexTurnStateInjection(ctx, injected)
 	if headers == nil {
@@ -192,6 +193,7 @@ func applyCodexTurnStateInjectionHeader(ctx context.Context, headers http.Header
 		headers.Set(codexTurnStateHeader, value)
 		if ticket := codexTicketFromContext(ctx); ticket != nil {
 			headers.Set("Cookie", ticket.Cookie)
+			applyCodexTicketSession(headers, ticket.HarvestSessionID)
 		}
 	}
 }

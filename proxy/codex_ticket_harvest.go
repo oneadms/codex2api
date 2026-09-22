@@ -13,6 +13,8 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
+	"github.com/codex2api/internal/harvest"
+	"github.com/codex2api/internal/mihomo"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -22,9 +24,8 @@ import (
 //
 // 设计要点（与 sub2api 的 openai_codex_ticket.go 同源，但接进 codex2api 既有设施）：
 //
-//  1. 打票出口与业务出口分离：打票走 HarvestProxyURL（专用打票代理，由代理服务商
-//     自己轮换出口 IP），业务请求仍走账号绑定的住宅代理。用同一条住宅 IP 反复打票
-//     会迅速把该 IP 打脏，而门票与铸造时的出口绑定，脏 IP 铸出来的票很快被拒。
+//  1. 采票使用专用代理和全新会话，业务请求沿用保存的出口与会话快照。
+//     轮换代理地址不代表固定出口 IP；定向节点只有通过独立 Selector 才能锁定。
 //  2. 只补缺与临期：已有可用门票且未进入重打窗口的 (账号, 模型) 直接跳过。
 //  3. 失败冷却：按账号+模型记 NextProbeAt，避免一个坏号被反复打。
 //  4. 必须读到成功终态才落库：HTTP 200 不等于铸造成功，response.failed / 无终态
@@ -62,9 +63,11 @@ func codexTicketHarvestProbeBody(model string) []byte {
 
 // codexTicketHarvestResult 是一次打票的结果。Err 非空表示本轮未取到可用门票。
 type codexTicketHarvestResult struct {
-	State      string
-	Cookies    codexTicketCookies
-	HTTPStatus int
+	State          string
+	Cookies        codexTicketCookies
+	Binding        *auth.CodexTicket
+	HTTPStatus     int
+	ObservedLength int
 	// Result 是探测结论，取值与 auth.CodexTicketProbeSummary.Result 一致：
 	// success / token_error / error / invalid_state / response_incomplete_or_error。
 	Result string
@@ -75,7 +78,7 @@ type codexTicketHarvestResult struct {
 // applyCodexRequestHeaders 的伪装逻辑，保证探测请求与业务请求形状一致。
 //
 // 门票只有在读到 response.completed / response.incomplete 成功终态后才可信。
-func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, proxyURL string, attemptTimeout time.Duration) codexTicketHarvestResult {
+func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, proxyURL string, attemptTimeout time.Duration) (result codexTicketHarvestResult) {
 	fail := func(result string, err error) codexTicketHarvestResult {
 		return codexTicketHarvestResult{Result: result, Err: err}
 	}
@@ -106,36 +109,43 @@ func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, p
 	}
 	attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
 	defer cancel()
+	release, err := mihomo.Lease(attemptCtx, proxyURL)
+	if err != nil {
+		return fail("error", fmt.Errorf("采票节点不可用"))
+	}
+	defer func() { release(result.Result == "success") }()
 
 	body := codexTicketHarvestProbeBody(model)
 	req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, codexTicketUpstreamEndpoint(), bytes.NewReader(body))
 	if err != nil {
 		return fail("error", err)
 	}
-	applyCodexRequestHeaders(req, account, accessToken, "", "", nil, nil)
+	sessionID := NewUpstreamSessionUUID()
+	applyCodexRequestHeaders(req, account, accessToken, sessionID, "", nil, nil)
+	applyCodexTicketSession(req.Header, sessionID)
+	// 与 sub2api 一致：只复用本账号、本模型的有效 Cookie，不继承自定义 Cookie 或旧票据。
+	req.Header.Del("Cookie")
+	if cookie := account.CodexHarvestCookie(model, time.Now()); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	req.Header.Del(codexTurnStateHeader)
 	req.Header.Set("Accept", "text/event-stream")
 
-	resp, err := client.Do(req)
+	probe, err := performCodexHarvestTransport(req, body, client)
 	if err != nil {
 		return fail("error", fmt.Errorf("打票请求失败: %w", err))
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	status := resp.StatusCode
+	status := probe.Status
 	if status != http.StatusOK {
-		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		return codexTicketHarvestResult{
 			HTTPStatus: status,
 			Result:     harvestResultForHTTPStatus(status),
-			Err:        fmt.Errorf("上游状态 %d: %s", status, strings.TrimSpace(string(detail))),
+			Err:        fmt.Errorf("上游状态 %d", status),
 		}
 	}
-
-	state := observedCodexTurnState(resp.Header.Get(codexTurnStateHeader))
-	cookies := captureCodexTicketCookies(req.URL, codexTicketCookies{Header: req.Header.Get("Cookie")}, resp)
-	gotTerminal, valid := validateCodexHarvestStream(resp.Body)
-	if !valid {
-		return codexTicketHarvestResult{HTTPStatus: status, Result: harvestResultForTerminal(gotTerminal), Err: fmt.Errorf("打票响应未到成功终态")}
+	state, cookies := probe.State, probe.Cookies
+	if !probe.Completed {
+		return codexTicketHarvestResult{ObservedLength: len(state), HTTPStatus: status, Result: harvestResultForTerminal(probe.Terminal), Err: fmt.Errorf("打票响应未到成功终态")}
 	}
 	settings := auth.ConfiguredCodexTicketSettings()
 	planType := account.GetPlanType()
@@ -144,8 +154,9 @@ func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, p
 	// Capture the plan/config once so the diagnostic matches the actual check.
 	invalidState := func(validation string, err error) codexTicketHarvestResult {
 		return codexTicketHarvestResult{
-			HTTPStatus: status,
-			Result:     "invalid_state",
+			ObservedLength: len(state),
+			HTTPStatus:     status,
+			Result:         "invalid_state",
 			Err: fmt.Errorf("%w (validation=%s plan_type=%q actual_length=%d expected_length=%d configured_length=%d)",
 				err, validation, planType, len(state), targetLen, settings.TargetLength),
 		}
@@ -179,7 +190,8 @@ func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, p
 			shape.IssuedAt.UTC().Format(time.RFC3339), ticket.ExpiresAt.UTC().Format(time.RFC3339),
 			now.UTC().Format(time.RFC3339), int64(now.Sub(shape.IssuedAt)/time.Second)))
 	}
-	return codexTicketHarvestResult{HTTPStatus: status, State: state, Cookies: cookies, Result: "success"}
+	return codexTicketHarvestResult{HTTPStatus: status, State: state, Cookies: cookies,
+		Binding: &auth.CodexTicket{HarvestProxyURL: proxyURL, HarvestSessionID: sessionID}, Result: "success"}
 }
 
 func harvestResultForHTTPStatus(status int) string {
@@ -261,20 +273,36 @@ func StartCodexTicketHarvestLoop(ctx context.Context, db *database.DB, store *au
 		}()
 		runCodexTicketHarvestOnce(taskCtx, db, store)
 		for {
+			interval := auth.CodexTicketProbeInterval()
+			var wake <-chan struct{}
+			if manager := codexHarvester.Load(); manager != nil {
+				controls, _, _ := manager.Controls.Controls(taskCtx)
+				interval = time.Duration(controls.Speed.RoundIntervalSeconds) * time.Second
+				wake = manager.Controls.Wake()
+				next := time.Now().Add(interval)
+				manager.Controls.SetRuntime(func(r *harvest.CodexHarvestRuntime) { r.NextRoundAt = &next })
+			}
+			timer := time.NewTimer(interval)
 			select {
 			case <-taskCtx.Done():
+				timer.Stop()
 				return
 			case <-codexTicketHarvestKick:
-				runCodexTicketHarvestOnce(taskCtx, db, store)
-			case <-time.After(auth.CodexTicketProbeInterval()):
-				runCodexTicketHarvestOnce(taskCtx, db, store)
+			case <-wake:
+			case <-timer.C:
 			}
+			timer.Stop()
+			runCodexTicketHarvestOnce(taskCtx, db, store)
 		}
 	})
 }
 
 // runCodexTicketHarvestOnce 打一轮票：门控齐备时逐个账号、逐个门控模型判断。
 func runCodexTicketHarvestOnce(ctx context.Context, db *database.DB, store *auth.Store) {
+	if manager := codexHarvester.Load(); manager != nil && manager.DB == db && manager.Store == store {
+		manager.RunRound(ctx)
+		return
+	}
 	if !auth.CodexTicketGateEnabled() {
 		return
 	}
@@ -332,7 +360,6 @@ func probeCodexTicketWithRefresh(ctx context.Context, store *auth.Store, acc *au
 	if budget == nil || *budget <= 0 {
 		return codexTicketHarvestResult{Result: "error", Err: fmt.Errorf("本轮打票次数已用完")}
 	}
-	*budget--
 	if timeout <= 0 {
 		timeout = time.Duration(auth.CodexTicketDefaultProbeTimeoutSecs) * time.Second
 	}
@@ -341,6 +368,10 @@ func probeCodexTicketWithRefresh(ctx context.Context, store *auth.Store, acc *au
 	if err := store.EnsureCodexTicketAccessToken(ctx, acc, false); err != nil {
 		return codexTicketHarvestResult{Result: "token_error", Err: err}
 	}
+	if err := waitCodexHarvestRequest(ctx); err != nil {
+		return codexTicketHarvestResult{Result: "error", Err: err}
+	}
+	*budget--
 	result := fireCodexTicketHarvest(ctx, acc, model, proxyURL, timeout)
 	if result.HTTPStatus != http.StatusUnauthorized || ctx.Err() != nil {
 		return result
@@ -352,6 +383,9 @@ func probeCodexTicketWithRefresh(ctx context.Context, store *auth.Store, acc *au
 	if *budget <= 0 {
 		result.Err = fmt.Errorf("%v；凭据已刷新，本轮打票次数已用完，冷却后重试", result.Err)
 		return result
+	}
+	if err := waitCodexHarvestRequest(ctx); err != nil {
+		return codexTicketHarvestResult{Result: "error", Err: err}
 	}
 	*budget--
 	return fireCodexTicketHarvest(ctx, acc, model, proxyURL, timeout)
@@ -366,7 +400,7 @@ func harvestOneTicket(ctx context.Context, db *database.DB, store *auth.Store, a
 	res := probeCodexTicketWithRefresh(ctx, store, acc, model, proxyURL, timeout, budget)
 	// Persist before declaring success: a failed write must not leave a success
 	// summary or log while the fail-closed gate still has no usable ticket.
-	if res.Result == "success" && !publishCodexTicket(db, store, acc, model, res.State, codexTicketIssuedAt(res.State), res.Cookies) {
+	if res.Result == "success" && !publishCodexTicket(db, store, acc, model, res.State, codexTicketIssuedAt(res.State), res.Cookies, res.Binding) {
 		res.Result = "error"
 		res.Err = fmt.Errorf("门票落库失败")
 	}

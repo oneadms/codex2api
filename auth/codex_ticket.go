@@ -41,7 +41,7 @@ const (
 	// CodexTicketProbeCredentialKeySuffix 是探测结果摘要的键后缀。
 	CodexTicketProbeCredentialKeySuffix = ":probe"
 
-	// codexTicketValidity 按当前门票协议限制为签发后约 240 秒。
+	// codexTicketValidity 是本地保守缓存上限，不代表上游保证的票据寿命。
 	codexTicketValidity = 240 * time.Second
 	// codexTicketIssuedSkew 允许签发时刻比本地时间超前这么多（时钟漂移容差）。
 	codexTicketIssuedSkew = 30 * time.Second
@@ -166,6 +166,14 @@ type CodexTicket struct {
 	Cookie string `json:"cookie,omitempty"`
 	// CookieExpiresAt 单独保留 Cookie 的期限，业务响应换票时不能误用旧门票的期限。
 	CookieExpiresAt time.Time `json:"cookie_expires_at,omitempty"`
+	// CookieCapturedAt 独立计时，业务换票不能延长未更新的 Cookie。
+	CookieCapturedAt time.Time `json:"cookie_captured_at,omitempty"`
+	// 打票出口与会话随票保存，热备切换和业务续票必须沿用同一份快照。
+	HarvestProxyURL  string `json:"harvest_proxy_url,omitempty"`
+	HarvestSessionID string `json:"harvest_session_id,omitempty"`
+	HarvestNodeID    string `json:"harvest_node_id,omitempty"`
+	HarvestNodeName  string `json:"harvest_node_name,omitempty"`
+	HarvestPoolID    string `json:"harvest_pool_id,omitempty"`
 	// Length 是 State 的长度，落库后用于快速校验（不信任序列化后的长度）。
 	Length int `json:"length"`
 	// Blocks 是信封块数。
@@ -191,6 +199,9 @@ func (t *CodexTicket) Valid(now time.Time, targetLen int) bool {
 	if t == nil || t.Revoked || NormalizeCodexTicketCookie(t.Cookie) == "" {
 		return false
 	}
+	if (t.HarvestProxyURL != "" && ValidateCodexTicketProxyURL(t.HarvestProxyURL) != nil) || strings.ContainsAny(t.HarvestSessionID, "\r\n") {
+		return false
+	}
 	state := strings.TrimSpace(t.State)
 	if targetLen <= 0 {
 		targetLen = CodexTicketDefaultTargetLength
@@ -205,7 +216,7 @@ func (t *CodexTicket) Valid(now time.Time, targetLen int) bool {
 	if t.ExpiresAt.IsZero() || !now.Before(t.ExpiresAt) {
 		return false
 	}
-	if !t.CookieExpiresAt.IsZero() && !now.Before(t.CookieExpiresAt) {
+	if !t.CookieFresh(now) {
 		return false
 	}
 	return true
@@ -229,8 +240,8 @@ func (t *CodexTicket) EffectiveExpiry() time.Time {
 		return time.Time{}
 	}
 	expires := minCodexTicketExpiry(t.ExpiresAt, shape.IssuedAt.Add(codexTicketValidity-codexTicketValidityMargin))
-	if !t.CookieExpiresAt.IsZero() {
-		expires = minCodexTicketExpiry(expires, t.CookieExpiresAt)
+	if cookieExpiry := t.CookieEffectiveExpiry(); !cookieExpiry.IsZero() {
+		expires = minCodexTicketExpiry(expires, cookieExpiry)
 	}
 	return expires
 }
@@ -377,6 +388,16 @@ func cloneCodexTicket(ticket *CodexTicket) *CodexTicket {
 	return &copy
 }
 
+// CodexTicketSnapshot 返回包括失效状态的完整副本，供持久化撤销结果使用。
+func (a *Account) CodexTicketSnapshot(model string) *CodexTicket {
+	if a == nil {
+		return nil
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return cloneCodexTicket(a.CodexTickets[NormalizeCodexTicketModel(model)])
+}
+
 func publishCodexTicketToSharedPool(planType string, ticket *CodexTicket) {
 	if ticket == nil || NormalizeCodexTicketModel(ticket.Model) == "" {
 		return
@@ -388,8 +409,9 @@ func publishCodexTicketToSharedPool(planType string, ticket *CodexTicket) {
 	defer codexTicketSharedPool.Unlock()
 	current := codexTicketSharedPool.tickets[key]
 	if current == nil || copy.CapturedAt.After(current.CapturedAt) || (copy.CapturedAt.Equal(current.CapturedAt) && copy.State != current.State) {
-		if current != nil && !current.Revoked && current.State != copy.State && copy.Standby == nil {
+		if current != nil && current.Valid(time.Now(), copy.Length) && current.State != copy.State && copy.Standby == nil {
 			copy.Standby = cloneCodexTicket(current)
+			copy.Standby.Standby = nil
 		}
 		codexTicketSharedPool.tickets[key] = copy
 	}
@@ -503,7 +525,14 @@ type CodexTicketStatus struct {
 	// IssuedAt 是上游签发时刻。
 	IssuedAt *time.Time `json:"issued_at,omitempty"`
 	// Probe 是最近一次探测结果。
-	Probe *CodexTicketProbeSummary `json:"probe,omitempty"`
+	Probe                  *CodexTicketProbeSummary `json:"probe,omitempty"`
+	CookieCount            int                      `json:"cookie_count"`
+	CookieRemainingSeconds int64                    `json:"cookie_remaining_seconds"`
+	CookieExpiresAt        *time.Time               `json:"cookie_expires_at,omitempty"`
+	CookieExpired          bool                     `json:"cookie_expired"`
+	EgressBound            bool                     `json:"egress_bound"`
+	SessionBound           bool                     `json:"session_bound"`
+	StandbyReady           bool                     `json:"standby_ready"`
 }
 
 // CodexTicketStatuses 汇总账号在各门控模型上的门票状态。models 为门控名单。
@@ -534,6 +563,15 @@ func (a *Account) CodexTicketStatuses(models []string, now time.Time, targetLen 
 		if !ticket.Valid(now, targetLen) && ticket.Standby != nil && ticket.Standby.Valid(now, targetLen) {
 			active = ticket.Standby
 		}
+		status.CookieCount = active.CookieCount()
+		status.CookieExpired = !active.CookieFresh(now)
+		if expiry := active.CookieEffectiveExpiry(); !expiry.IsZero() {
+			status.CookieExpiresAt = &expiry
+			status.CookieRemainingSeconds = max(0, int64(expiry.Sub(now)/time.Second))
+		}
+		status.EgressBound = active.HarvestProxyURL != ""
+		status.SessionBound = active.HarvestSessionID != ""
+		status.StandbyReady = active == ticket && ticket.Standby.Valid(now, targetLen)
 		if active.Valid(now, targetLen) {
 			status.Ready = true
 			status.Length = active.Length
@@ -669,8 +707,9 @@ func (s *Store) PublishCodexTicket(id int64, ticket *CodexTicket) {
 	}
 	next := *ticket
 	next.Model = key
-	if current := account.CodexTickets[key]; current != nil && !current.Revoked && current.State != next.State {
+	if current := account.CodexTickets[key]; next.Standby == nil && current != nil && current.Valid(time.Now(), next.Length) && current.State != next.State {
 		previous := *current
+		previous.Standby = nil
 		next.Standby = &previous
 	}
 	account.CodexTickets[key] = &next
@@ -720,8 +759,17 @@ func (s *Store) RevokeCodexTicketForState(id int64, model, state string) bool {
 	defer account.mu.Unlock()
 	key := NormalizeCodexTicketModel(model)
 	current := account.CodexTickets[key]
-	if current == nil || current.State != state {
+	if current == nil {
 		return false
+	}
+	if current.State != state {
+		if current.Standby == nil || current.Standby.State != state {
+			return false
+		}
+		next := *current
+		next.Standby = nil
+		account.CodexTickets[key] = &next
+		return true
 	}
 	if current.Standby != nil {
 		next := *current.Standby

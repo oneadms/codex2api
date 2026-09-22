@@ -13,9 +13,8 @@ import (
 // 后台自动打票的全局配置。与手工注入（codex_turn_state.go）不同，这份配置是全局的，
 // 逐账号/逐模型的差异只体现在门票本身与门控模型名单上。
 //
-// 打票出口与业务出口刻意分开：业务请求仍走账号绑定的住宅代理，打票走
-// HarvestProxyURL（由代理服务商自己轮换出口 IP）。用同一条住宅 IP 反复打票会迅速
-// 把该 IP 打脏，而门票本身与铸造时的出口绑定，脏 IP 铸出来的票很快会被上游拒绝。
+// 采票走 HarvestProxyURL；业务注入票据后沿用票据里的出口和会话快照。
+// 普通轮换代理不保证固定 IP，定向节点需由 Mihomo 独立 Selector 锁定。
 type CodexTicketSettings struct {
 	// Enabled 是总开关。关闭时既不探测也不注入，按原链路转发。
 	Enabled bool `json:"enabled"`

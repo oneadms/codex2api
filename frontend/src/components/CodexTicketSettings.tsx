@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { Link } from 'react-router-dom'
 import { Loader2, RefreshCw, RotateCcw, Ticket } from 'lucide-react'
 import { api } from '../api'
 import type { CodexTicketSettingsResponse } from '../types'
@@ -13,9 +14,9 @@ import { Switch } from './ui/switch'
 // 不受通用设置保存影响。
 //
 // 界面要传达两件容易被误解的事：
-//   1. 打票代理与业务代理是两回事，留空不会回落到账号住宅代理（会污染出口 IP）。
+//   1. 采票使用专用代理，票据携带出口快照，业务注入后沿用该快照。
 //   2. FailClosed 打开时，门控模型上没票的账号会被直接拒绝出站，而不是裸打上游。
-export default function CodexTicketSettings() {
+export default function CodexTicketSettings({ hideTiming = false }: { hideTiming?: boolean }) {
   const { t } = useTranslation()
   const { showToast } = useToast()
   const [settings, setSettings] = useState<CodexTicketSettingsResponse | null>(null)
@@ -147,29 +148,7 @@ export default function CodexTicketSettings() {
         />
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-3">
-        <NumberField
-          label={t('settings.codexTicket.probeInterval')}
-          description={t('settings.codexTicket.probeIntervalDesc')}
-          value={settings?.probe_interval_seconds ?? 0}
-          disabled={saving}
-          onCommit={(value) => void patch({ probe_interval_seconds: value })}
-        />
-        <NumberField
-          label={t('settings.codexTicket.cooldown')}
-          description={t('settings.codexTicket.cooldownDesc')}
-          value={settings?.cooldown_seconds ?? 0}
-          disabled={saving}
-          onCommit={(value) => void patch({ cooldown_seconds: value })}
-        />
-        <NumberField
-          label={t('settings.codexTicket.maxProbes')}
-          description={t('settings.codexTicket.maxProbesDesc')}
-          value={settings?.max_probes_per_round ?? 0}
-          disabled={saving}
-          onCommit={(value) => void patch({ max_probes_per_round: value })}
-        />
-      </div>
+      {!hideTiming && <Link className="inline-flex text-sm text-primary underline underline-offset-4" to="/codex-harvest">{t('harvest.title')} · {t('harvest.controls')} · Mihomo</Link>}
 
       {error ? (
         <div className="flex items-center justify-between gap-3">
@@ -182,38 +161,6 @@ export default function CodexTicketSettings() {
           <RefreshCw className="size-4" />{t('common.refresh')}
         </Button>
       </div>
-    </div>
-  )
-}
-
-function NumberField({ label, description, value, disabled, onCommit }: {
-  label: string
-  description: string
-  value: number
-  disabled?: boolean
-  onCommit: (value: number) => void
-}) {
-  const [draft, setDraft] = useState(String(value))
-  useEffect(() => { setDraft(String(value)) }, [value])
-  const commit = () => {
-    const parsed = Number.parseInt(draft, 10)
-    if (!Number.isFinite(parsed) || parsed <= 0 || parsed === value) {
-      setDraft(String(value))
-      return
-    }
-    onCommit(parsed)
-  }
-  return (
-    <div className="space-y-1.5">
-      <label className="text-sm font-medium">{label}</label>
-      <Input
-        value={draft}
-        inputMode="numeric"
-        disabled={disabled}
-        onChange={(event) => setDraft(event.target.value)}
-        onBlur={commit}
-      />
-      <p className="text-sm leading-relaxed text-muted-foreground">{description}</p>
     </div>
   )
 }

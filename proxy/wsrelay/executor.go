@@ -130,6 +130,8 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 
 	// 准备请求体
 	wsBody := e.prepareWebsocketBody(requestBody, sessionID)
+	wsBody = proxy.ApplyCodexTicketRequestBody(ctx, wsBody, true)
+	proxyOverride = proxy.CodexTicketProxyForRequest(ctx, proxyOverride)
 
 	headerSessionID := resolveHandshakeSessionID(sessionID, poolRouteKey, wsBody)
 
@@ -189,7 +191,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	// 不与用户在飞轮次同键排队；Desktop 走 HTTP 时元数据只在请求体里。
 	poolSessionID := proxy.ResolveCodexWebsocketTransportSessionKeyWithBody(sessionID, ginHeaders, wsBody)
 	// Cookie 只在握手时发送。换 Cookie 后必须换连接，帧内更新 turn state 无法替代握手。
-	cookieKey := websocketCookieKey(headers.Get("Cookie"))
+	cookieKey := websocketCookieKey(headers.Get("Cookie"), proxy.CodexTicketSessionForRequest(ctx))
 	poolSessionID = withWebsocketCookieKey(poolSessionID, cookieKey)
 	var wc *WsConnection
 	var pr *PendingRequest
@@ -757,6 +759,9 @@ func ExecuteRequestWebsocket(ctx context.Context, account *auth.Account, request
 	// 检查 HTTP 握手响应状态。WebSocket 握手成功的标准状态是 101，
 	// 但这里要包装成现有 handler 可消费的 SSE HTTP 200 响应。
 	handshakeResp := wsResp.HTTPResponse()
+	if wsResp.conn != nil && wsResp.conn.ticketCookieObserved.CompareAndSwap(false, true) {
+		proxy.ObserveCodexTicketHandshake(ctx, handshakeResp)
+	}
 	statusCode, handshakeHeader, handshakeFailed := normalizeWebsocketHandshakeResponse(handshakeResp)
 	if handshakeFailed {
 		detail := formatFailedHandshakeHTTPBody(statusCode, handshakeResp)
@@ -818,6 +823,7 @@ func websocketResponseToHTTP(ctx context.Context, wsResp *WsResponse, statusCode
 		err := wsResp.ReadStream(func(data []byte) bool {
 			// 上游回带的 turn state 只在帧里（握手头是建连时的旧快照），逐帧观测记进追踪。
 			proxy.ObserveCodexTurnStateFrame(ctx, data)
+			proxy.ObserveCodexTicketFeedbackFrame(ctx, data)
 			// SSE 的 data: 负载以换行为界，含换行的帧（如 pretty-printed JSON）
 			// 必须先压缩成单行，否则下游解析器只能读到第一行。
 			if bytes.IndexByte(data, '\n') >= 0 {

@@ -45,6 +45,8 @@ AGENTS.md
 CLIProxyAPI/
 CLIProxyAPI-Pro/
 sub2api/
+!third_party/sub2api/
+!third_party/sub2api/**
 new-api/
 CPA-Manager-Plus/
 grok2api/

@@ -5257,7 +5257,7 @@
       "gateInactive": "Gating is inactive: a harvest proxy and at least one gated model are still required.",
       "ready": "{{ready}} / {{total}} accounts already hold a usable ticket for a gated model.",
       "proxy": "Harvest proxy",
-      "proxyDesc": "Dedicated egress for harvesting (http / https / socks5 / socks5h), kept separate from the account's residential proxy. Leaving it empty never falls back to the business proxy: repeatedly harvesting from one residential IP burns it quickly and the minted tickets get rejected. Passwords display as ***; submitting the mask unchanged keeps the stored password.",
+      "proxyDesc": "Harvesting supports http / https / socks5 / socks5h. Requests using a ticket reuse its proxy and session; a rotating proxy URL does not guarantee a fixed egress IP. Empty disables harvesting. Passwords display as ***; submitting the mask unchanged keeps the stored password.",
       "models": "Gated models",
       "modelsDesc": "Comma-separated upstream model names. Only listed models are harvested and injected. Empty means the switch is on but no model is gated.",
       "failClosed": "Reject requests with no ticket (fail closed)",

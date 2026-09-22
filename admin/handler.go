@@ -35,6 +35,7 @@ import (
 	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
 	"github.com/codex2api/internal/imagestore"
+	"github.com/codex2api/internal/mihomo"
 	"github.com/codex2api/internal/openaiidentity"
 	"github.com/codex2api/proxy"
 	"github.com/codex2api/security"
@@ -45,6 +46,8 @@ import (
 
 // Handler 管理后台 API 处理器
 type Handler struct {
+	mihomo             *mihomo.Manager
+	codexHarvest       *proxy.CodexHarvestManager
 	qualityTestContext context.Context
 	qualityTestWG      sync.WaitGroup
 	store              *auth.Store
@@ -1305,6 +1308,17 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.PUT("/settings/traecn", h.UpdateTraeCNSettings)
 	api.GET("/settings/codex-ticket", h.GetCodexTicketSettings)
 	api.PUT("/settings/codex-ticket", h.UpdateCodexTicketSettings)
+	api.GET("/system/mihomo", h.GetMihomo)
+	api.POST("/system/mihomo", h.UpdateMihomo)
+	api.GET("/codex-harvest", h.GetCodexHarvest)
+	api.PUT("/codex-harvest/controls", h.UpdateCodexHarvestControls)
+	api.PUT("/codex-harvest/scope", h.UpdateCodexHarvestScope)
+	api.POST("/codex-harvest/kick", h.KickCodexHarvest)
+	api.GET("/codex-harvest/nodes", h.ListCodexHarvestNodes)
+	api.DELETE("/codex-harvest/nodes/:id", h.ResetCodexHarvestNodes)
+	api.GET("/codex-harvest/events", h.ListCodexHarvestEvents)
+	api.POST("/codex-harvest/manual", h.StartCodexManualHarvest)
+	api.DELETE("/codex-harvest/manual/:id", h.StopCodexManualHarvest)
 	api.POST("/settings/background-upload", h.UploadBackgroundAsset)
 	api.POST("/settings/image-storage/test", h.TestImageStorageConnection)
 	api.GET("/prompt-filter/logs", h.ListPromptFilterLogs)

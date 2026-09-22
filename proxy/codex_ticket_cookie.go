@@ -12,8 +12,9 @@ import (
 
 // codexTicketCookies 是一次上游交互后与门票绑定的 Cookie 快照，不进入用量日志。
 type codexTicketCookies struct {
-	Header    string
-	ExpiresAt time.Time
+	Header     string
+	ExpiresAt  time.Time
+	CapturedAt time.Time
 }
 
 // captureCodexTicketCookies 按上游地址应用 Set-Cookie，保留请求中仍有效的 Cookie。
@@ -25,6 +26,7 @@ func captureCodexTicketCookies(endpoint *url.URL, previous codexTicketCookies, r
 	now := time.Now()
 	jar, _ := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
 	updates := response.Cookies()
+	capturedAt := previous.CapturedAt
 	// 缓存里只保留请求头，不含原始 Path。更新同名 Cookie 时先移除旧值，
 	// 避免重新建 Jar 后因路径不同而同时发送新旧两个值。
 	replaced := make(map[string]bool)
@@ -51,6 +53,10 @@ func captureCodexTicketCookies(endpoint *url.URL, previous codexTicketCookies, r
 		}
 	}
 	jar.SetCookies(endpoint, updates)
+	// 只有作用于目标地址的更新才重置新鲜期；无关域和无关路径不算更新。
+	if len(replaced) > 0 {
+		capturedAt = now
+	}
 	active := jar.Cookies(endpoint)
 	if len(active) == 0 {
 		return codexTicketCookies{}
@@ -71,5 +77,5 @@ func captureCodexTicketCookies(endpoint *url.URL, previous codexTicketCookies, r
 			}
 		}
 	}
-	return codexTicketCookies{Header: auth.NormalizeCodexTicketCookie(request.Header.Get("Cookie")), ExpiresAt: expires}
+	return codexTicketCookies{Header: auth.NormalizeCodexTicketCookie(request.Header.Get("Cookie")), ExpiresAt: expires, CapturedAt: capturedAt}
 }

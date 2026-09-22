@@ -3,6 +3,7 @@ import { initReactI18next } from 'react-i18next'
 import zh from './locales/zh.json'
 import zhTW from './locales/zh-TW.json'
 import en from './locales/en.json'
+import { harvestZh, harvestZhTW, harvestEn } from './locales/harvest'
 
 const LANG_KEY = 'lang'
 
@@ -16,9 +17,9 @@ function getInitialLang(): string {
 
 i18n.use(initReactI18next).init({
   resources: {
-    zh: { translation: zh },
-    'zh-TW': { translation: zhTW },
-    en: { translation: en },
+    zh: { translation: { ...zh, harvest: harvestZh } },
+    'zh-TW': { translation: { ...zhTW, harvest: harvestZhTW } },
+    en: { translation: { ...en, harvest: harvestEn } },
   },
   lng: getInitialLang(),
   fallbackLng: {

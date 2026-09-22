@@ -618,6 +618,12 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// 凭据级 turn state 强制注入：模型已由入口映射/规则定稿，传输方式也已定。
 	// 未配置的账号这里是空操作。
 	ctx, requestBody, headers = prepareCodexTurnStateInjection(ctx, account, requestBody, headers, wantWebsocket && WebsocketExecuteFunc != nil)
+	proxyOverride = CodexTicketProxyForRequest(ctx, proxyOverride)
+	ctx, ticketRelease, ticketErr := acquireCodexTicketEgress(ctx)
+	if ticketErr != nil {
+		return nil, ticketErr
+	}
+	defer func() { retainCodexTicketEgress(ctx, upstreamResponse, ticketRelease) }()
 	// FailClosed 门控：门控模型上没有可用门票时拒绝出站。放在注入之后——注入已经
 	// 决定过本次取值，这里只对"确实没注入到东西"的请求收口。裸打上游会让上游把
 	// 无票请求当成异常行为，宁可报错也不发。
@@ -741,6 +747,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// 出站字节在选客户端之前定稿：send() 会因 Agent Identity 401 重注册而重放，
 	// 两次重放必须发同一份字节。routing hint 等需要读字段的改写点继续用明文
 	// requestBody——它们解析 JSON，拿到压缩帧只会静默失配。
+	requestBody = ApplyCodexTicketRequestBody(ctx, requestBody, false)
 	outboundBody, contentEncoding := CompressCodexRequestBody(requestBody)
 
 	// 统一解析出口，同时沿用请求固定的 Resin 配置与会话平台。
@@ -1068,6 +1075,12 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	requestBody = ApplyCodexTimezoneToBody(requestBody, account, time.Now())
 	// 凭据级 turn state 强制注入：compact 与普通轮共用同一条回合状态。
 	ctx, requestBody, headers = prepareCodexTurnStateInjection(ctx, account, requestBody, headers, false)
+	proxyURL = CodexTicketProxyForRequest(ctx, proxyURL)
+	ctx, ticketRelease, ticketErr := acquireCodexTicketEgress(ctx)
+	if ticketErr != nil {
+		return nil, ticketErr
+	}
+	defer func() { retainCodexTicketEgress(ctx, upstreamResponse, ticketRelease) }()
 	// FailClosed 门控与 ExecuteRequest 同源：compact 也是打到同一个上游回合状态校验，
 	// 无票同样会被拒，必须在发出前拦下。
 	if blocked, ok := CodexTicketGateBlocked(ctx, account, codexClientModelFromContext(ctx), strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())); ok {
@@ -1082,6 +1095,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	}
 
 	// compact 端点
+	requestBody = ApplyCodexTicketRequestBody(ctx, requestBody, false)
 	endpoint := CodexBaseURL + "/responses/compact"
 
 	// 统一解析出口，同时沿用请求固定的 Resin 配置与会话平台。

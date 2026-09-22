@@ -24,6 +24,7 @@ import (
 	"github.com/codex2api/config"
 	"github.com/codex2api/database"
 	"github.com/codex2api/internal/imagestore"
+	"github.com/codex2api/internal/mihomo"
 	"github.com/codex2api/internal/version"
 	"github.com/codex2api/proxy"
 	"github.com/codex2api/proxy/wsrelay"
@@ -372,6 +373,12 @@ func main() {
 	// 全局 RPM 限流器
 	rateLimiter := proxy.NewRateLimiter(settings.GlobalRPM)
 	adminHandler := admin.NewHandler(store, db, tc, rateLimiter, cfg.AdminSecret)
+	harvestDataDir := strings.TrimSpace(os.Getenv("DATA_DIR"))
+	if harvestDataDir == "" {
+		harvestDataDir = "./data"
+	}
+	adminHandler.ConfigureCodexHarvest(harvestDataDir)
+	defer mihomo.CloseAll()
 	// 初始化 admin handler 的连接池设置跟踪
 	adminHandler.SetPoolSizes(settings.PgMaxConns, settings.RedisPoolSize)
 	store.SetUsageProbeFunc(adminHandler.ProbeUsageSnapshot)
@@ -672,6 +679,7 @@ func main() {
 	log.Println("正在关闭...")
 	// 先停止会产生新副作用的后台任务，再等待现有 HTTP 请求排空。
 	cancelBackground()
+	adminHandler.StopCodexHarvest()
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
 	if err := srv.Shutdown(shutdownCtx); err != nil {

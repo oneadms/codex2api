@@ -11,6 +11,7 @@ import { ThemeProvider } from './hooks/useTheme'
 import Dashboard from './pages/Dashboard'
 
 const Accounts = lazy(() => import('./pages/Accounts'))
+const CodexHarvest = lazy(() => import('./pages/CodexHarvest'))
 const Operations = lazy(() => import('./pages/Operations'))
 const OperationsErrors = lazy(() => import('./pages/OperationsErrors'))
 const RuntimeStatus = lazy(() => import('./pages/RuntimeStatus'))
@@ -69,6 +70,7 @@ function AdminApp() {
           <Route path="/accounts/invite" element={<Accounts />} />
           <Route path="/api-keys" element={<APIKeys />} />
           <Route path="/proxies" element={<Proxies />} />
+          <Route path="/codex-harvest" element={<CodexHarvest />} />
           <Route path="/images" element={<Navigate to="/images/studio" replace />} />
           <Route path="/images/:view" element={<ImageStudio />} />
           <Route path="/quality-test" element={<QualityTest />} />

@@ -48,6 +48,10 @@ RUN apk --no-cache add ca-certificates tzdata
 
 COPY --from=go-builder /codex2api /usr/local/bin/codex2api
 
+# 内核、订阅及节点状态与现有 /data 卷一同持久化。
+ENV DATA_DIR=/data
+COPY third_party/sub2api /usr/share/codex2api/licenses/sub2api
+
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/codex2api"]

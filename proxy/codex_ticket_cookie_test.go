@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -161,9 +162,13 @@ func TestCodexTicketFeedbackPersistsCookiePair(t *testing.T) {
 	ctx = context.WithValue(ctx, upstreamTraceContextKey{}, &upstreamTraceAudit{store: store})
 	state := testTicketState(now, auth.CodexTicketPersonalBlocks)
 	record := beginUpstreamTrace(ctx, account, "", false)
-	record(&http.Response{StatusCode: http.StatusOK, Header: http.Header{
+	response := &http.Response{StatusCode: http.StatusOK, Header: http.Header{
 		codexTurnStateHeader: {state}, "Set-Cookie": {"ticket=new; Path=/; Max-Age=120; Secure; HttpOnly"},
-	}})
+		"Content-Type": {"text/event-stream"},
+	}, Body: io.NopCloser(strings.NewReader("data: {\"type\":\"response.completed\"}\n\n"))}
+	record(response)
+	_, _ = io.Copy(io.Discard, response.Body)
+	response.Body.Close()
 	row, err := db.GetAccountByID(context.Background(), id)
 	if err != nil {
 		t.Fatal(err)
