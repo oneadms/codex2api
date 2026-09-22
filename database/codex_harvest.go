@@ -212,7 +212,8 @@ func (r *HarvestRepository) AppendEvent(ctx context.Context, event harvest.Event
 
 func (r *HarvestRepository) Events(ctx context.Context, accountID int64, jobID string, offset, limit int) (harvest.EventPage, error) {
 	out := harvest.EventPage{Items: []harvest.Event{}}
-	where := ` WHERE ($1=0 OR account_id=$1) AND ($2='' OR job_id=$2)`
+	// 显式声明账号参数类型，避免 PostgreSQL 先根据零字面量推断成 32 位整数。
+	where := ` WHERE (CAST($1 AS BIGINT)=0 OR account_id=$1) AND ($2='' OR job_id=$2)`
 	if err := r.db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM codex_harvest_events`+where, accountID, jobID).Scan(&out.Total); err != nil {
 		return out, err
 	}
