@@ -143,7 +143,7 @@ func codexTicketForInjection(account *auth.Account, models ...string) *auth.Code
 	if len(gated) == 0 {
 		return nil
 	}
-	targetLen := auth.CodexTicketTargetLengthFor(account.GetPlanType())
+	targetLen := 0 // 合格判定已改为探测回答校验，不再按门票长度拦截
 	return account.CodexTicketWithShared(time.Now(), targetLen, gated...)
 }
 
@@ -167,7 +167,7 @@ func CodexTicketGateBlocked(ctx context.Context, account *auth.Account, clientMo
 	if len(gated) == 0 {
 		return "", false
 	}
-	targetLen := auth.CodexTicketTargetLengthFor(account.GetPlanType())
+	targetLen := 0 // 合格判定已改为探测回答校验，不再按门票长度拦截
 	if ctx != nil {
 		if _, prepared := ctx.Value(codexTurnStateInjectionKey{}).(string); prepared {
 			// 门控必须检查本次实际选中的票，不能因共享池刚好换票而放行未注入的请求。

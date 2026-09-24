@@ -136,7 +136,6 @@ func TestCodexTicketSettingsRejectsIncompleteEnable(t *testing.T) {
 		`{"enabled":true,"harvest_proxy_url":"socks5h://127.0.0.1:1080"}`,
 		`{"harvest_proxy_url":"ftp://127.0.0.1:1080"}`,
 		`{"harvest_proxy_url":"socks5h://127.0.0.1:1080/path"}`,
-		`{"target_length":99999}`,
 	} {
 		if rec := put(bad); rec.Code != http.StatusBadRequest {
 			t.Errorf("invalid request=%s status=%d body=%s", bad, rec.Code, rec.Body.String())

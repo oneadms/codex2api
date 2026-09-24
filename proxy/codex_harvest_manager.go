@@ -172,7 +172,7 @@ func (m *CodexHarvestManager) RunRound(ctx context.Context) {
 					return
 				}
 				now := time.Now()
-				if ticket := account.CodexTicketForModel(model, now, auth.CodexTicketTargetLengthFor(account.GetPlanType())); ticket != nil {
+				if ticket := account.CodexTicketForModel(model, now, 0); ticket != nil {
 					auth.PublishCodexTicketToSharedPool(account, ticket)
 					refresh := time.Duration(controls.Speed.RefreshBeforeSeconds) * time.Second
 					// Cookie 的有效窗口比上游预设短，至少保留一半窗口用于正常业务。
@@ -250,7 +250,7 @@ func (m *CodexHarvestManager) Accounts(ctx context.Context) ([]CodexHarvestAccou
 		a.Mu().RUnlock()
 		_, busy := m.working.Load(a.ID())
 		row := CodexHarvestAccount{ID: a.ID(), Email: email, GroupIDs: a.GroupIDSnapshot(), Eligible: harvestAccountEligible(a, scope, false), Busy: busy,
-			Tickets: a.CodexTicketStatuses(models, time.Now(), auth.CodexTicketTargetLengthFor(a.GetPlanType()))}
+			Tickets: a.CodexTicketStatuses(models, time.Now(), 0)}
 		for _, id := range scope.SkippedAccountIDs {
 			if id == a.ID() {
 				row.Skipped = true

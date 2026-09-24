@@ -34,7 +34,6 @@ export interface CodexTicketSettingsResponse {
   enabled: boolean
   harvest_proxy_url: string
   harvest_proxy_masked: boolean
-  target_length: number
   ttl_seconds: number
   refresh_before_seconds: number
   probe_interval_seconds: number

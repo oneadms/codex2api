@@ -10,7 +10,7 @@ func TestCodexTicketShortLifetimeAndLegacyCache(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	ticket := &CodexTicket{
 		Model: "gpt-5.5", State: buildTestTicketState(now, CodexTicketPersonalBlocks),
-		Cookie: "ticket=paired", Length: CodexTicketDefaultTargetLength,
+		Cookie: "ticket=paired", Length: 292,
 		CapturedAt: now, ExpiresAt: now.Add(time.Hour),
 	}
 	// 缺少 issued_at 的旧记录也必须从信封读取时间，不能借旧 TTL 延长有效期。

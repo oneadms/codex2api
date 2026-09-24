@@ -15,6 +15,7 @@ import (
 type codexHarvestResponse struct {
 	Status    int
 	State     string
+	Text      string
 	Cookies   codexTicketCookies
 	Terminal  bool
 	Completed bool
@@ -30,7 +31,7 @@ func performCodexHarvestTransport(req *http.Request, body []byte, client *http.C
 		defer resp.Body.Close()
 		out := codexHarvestResponse{Status: resp.StatusCode, State: observedCodexTurnState(resp.Header.Get(codexTurnStateHeader)), Cookies: captureCodexTicketCookies(req.URL, codexTicketCookies{}, resp)}
 		if resp.StatusCode == http.StatusOK {
-			out.Terminal, out.Completed = validateCodexHarvestStream(resp.Body)
+			out.Terminal, out.Completed, out.Text = validateCodexHarvestStream(resp.Body)
 		}
 		return out, nil
 	}
@@ -87,6 +88,9 @@ func performCodexHarvestTransport(req *http.Request, body []byte, client *http.C
 		_, frame, readErr := conn.ReadMessage()
 		if readErr != nil {
 			return out, fmt.Errorf("WebSocket 采票未完成")
+		}
+		if delta := gjson.GetBytes(frame, "type").String(); delta == "response.output_text.delta" {
+			out.Text += gjson.GetBytes(frame, "delta").String()
 		}
 		if state := codexTurnStateFromFrame(frame); state != "" {
 			out.State = state

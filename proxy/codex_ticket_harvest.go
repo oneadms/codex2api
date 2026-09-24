@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,8 +20,10 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// 后台自动打票器：用合成 ping 请求向 Codex 上游铸造 X-Codex-Turn-State 门票，
+// 后台自动打票器：用合成探测请求向 Codex 上游铸造 X-Codex-Turn-State 门票，
 // 按 (账号, 模型) 分别持有，业务请求上由 proxy/codex_turn_state_inject.go 注入。
+// 探测提问当前最新的 Gemini 模型版本号：回答严格大于 2.5 才算合格票据，
+// 2.5 及以下或答不出版本号都判不合格（不再按门票编码长度区分）。
 //
 // 设计要点（与 sub2api 的 openai_codex_ticket.go 同源，但接进 codex2api 既有设施）：
 //
@@ -48,10 +51,21 @@ func codexTicketUpstreamEndpoint() string {
 	return CodexBaseURL + "/responses"
 }
 
-// codexTicketHarvestProbeBody 构造一条最小的铸造 ping 回合。store:false 避免把探测
+// codexTicketHarvestProbeQuestion 是采票探针的提问。合格判定看回答内容：
+// 只输出当前最新的 Gemini 模型版本号，回答 > 2.5 才算合格（2.5 及以下判不合格）。
+const codexTicketHarvestProbeQuestion = "只输出当前最新的 Gemini 模型版本号，格式 X.Y，不要解释。"
+
+// codexTicketHarvestMinVersion 是合格版本号的下界（开区间）：回答必须大于它。
+const codexTicketHarvestMinVersion = 2.5
+
+// codexTicketHarvestProbeBody 构造一条最小的铸造探测回合。store:false 避免把探测
 // 写进用户历史；stream:true 与业务同构，便于读到 response.completed 终态再落库。
 func codexTicketHarvestProbeBody(model string) []byte {
-	body := []byte(`{"store":false,"stream":true,"instructions":"Reply with exactly: pong","input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}]}`)
+	body := []byte(`{"store":false,"stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":""}]}]}`)
+	body, err := sjson.SetBytes(body, "input.0.content.0.text", codexTicketHarvestProbeQuestion)
+	if err != nil {
+		return body
+	}
 	updated, err := sjson.SetBytes(body, "model", model)
 	if err != nil {
 		return body
@@ -59,11 +73,57 @@ func codexTicketHarvestProbeBody(model string) []byte {
 	return updated
 }
 
+// parseCodexHarvestProbeVersion 从模型回答中提取 X.Y 形式的版本号。容忍
+// 「3.0」「Gemini 3.0」这类回答；提取不到时报错。
+func parseCodexHarvestProbeVersion(text string) (float64, error) {
+	text = strings.TrimSpace(text)
+	start := -1
+	for i := 0; i < len(text); i++ {
+		if text[i] >= '0' && text[i] <= '9' {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return 0, fmt.Errorf("回答中没有版本号")
+	}
+	end := start
+	dot := false
+	for end < len(text) {
+		c := text[end]
+		if c >= '0' && c <= '9' {
+			end++
+			continue
+		}
+		if c == '.' && !dot {
+			dot = true
+			end++
+			continue
+		}
+		break
+	}
+	value, err := strconv.ParseFloat(strings.TrimSuffix(text[start:end], "."), 64)
+	if err != nil {
+		return 0, fmt.Errorf("版本号无法解析")
+	}
+	return value, nil
+}
+
+// codexHarvestProbeVersionQualified 报告回答对应的版本号是否合格：必须严格大于 2.5。
+func codexHarvestProbeVersionQualified(text string) (float64, bool) {
+	version, err := parseCodexHarvestProbeVersion(text)
+	if err != nil {
+		return 0, false
+	}
+	return version, version > codexTicketHarvestMinVersion
+}
+
 // ==================== 探测 ====================
 
 // codexTicketHarvestResult 是一次打票的结果。Err 非空表示本轮未取到可用门票。
 type codexTicketHarvestResult struct {
 	State          string
+	ProbeText      string
 	Cookies        codexTicketCookies
 	Binding        *auth.CodexTicket
 	HTTPStatus     int
@@ -147,9 +207,19 @@ func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, p
 	if !probe.Completed {
 		return codexTicketHarvestResult{ObservedLength: len(state), HTTPStatus: status, Result: harvestResultForTerminal(probe.Terminal), Err: fmt.Errorf("打票响应未到成功终态")}
 	}
+	// 合格判定看探测回答：模型回答的最新 Gemini 版本号必须严格大于 2.5，
+	// 回答 2.5 或更低、以及根本答不出版本号都判不合格，不再按门票长度区分。
+	_, qualified := codexHarvestProbeVersionQualified(probe.Text)
+	if !qualified {
+		return codexTicketHarvestResult{
+			ObservedLength: len(state),
+			HTTPStatus:     status,
+			Result:         "invalid_state",
+			Err:            fmt.Errorf("探测回答不合格 (validation=probe_version answer_length=%d)", len(strings.TrimSpace(probe.Text))),
+		}
+	}
 	settings := auth.ConfiguredCodexTicketSettings()
 	planType := account.GetPlanType()
-	targetLen := auth.CodexTicketTargetLength(planType, settings.TargetLength)
 	// Explain rejections without logging the opaque ticket, access token or proxy.
 	// Capture the plan/config once so the diagnostic matches the actual check.
 	invalidState := func(validation string, err error) codexTicketHarvestResult {
@@ -157,8 +227,8 @@ func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, p
 			ObservedLength: len(state),
 			HTTPStatus:     status,
 			Result:         "invalid_state",
-			Err: fmt.Errorf("%w (validation=%s plan_type=%q actual_length=%d expected_length=%d configured_length=%d)",
-				err, validation, planType, len(state), targetLen, settings.TargetLength),
+			Err: fmt.Errorf("%w (validation=%s plan_type=%q actual_length=%d expected_length=%d)",
+				err, validation, planType, len(state), auth.CodexTicketExpectedLength(auth.CodexTicketExpectedBlocks(planType))),
 		}
 	}
 	if state == "" {
@@ -171,9 +241,6 @@ func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, p
 	if !strings.HasPrefix(state, auth.CodexTicketStatePrefix) {
 		return invalidState("prefix", fmt.Errorf("响应门票前缀不符合要求"))
 	}
-	if len(state) != targetLen {
-		return invalidState("length", fmt.Errorf("响应门票长度与账号套餐或目标长度配置不匹配"))
-	}
 	if cookies.Header == "" {
 		return invalidState("cookie", fmt.Errorf("响应门票缺少配套的有效 Cookie"))
 	}
@@ -185,13 +252,13 @@ func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, p
 	if !cookies.ExpiresAt.IsZero() && cookies.ExpiresAt.Before(ticket.ExpiresAt) {
 		ticket.ExpiresAt = cookies.ExpiresAt
 	}
-	if !ticket.Valid(now, targetLen) {
+	if !ticket.Valid(now, 0) {
 		return invalidState("time", fmt.Errorf("响应门票时间校验失败: issued_at=%s expires_at=%s now=%s age_seconds=%d",
 			shape.IssuedAt.UTC().Format(time.RFC3339), ticket.ExpiresAt.UTC().Format(time.RFC3339),
 			now.UTC().Format(time.RFC3339), int64(now.Sub(shape.IssuedAt)/time.Second)))
 	}
 	return codexTicketHarvestResult{HTTPStatus: status, State: state, Cookies: cookies,
-		Binding: &auth.CodexTicket{HarvestProxyURL: proxyURL, HarvestSessionID: sessionID}, Result: "success"}
+		ProbeText: probe.Text, Binding: &auth.CodexTicket{HarvestProxyURL: proxyURL, HarvestSessionID: sessionID}, Result: "success"}
 }
 
 func harvestResultForHTTPStatus(status int) string {
@@ -211,11 +278,12 @@ func harvestResultForTerminal(gotTerminal bool) string {
 }
 
 // validateCodexHarvestStream 读流式响应直到终态。返回值 gotTerminal 表示是否读到
-// response.completed / response.incomplete；ok 表示整轮成功。
-func validateCodexHarvestStream(r io.Reader) (gotTerminal, ok bool) {
+// response.completed / response.incomplete；ok 表示整轮成功；text 是累积的回答正文。
+func validateCodexHarvestStream(r io.Reader) (gotTerminal, ok bool, text string) {
 	if r == nil {
-		return false, false
+		return false, false, ""
 	}
+	var out strings.Builder
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
@@ -227,15 +295,20 @@ func validateCodexHarvestStream(r io.Reader) (gotTerminal, ok bool) {
 		if data == "" || data == "[DONE]" {
 			continue
 		}
-		switch gjson.Get(data, "type").String() {
+		switch typ := gjson.Get(data, "type").String(); typ {
+		case "response.output_text.delta":
+			out.WriteString(gjson.Get(data, "delta").String())
 		case "response.completed", "response.incomplete":
-			return true, true
+			if final := gjson.Get(data, "response.output_text").String(); final != "" && out.Len() == 0 {
+				out.WriteString(final)
+			}
+			return true, true, out.String()
 		case "response.failed", "error":
-			return gotTerminal, false
+			return gotTerminal, false, out.String()
 		}
 	}
 	// 读到 EOF 都没等到终态（连接被掐断、上游只发了一半）——不可信。
-	return gotTerminal, false
+	return gotTerminal, false, out.String()
 }
 
 // ==================== 调度 ====================
@@ -338,8 +411,7 @@ func refreshCodexTickets(ctx context.Context, db *database.DB, store *auth.Store
 				return
 			}
 			now := time.Now()
-			targetLen := auth.CodexTicketTargetLengthFor(acc.GetPlanType())
-			if ticket := acc.CodexTicketForModel(model, now, targetLen); ticket != nil {
+			if ticket := acc.CodexTicketForModel(model, now, 0); ticket != nil {
 				auth.PublishCodexTicketToSharedPool(acc, ticket)
 				if !ticket.NeedsRefresh(now, auth.CodexTicketRefreshBefore()) {
 					continue

@@ -18,7 +18,6 @@ type codexTicketSettingsResponse struct {
 	Enabled              bool     `json:"enabled"`
 	HarvestProxyURL      string   `json:"harvest_proxy_url"`
 	HarvestProxyMasked   bool     `json:"harvest_proxy_masked"`
-	TargetLength         int      `json:"target_length"`
 	TTLSeconds           int      `json:"ttl_seconds"`
 	RefreshBeforeSeconds int      `json:"refresh_before_seconds"`
 	ProbeIntervalSeconds int      `json:"probe_interval_seconds"`
@@ -38,7 +37,6 @@ func (h *Handler) codexTicketSettingsResponse(settings auth.CodexTicketSettings)
 	response := codexTicketSettingsResponse{
 		Enabled:              settings.Enabled,
 		HarvestProxyURL:      auth.MaskCodexTicketProxyURL(settings.HarvestProxyURL),
-		TargetLength:         settings.TargetLength,
 		TTLSeconds:           settings.TTLSeconds,
 		RefreshBeforeSeconds: settings.RefreshBeforeSeconds,
 		ProbeIntervalSeconds: settings.ProbeIntervalSeconds,
@@ -67,8 +65,7 @@ func (h *Handler) codexTicketReadyAccountCounts(models []string) (ready, total i
 			continue
 		}
 		total++
-		targetLen := auth.CodexTicketTargetLengthFor(account.GetPlanType())
-		if _, ok := account.CodexTicketInjectionWithShared(now, targetLen, models...); ok {
+		if _, ok := account.CodexTicketInjectionWithShared(now, 0, models...); ok {
 			ready++
 		}
 	}
@@ -86,7 +83,6 @@ func (h *Handler) UpdateCodexTicketSettings(c *gin.Context) {
 	var req struct {
 		Enabled              *bool     `json:"enabled"`
 		HarvestProxyURL      *string   `json:"harvest_proxy_url"`
-		TargetLength         *int      `json:"target_length"`
 		TTLSeconds           *int      `json:"ttl_seconds"`
 		RefreshBeforeSeconds *int      `json:"refresh_before_seconds"`
 		ProbeIntervalSeconds *int      `json:"probe_interval_seconds"`
@@ -100,7 +96,7 @@ func (h *Handler) UpdateCodexTicketSettings(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "请求体格式错误")
 		return
 	}
-	if req.Enabled == nil && req.HarvestProxyURL == nil && req.TargetLength == nil &&
+	if req.Enabled == nil && req.HarvestProxyURL == nil &&
 		req.TTLSeconds == nil && req.RefreshBeforeSeconds == nil && req.ProbeIntervalSeconds == nil &&
 		req.CooldownSeconds == nil && req.MaxProbesPerRound == nil && req.ProbeTimeoutSeconds == nil &&
 		req.FailClosed == nil && req.Models == nil {
@@ -115,9 +111,6 @@ func (h *Handler) UpdateCodexTicketSettings(c *gin.Context) {
 	}
 	if req.HarvestProxyURL != nil {
 		next.HarvestProxyURL = resolveCodexTicketProxyUpdate(*req.HarvestProxyURL, current.HarvestProxyURL)
-	}
-	if req.TargetLength != nil {
-		next.TargetLength = *req.TargetLength
 	}
 	if req.TTLSeconds != nil {
 		next.TTLSeconds = *req.TTLSeconds

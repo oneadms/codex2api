@@ -82,17 +82,11 @@ func TestCodexTicketShapeParse(t *testing.T) {
 }
 
 func TestCodexTicketExpectedLength(t *testing.T) {
-	if got := CodexTicketExpectedLength(CodexTicketPersonalBlocks); got != CodexTicketDefaultTargetLength {
+	if got := CodexTicketExpectedLength(CodexTicketPersonalBlocks); got != 292 {
 		t.Fatalf("personal length = %d, want 292", got)
 	}
-	if got := CodexTicketExpectedLength(CodexTicketTeamBlocks); got == CodexTicketDefaultTargetLength {
+	if got := CodexTicketExpectedLength(CodexTicketTeamBlocks); got == 292 {
 		t.Fatal("team length must differ from personal")
-	}
-	if got := CodexTicketTargetLength("personal", 0); got != CodexTicketExpectedLength(CodexTicketPersonalBlocks) {
-		t.Fatalf("target length (personal, unset) = %d", got)
-	}
-	if got := CodexTicketTargetLength("team", 0); got != CodexTicketExpectedLength(CodexTicketTeamBlocks) {
-		t.Fatalf("target length (team, unset) = %d", got)
 	}
 }
 
@@ -105,19 +99,14 @@ func TestCodexTicketTargetLengthTeam5xAliases(t *testing.T) {
 			if got := CodexTicketExpectedBlocks(plan); got != CodexTicketTeamBlocks {
 				t.Fatalf("plan %q blocks = %d, want %d", plan, got, CodexTicketTeamBlocks)
 			}
-			for _, configured := range []int{0, CodexTicketDefaultTargetLength} {
-				if got := CodexTicketTargetLength(plan, configured); got != 332 {
-					t.Fatalf("plan %q configured=%d length=%d, want 332", plan, configured, got)
-				}
-			}
-			if got := CodexTicketTargetLength(plan, 400); got != 400 {
-				t.Fatalf("explicit target length must be preserved, got %d", got)
+			if got := CodexTicketExpectedLength(CodexTicketExpectedBlocks(plan)); got != 332 {
+				t.Fatalf("plan %q expected length = %d, want 332", plan, got)
 			}
 		})
 	}
 	for _, plan := range []string{"", "free", "plus", "pro", "prolite", "pro_lite", "pro-lite", "personal", "unknown", "teamwork"} {
-		if got := CodexTicketTargetLength(plan, 0); got != CodexTicketDefaultTargetLength {
-			t.Errorf("unrelated plan %q must retain the personal default, got %d", plan, got)
+		if got := CodexTicketExpectedBlocks(plan); got != CodexTicketPersonalBlocks {
+			t.Errorf("unrelated plan %q must retain personal blocks, got %d", plan, got)
 		}
 	}
 }

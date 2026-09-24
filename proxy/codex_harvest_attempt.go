@@ -49,7 +49,7 @@ func (m *CodexHarvestManager) selectNode(ctx context.Context, account *auth.Acco
 			break
 		}
 	}
-	if ticket := account.CodexTicketForModel(model, time.Now(), auth.CodexTicketTargetLengthFor(account.GetPlanType())); ticket != nil && ticket.HarvestNodeID != "" {
+	if ticket := account.CodexTicketForModel(model, time.Now(), 0); ticket != nil && ticket.HarvestNodeID != "" {
 		for _, node := range ranked {
 			if node.ID == ticket.HarvestNodeID {
 				selected = node
@@ -63,7 +63,7 @@ func (m *CodexHarvestManager) selectNode(ctx context.Context, account *auth.Acco
 
 func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account, model, proxyURL string, controls harvest.CodexHarvestControls, budget *int, tried map[string]bool, keep **harvestSelection, source, jobID string, number int) (event harvest.Event) {
 	started := time.Now()
-	event = harvest.Event{AccountID: account.ID(), Model: model, Source: source, JobID: jobID, Attempt: number, Stage: "probe", ExpectedLength: auth.CodexTicketTargetLengthFor(account.GetPlanType()), CreatedAt: started.UTC()}
+	event = harvest.Event{AccountID: account.ID(), Model: model, Source: source, JobID: jobID, Attempt: number, Stage: "probe", ExpectedLength: auth.CodexTicketExpectedLength(auth.CodexTicketExpectedBlocks(account.GetPlanType())), CreatedAt: started.UTC()}
 	defer func() { event.LatencyMS = time.Since(started).Milliseconds(); m.appendEvent(event) }()
 	scope, err := m.Scope(ctx)
 	if err != nil || !auth.CodexTicketGateEnabled() || !harvestAccountEligible(account, scope, true) {
@@ -185,7 +185,7 @@ func harvestResultMessage(result string) string {
 	case "success":
 		return "合格票据及 Cookie 已持久化"
 	case "invalid_state":
-		return "票据长度、形状、时效或 Cookie 不合格"
+		return "探测回答（Gemini 版本号须大于 2.5）、票据形状、时效或 Cookie 不合格"
 	case "account_error":
 		return "上游鉴权或限流，账号进入采票冷却"
 	case "network_error":

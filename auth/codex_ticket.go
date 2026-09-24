@@ -20,8 +20,8 @@ import (
 // 门票不是身份：它只影响上游的回合状态校验，不进调度、不影响请求归属。
 //
 // 门票的形状是一个可校验的信封：base64url 解码后是 57 字节固定头 + N 个 16 字节
-// 加密块，首字节恒为 0x80，第 1..9 字节是大端 unix 签发时刻。块数由账号套餐决定，
-// 因此「长度」本身就是一份可验证的契约——个人版 10 块编码后恰为 292。
+// 加密块，首字节恒为 0x80，第 1..9 字节是大端 unix 签发时刻。合格判定不再依赖编码
+// 长度（上游编码会变化），采票侧改用探测回答校验（Gemini 版本号须大于 2.5）。
 const (
 	// CodexTicketStatePrefix 是门票 blob 的固定前缀（解码后首字节 0x80）。
 	CodexTicketStatePrefix = "gAAAAA"
@@ -32,9 +32,6 @@ const (
 	// CodexTicketPersonalBlocks / CodexTicketTeamBlocks 是个人版与团队版的信封块数。
 	CodexTicketPersonalBlocks = 10
 	CodexTicketTeamBlocks     = 12
-	// CodexTicketDefaultTargetLength 是个人版门票编码后的长度。配置里写这个值表示
-	// 「按账号套餐推导」，写其他值则强制该长度。
-	CodexTicketDefaultTargetLength = 292
 
 	// CodexTicketCredentialKeyPrefix 是门票在账号凭据里的键前缀，后缀为模型名。
 	CodexTicketCredentialKeyPrefix = "codex_ticket:"
@@ -112,15 +109,6 @@ func CodexTicketExpectedLength(blocks int) int {
 	return base64.URLEncoding.EncodedLen(CodexTicketEnvelopeHeaderBytes + CodexTicketBlockBytes*blocks)
 }
 
-// CodexTicketTargetLength 解析本次打票的目标长度：配置里等于默认值（或未配置）时按
-// 账号套餐推导，否则以配置为准。
-func CodexTicketTargetLength(planType string, configured int) int {
-	if configured > 0 && configured != CodexTicketDefaultTargetLength {
-		return configured
-	}
-	return CodexTicketExpectedLength(CodexTicketExpectedBlocks(planType))
-}
-
 // NormalizeCodexTicketModel 归一化门票的模型键：大小写不敏感、去空白。
 // 门票按 (账号, 模型) 持有，键必须在写入与读取两侧同源。
 func NormalizeCodexTicketModel(model string) string {
@@ -195,6 +183,7 @@ type CodexTicket struct {
 }
 
 // Valid 报告门票在 now 时刻是否可用：形状正确、未撤销、未过期、签发时刻合理。
+// targetLen 传 0（或负值）表示不按编码长度校验——采票合格判定已改为探测回答。
 func (t *CodexTicket) Valid(now time.Time, targetLen int) bool {
 	if t == nil || t.Revoked || NormalizeCodexTicketCookie(t.Cookie) == "" {
 		return false
@@ -203,10 +192,10 @@ func (t *CodexTicket) Valid(now time.Time, targetLen int) bool {
 		return false
 	}
 	state := strings.TrimSpace(t.State)
-	if targetLen <= 0 {
-		targetLen = CodexTicketDefaultTargetLength
+	if len(state) == 0 || t.Length != len(state) || !strings.HasPrefix(state, CodexTicketStatePrefix) {
+		return false
 	}
-	if len(state) != targetLen || t.Length != targetLen || !strings.HasPrefix(state, CodexTicketStatePrefix) {
+	if targetLen > 0 && len(state) != targetLen {
 		return false
 	}
 	shape, err := ParseCodexTicketShape(state)
@@ -330,7 +319,7 @@ func firstNonEmptyString(values ...string) string {
 // ==================== 运行时账号上的门票 ====================
 
 // CodexTicketForModel 返回该账号在指定模型上的门票（含有效性判定）。
-// 主票不可用但热备票可用时返回热备票。
+// 主票不可用但热备票可用时返回热备票。targetLen 传 0 表示不按长度校验。
 func (a *Account) CodexTicketForModel(model string, now time.Time, targetLen int) *CodexTicket {
 	if a == nil {
 		return nil

@@ -21,9 +21,6 @@ type CodexTicketSettings struct {
 	// HarvestProxyURL 是打票专用代理（http/https/socks5/socks5h）。空表示未配置，
 	// 此时不探测——绝不用业务代理兜底，避免污染账号的住宅出口。
 	HarvestProxyURL string `json:"harvest_proxy_url"`
-	// TargetLength 是门票目标长度。等于 CodexTicketDefaultTargetLength 或未配置时
-	// 按账号套餐推导（个人版 292 / 团队版 332）。
-	TargetLength int `json:"target_length"`
 	// TTLSeconds 是门票在网关侧的缓存时长上限（默认 240）。
 	TTLSeconds int `json:"ttl_seconds"`
 	// RefreshBeforeSeconds 是提前重打窗口（默认 60）：剩余寿命进入该窗口即视为待刷新。
@@ -66,7 +63,6 @@ var configuredCodexTicketSettings atomic.Value // CodexTicketSettings
 func DefaultCodexTicketSettings() CodexTicketSettings {
 	return CodexTicketSettings{
 		Enabled:              false,
-		TargetLength:         CodexTicketDefaultTargetLength,
 		TTLSeconds:           CodexTicketDefaultTTLSeconds,
 		RefreshBeforeSeconds: CodexTicketDefaultRefreshBeforeSecs,
 		ProbeIntervalSeconds: CodexTicketDefaultProbeIntervalSecs,
@@ -85,15 +81,6 @@ func NormalizeCodexTicketSettings(settings CodexTicketSettings) (CodexTicketSett
 		if err := ValidateCodexTicketProxyURL(out.HarvestProxyURL); err != nil {
 			return DefaultCodexTicketSettings(), err
 		}
-	}
-	if out.TargetLength < 0 {
-		out.TargetLength = 0
-	}
-	if out.TargetLength == 0 {
-		out.TargetLength = CodexTicketDefaultTargetLength
-	}
-	if out.TargetLength > maxCodexTicketBytes {
-		return DefaultCodexTicketSettings(), fmt.Errorf("门票目标长度不能超过 %d", maxCodexTicketBytes)
 	}
 	if out.TTLSeconds <= 0 {
 		out.TTLSeconds = CodexTicketDefaultTTLSeconds
@@ -264,7 +251,7 @@ func SetConfiguredCodexTicketSettings(settings CodexTicketSettings) {
 // ConfiguredCodexTicketSettings 返回当前生效的打票配置。
 func ConfiguredCodexTicketSettings() CodexTicketSettings {
 	settings, _ := configuredCodexTicketSettings.Load().(CodexTicketSettings)
-	if settings.TargetLength == 0 && len(settings.Models) == 0 && !settings.Enabled {
+	if len(settings.Models) == 0 && !settings.Enabled && settings.HarvestProxyURL == "" {
 		// 尚未装载过任何配置（进程刚起）时给出默认值。
 		return DefaultCodexTicketSettings()
 	}
@@ -290,11 +277,6 @@ func CodexTicketModelGated(model string) bool {
 		}
 	}
 	return false
-}
-
-// CodexTicketTargetLengthFor 返回该账号应打的门票长度。
-func CodexTicketTargetLengthFor(planType string) int {
-	return CodexTicketTargetLength(planType, ConfiguredCodexTicketSettings().TargetLength)
 }
 
 // CodexTicketRefreshBefore 返回重打窗口时长。

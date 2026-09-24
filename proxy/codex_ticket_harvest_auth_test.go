@@ -128,7 +128,7 @@ func TestHarvestOneTicketRefreshesCredentialsAndPublishes(t *testing.T) {
 				w.Header().Set(codexTurnStateHeader, state)
 				w.Header().Add("Set-Cookie", "ticket=harvest; Path=/")
 				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
+				_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"3.0\"}\n\ndata: {\"type\":\"response.completed\"}\n\n"))
 			}))
 			t.Cleanup(server.Close)
 			previousURL := codexTicketProbeURLForTest
@@ -201,7 +201,7 @@ func TestHarvestOneTicketPersistenceFailureIsNotSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(codexTurnStateHeader, state)
 		w.Header().Add("Set-Cookie", "ticket=harvest; Path=/")
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"3.0\"}\n\ndata: {\"type\":\"response.completed\"}\n\n"))
 	}))
 	t.Cleanup(server.Close)
 	previousURL := codexTicketProbeURLForTest

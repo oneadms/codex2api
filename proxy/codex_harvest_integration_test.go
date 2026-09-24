@@ -49,6 +49,7 @@ func TestCodexHarvestWebsocketCookiePolicy(t *testing.T) {
 				if gjson.GetBytes(body, "model").String() != "gpt-6-astra" || gjson.GetBytes(body, "type").String() != "response.create" {
 					t.Error("采票帧模型或类型错误")
 				}
+				_ = conn.WriteJSON(map[string]any{"type": "response.output_text.delta", "delta": "3.0"})
 				_ = conn.WriteJSON(map[string]any{"type": "response.completed", "response": map[string]any{"metadata": map[string]string{"x-codex-turn-state": state}}})
 			}))
 			defer upstream.Close()
@@ -142,7 +143,7 @@ func TestCodexHarvestRoundStandbyScopeAndManualBudget(t *testing.T) {
 		w.Header().Set(codexTurnStateHeader, testTicketState(time.Now().Add(time.Duration(n)*time.Second), auth.CodexTicketPersonalBlocks))
 		w.Header().Add("Set-Cookie", fmt.Sprintf("ticket=round%d; Path=/", n))
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\"}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"3.0\"}\n\ndata: {\"type\":\"response.completed\"}\n\n")
 	}))
 	defer server.Close()
 	previous := codexTicketProbeURLForTest

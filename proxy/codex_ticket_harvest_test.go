@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -29,7 +30,6 @@ func withCodexTicketGate(t *testing.T, models ...string) {
 	auth.SetConfiguredCodexTicketSettings(auth.CodexTicketSettings{
 		Enabled:              true,
 		HarvestProxyURL:      "socks5h://127.0.0.1:1080",
-		TargetLength:         auth.CodexTicketDefaultTargetLength,
 		TTLSeconds:           auth.CodexTicketDefaultTTLSeconds,
 		RefreshBeforeSeconds: auth.CodexTicketDefaultRefreshBeforeSecs,
 		ProbeIntervalSeconds: auth.CodexTicketDefaultProbeIntervalSecs,
@@ -166,19 +166,47 @@ func TestValidateCodexHarvestStream(t *testing.T) {
 		body     string
 		wantTerm bool
 		wantOK   bool
+		wantText string
 	}{
 		{name: "completed", body: "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n", wantTerm: true, wantOK: true},
 		{name: "incomplete", body: "data: {\"type\":\"response.incomplete\"}\n\n", wantTerm: true, wantOK: true},
 		{name: "failed", body: "data: {\"type\":\"response.failed\"}\n\n", wantTerm: false, wantOK: false},
 		{name: "error frame", body: "data: {\"type\":\"error\"}\n\n", wantTerm: false, wantOK: false},
 		{name: "truncated", body: "data: {\"type\":\"response.output_text.delta\"}\n\n", wantTerm: false, wantOK: false},
+		{name: "delta text", body: "data: {\"type\":\"response.output_text.delta\",\"delta\":\"3.\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"0\"}\n\ndata: {\"type\":\"response.completed\"}\n\n", wantTerm: true, wantOK: true, wantText: "3.0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			term, ok := validateCodexHarvestStream(strings.NewReader(tc.body))
+			term, ok, text := validateCodexHarvestStream(strings.NewReader(tc.body))
 			if term != tc.wantTerm || ok != tc.wantOK {
 				t.Fatalf("got term=%v ok=%v, want term=%v ok=%v", term, ok, tc.wantTerm, tc.wantOK)
 			}
+			if text != tc.wantText {
+				t.Fatalf("got text=%q, want %q", text, tc.wantText)
+			}
 		})
+	}
+}
+
+// 合格判定：回答的最新 Gemini 版本号必须严格大于 2.5；2.5 及以下、无版本号都不合格。
+func TestCodexHarvestProbeVersionQualified(t *testing.T) {
+	for _, tc := range []struct {
+		answer string
+		want   bool
+	}{
+		{"3.0", true},
+		{"3.8", true},
+		{"2.5", false},
+		{"2.0", false},
+		{"1.5", false},
+		{"Gemini 3.1", true},
+		{"  2.6  ", true},
+		{"", false},
+		{"不知道", false},
+		{"abc", false},
+	} {
+		if _, got := codexHarvestProbeVersionQualified(tc.answer); got != tc.want {
+			t.Errorf("codexHarvestProbeVersionQualified(%q) = %v, want %v", tc.answer, got, tc.want)
+		}
 	}
 }
 
@@ -192,6 +220,7 @@ func TestHarvestOneTicketPublishesTicket(t *testing.T) {
 		w.Header().Add("Set-Cookie", "ticket=harvest; Path=/; HttpOnly")
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"3.0\"}\n\n"))
 		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
 	}))
 	defer server.Close()
@@ -204,6 +233,9 @@ func TestHarvestOneTicketPublishesTicket(t *testing.T) {
 	res := fireCodexTicketHarvest(context.Background(), account, "gpt-5.5", server.URL, 5*time.Second)
 	if res.Result != "success" || res.State != state {
 		t.Fatalf("harvest result = %q state-match=%v err=%v", res.Result, res.State == state, res.Err)
+	}
+	if res.ProbeText != "3.0" {
+		t.Fatalf("probe text = %q, want 3.0", res.ProbeText)
 	}
 }
 
@@ -233,10 +265,10 @@ func TestFireCodexTicketHarvestRequiresProxy(t *testing.T) {
 	}
 }
 
-// 探测请求体是最小 ping 回合，且带 model。
+// 探测请求体提问当前最新 Gemini 版本号，且带 model。
 func TestCodexTicketHarvestProbeBody(t *testing.T) {
 	body := string(codexTicketHarvestProbeBody("gpt-5.5"))
-	for _, want := range []string{`"model":"gpt-5.5"`, `"store":false`, `"stream":true`, "ping"} {
+	for _, want := range []string{`"model":"gpt-5.5"`, `"store":false`, `"stream":true`, "Gemini", "版本号"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("probe body missing %s: %s", want, body)
 		}
@@ -393,6 +425,7 @@ func TestFireCodexTicketHarvestTeam5x(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(codexTurnStateHeader, state)
 		w.Header().Add("Set-Cookie", "ticket=team; Path=/")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"3.0\"}\n\n"))
 		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
 	}))
 	t.Cleanup(server.Close)
@@ -424,34 +457,30 @@ func TestFireCodexTicketHarvestTeam5x(t *testing.T) {
 
 func TestFireCodexTicketHarvestRejectsUnusableTickets(t *testing.T) {
 	for _, tc := range []struct {
-		name           string
-		state          string
-		plan           string
-		configured     int
-		expectedLength int
-		validation     string
+		name       string
+		state      string
+		answer     string
+		plan       string
+		validation string
 	}{
-		{name: "missing", plan: "plus", expectedLength: 292, validation: "missing"},
-		{name: "wrong length", state: "gAAAAAshort", plan: "plus", expectedLength: 292, validation: "shape"},
-		{name: "malformed envelope", state: "gAAAAA" + strings.Repeat("a", 286), plan: "plus", expectedLength: 292, validation: "shape"},
-		{name: "wrong plan length", state: testTicketState(time.Now(), auth.CodexTicketTeamBlocks), plan: "plus", expectedLength: 292, validation: "length"},
-		{name: "teamplus receives personal length", state: testTicketState(time.Now(), auth.CodexTicketPersonalBlocks), plan: "teamplus", expectedLength: 332, validation: "length"},
-		{name: "team5x receives personal length", state: testTicketState(time.Now(), auth.CodexTicketPersonalBlocks), plan: "team5x", expectedLength: 332, validation: "length"},
-		{name: "self-serve Team 5x receives personal length", state: testTicketState(time.Now(), auth.CodexTicketPersonalBlocks), plan: "self_serve_business_prolite", expectedLength: 332, validation: "length"},
-		{name: "explicit length override", state: testTicketState(time.Now(), auth.CodexTicketTeamBlocks), plan: "self_serve_business_prolite", configured: 400, expectedLength: 400, validation: "length"},
-		{name: "expired", state: testTicketState(time.Now().Add(-2*time.Hour), auth.CodexTicketPersonalBlocks), plan: "plus", expectedLength: 292, validation: "time"},
-		{name: "future issue time", state: testTicketState(time.Now().Add(time.Hour), auth.CodexTicketPersonalBlocks), plan: "plus", expectedLength: 292, validation: "time"},
+		{name: "probe answer at 2.5 rejected", state: testTicketState(time.Now(), auth.CodexTicketPersonalBlocks), answer: "2.5", plan: "plus", validation: "probe_version"},
+		{name: "probe answer below 2.5 rejected", state: testTicketState(time.Now(), auth.CodexTicketPersonalBlocks), answer: "1.5", plan: "plus", validation: "probe_version"},
+		{name: "probe answer without version rejected", state: testTicketState(time.Now(), auth.CodexTicketPersonalBlocks), answer: "不知道", plan: "plus", validation: "probe_version"},
+		{name: "missing", answer: "3.0", plan: "plus", validation: "missing"},
+		{name: "wrong shape", state: "gAAAAAshort", answer: "3.0", plan: "plus", validation: "shape"},
+		{name: "malformed envelope", state: "gAAAAA" + strings.Repeat("a", 286), answer: "3.0", plan: "plus", validation: "shape"},
+		{name: "expired", state: testTicketState(time.Now().Add(-2*time.Hour), auth.CodexTicketPersonalBlocks), answer: "3.0", plan: "plus", validation: "time"},
+		{name: "future issue time", state: testTicketState(time.Now().Add(time.Hour), auth.CodexTicketPersonalBlocks), answer: "3.0", plan: "plus", validation: "time"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withCodexTicketGate(t, "gpt-6-astra")
-			if tc.configured > 0 {
-				settings := auth.ConfiguredCodexTicketSettings()
-				settings.TargetLength = tc.configured
-				auth.SetConfiguredCodexTicketSettings(settings)
-			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set(codexTurnStateHeader, tc.state)
 				w.Header().Add("Set-Cookie", "ticket=invalid-state-test; Path=/")
+				if tc.answer != "" {
+					delta, _ := json.Marshal(tc.answer)
+					_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":" + string(delta) + "}\n\n"))
+				}
 				_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
 			}))
 			t.Cleanup(server.Close)
@@ -464,15 +493,17 @@ func TestFireCodexTicketHarvestRejectsUnusableTickets(t *testing.T) {
 				t.Fatalf("invalid ticket result=%s status=%d err=%v", res.Result, res.HTTPStatus, res.Err)
 			}
 			diagnostic := res.Err.Error()
-			for _, want := range []string{
-				"validation=" + tc.validation,
-				fmt.Sprintf("plan_type=%q", tc.plan),
-				fmt.Sprintf("actual_length=%d", len(tc.state)),
-				fmt.Sprintf("expected_length=%d", tc.expectedLength),
-				fmt.Sprintf("configured_length=%d", auth.ConfiguredCodexTicketSettings().TargetLength),
-			} {
-				if !strings.Contains(diagnostic, want) {
-					t.Errorf("diagnostic missing %q: %s", want, diagnostic)
+			if !strings.Contains(diagnostic, "validation="+tc.validation) {
+				t.Errorf("diagnostic missing validation=%s: %s", tc.validation, diagnostic)
+			}
+			if tc.validation != "probe_version" {
+				for _, want := range []string{
+					fmt.Sprintf("plan_type=%q", tc.plan),
+					fmt.Sprintf("actual_length=%d", len(tc.state)),
+				} {
+					if !strings.Contains(diagnostic, want) {
+						t.Errorf("diagnostic missing %q: %s", want, diagnostic)
+					}
 				}
 			}
 			if tc.validation == "time" {

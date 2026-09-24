@@ -61,18 +61,20 @@ func observeCodexTicketFeedback(account *auth.Account, injected, upstream string
 	if sink == nil {
 		return
 	}
-	targetLen := auth.CodexTicketTargetLengthFor(account.GetPlanType())
+	// 门票有效性判定已不按长度拦截（采票合格与否看探测回答），但「上游回带的新票
+	// 是否值得采纳」仍用套餐预期长度做形状匹配，避免把半成品噪声收进注入路径。
+	adoptionLen := auth.CodexTicketExpectedLength(auth.CodexTicketExpectedBlocks(account.GetPlanType()))
 	var binding *auth.CodexTicket
 	if len(selected) > 0 {
 		binding = selected[0]
 	}
-	model := codexTicketFeedbackModel(account, targetLen, injected)
+	model := codexTicketFeedbackModel(account, 0, injected)
 	if binding != nil {
 		model = binding.Model
 	}
 
 	// 规则 1：采纳上游新签发的票。
-	if status >= 200 && status < 300 && upstream != "" && len(upstream) == targetLen && cookies.Header != "" {
+	if status >= 200 && status < 300 && upstream != "" && len(upstream) == adoptionLen && cookies.Header != "" {
 		if shape, err := auth.ParseCodexTicketShape(upstream); err == nil && shape.Blocks == auth.CodexTicketExpectedBlocks(account.GetPlanType()) {
 			if model != "" {
 				if upstream == injected && binding != nil && cookies.Header == binding.Cookie && cookies.CapturedAt.Equal(binding.CookieCapturedAt) {
@@ -86,7 +88,7 @@ func observeCodexTicketFeedback(account *auth.Account, injected, upstream string
 
 	// 规则 2：注入的票被上游拒绝 → 撤销，让热备票顶上。
 	// 返回非目标形态时撤销实际发出的票，不重放可能已经计费的业务请求。
-	mismatch := status >= 200 && status < 300 && upstream != "" && len(upstream) != targetLen
+	mismatch := status >= 200 && status < 300 && upstream != "" && len(upstream) != adoptionLen
 	if status >= 200 && status < 300 && upstream != "" {
 		shape, err := auth.ParseCodexTicketShape(upstream)
 		mismatch = mismatch || err != nil || shape.Blocks != auth.CodexTicketExpectedBlocks(account.GetPlanType())
@@ -183,12 +185,12 @@ func publishCodexTicket(db *database.DB, store *auth.Store, account *auth.Accoun
 		ticket.HarvestNodeID, ticket.HarvestNodeName, ticket.HarvestPoolID = binding.HarvestNodeID, binding.HarvestNodeName, binding.HarvestPoolID
 		if binding.State != "" {
 			// 只允许当前票的反馈续链，迟到的旧响应不能覆盖刚更换的主票。
-			if current := account.CodexTicketWithShared(capturedAt, ticket.Length, model); current == nil || current.State != binding.State {
+			if current := account.CodexTicketWithShared(capturedAt, 0, model); current == nil || current.State != binding.State {
 				return false
 			}
 		}
 	}
-	if previous := account.CodexTicketForModel(model, capturedAt, ticket.Length); previous != nil && previous.State != state {
+	if previous := account.CodexTicketForModel(model, capturedAt, 0); previous != nil && previous.State != state {
 		previous.Standby = nil
 		ticket.Standby = previous
 	}
@@ -198,7 +200,7 @@ func publishCodexTicket(db *database.DB, store *auth.Store, account *auth.Accoun
 	if !cookies.ExpiresAt.IsZero() && cookies.ExpiresAt.Before(ticket.ExpiresAt) {
 		ticket.ExpiresAt = cookies.ExpiresAt
 	}
-	if !ticket.Valid(capturedAt, auth.CodexTicketTargetLengthFor(account.GetPlanType())) {
+	if !ticket.Valid(capturedAt, 0) {
 		return false
 	}
 	writeCtx, writeCancel := context.WithTimeout(context.Background(), 5*time.Second)

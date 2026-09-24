@@ -13,9 +13,6 @@ func TestNormalizeCodexTicketSettings(t *testing.T) {
 	if settings.Enabled {
 		t.Fatal("harvesting must default to off")
 	}
-	if settings.TargetLength != CodexTicketDefaultTargetLength {
-		t.Fatalf("target length = %d", settings.TargetLength)
-	}
 	if settings.TTLSeconds != CodexTicketDefaultTTLSeconds ||
 		settings.RefreshBeforeSeconds != CodexTicketDefaultRefreshBeforeSecs ||
 		settings.ProbeIntervalSeconds != CodexTicketDefaultProbeIntervalSecs ||
@@ -51,7 +48,6 @@ func TestNormalizeCodexTicketSettings(t *testing.T) {
 		{HarvestProxyURL: "ftp://127.0.0.1:1080"},
 		{HarvestProxyURL: "socks5h://127.0.0.1:1080/path"},
 		{HarvestProxyURL: "http://127.0.0.1:1080?x=1"},
-		{TargetLength: maxCodexTicketBytes + 1},
 		{Models: make([]string, CodexTicketMaxModels+1)},
 	} {
 		if _, err := NormalizeCodexTicketSettings(bad); err == nil {

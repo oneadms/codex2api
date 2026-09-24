@@ -60,7 +60,7 @@ func TestCodexTicketHarvestRejectsMissingCookie(t *testing.T) {
 	state := testTicketState(time.Now(), auth.CodexTicketPersonalBlocks)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(codexTurnStateHeader, state)
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"3.0\"}\n\ndata: {\"type\":\"response.completed\"}\n\n"))
 	}))
 	t.Cleanup(server.Close)
 	previousURL := codexTicketProbeURLForTest
