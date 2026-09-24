@@ -965,16 +965,21 @@ type traeCNCanonicalState struct {
 	model        string
 	terminal     bool
 	finishReason string
-	usage        map[string]any
-	output       []traeCNOutputRef
-	messageID    string
-	messageIdx   int
-	text         strings.Builder
-	reasoningID  string
-	reasoningIdx int
-	reasoning    strings.Builder
-	tools        []*traeCNToolCall
-	toolByKey    map[string]*traeCNToolCall
+	// Keep the observed value separate from the compatibility fallback at completion.
+	finishReasonSource string
+	finishReasonPath   string
+	finishReasonEvent  string
+	diagnostic         *traeCNDiagnostic
+	usage              map[string]any
+	output             []traeCNOutputRef
+	messageID          string
+	messageIdx         int
+	text               strings.Builder
+	reasoningID        string
+	reasoningIdx       int
+	reasoning          strings.Builder
+	tools              []*traeCNToolCall
+	toolByKey          map[string]*traeCNToolCall
 	// bridges 是「Trae 函数名 -> 客户端能执行的 item 类型」：上游只能回 function
 	// 调用，这些名字的输出项要还原成 custom_tool_call / local_shell_call / shell_call。
 	bridges traeCNBridges
@@ -1121,7 +1126,12 @@ func traeToolCalls(root gjson.Result, eventName string) []gjson.Result {
 	for _, path := range []string{"tool_calls", "message.tool_calls", "choices.0.delta.tool_calls", "choices.0.message.tool_calls"} {
 		value := root.Get(path)
 		if value.IsArray() {
-			return value.Array()
+			// These are alternative representations, not independent call batches.
+			// An empty placeholder must not mask a populated nested representation.
+			// Keep precedence for populated aliases so a mirrored delta is not appended twice.
+			if calls := value.Array(); len(calls) > 0 {
+				return calls
+			}
 		}
 		if value.IsObject() {
 			return []gjson.Result{value}
@@ -1500,8 +1510,15 @@ func (s *traeCNCanonicalState) emitCompleted(writer io.Writer, finishReason stri
 	if s.terminal {
 		return nil
 	}
+	if finishReason != "" && s.finishReasonSource == "" {
+		s.finishReasonSource = traeCNFinishReasonUpstream
+	}
 	if finishReason == "" {
-		finishReason = traeCNFirstNonEmpty(s.finishReason, "stop")
+		finishReason = s.finishReason
+		if finishReason == "" {
+			finishReason = "stop"
+			s.finishReasonSource = traeCNFinishReasonDefaulted
+		}
 	}
 	s.finishReason = finishReason
 	// 未开启诊断时不构造正文片段，避免普通请求承担额外的字符串处理开销。
@@ -1661,27 +1678,51 @@ func (s *traeCNCanonicalState) emitFailure(writer io.Writer, code, message strin
 
 // 只记录终态和内容长度，便于定位模型收尾、断流和转换错误，不记录思考或正文。
 func (s *traeCNCanonicalState) logTerminal(event, reason string) {
-	log.Printf("[TRAECN] stage=terminal model=%q response_id=%q event=%q finish_reason=%q reason=%q declared_tools=%d tool_calls=%d reasoning_chars=%d output_chars=%d",
-		s.model, s.responseID, event, responsesIdentityLogValue(s.finishReason), responsesIdentityLogValue(reason), len(s.contracts), len(s.tools), len([]rune(s.reasoning.String())), len([]rune(s.text.String())))
+	requestID := ""
+	if s.diagnostic != nil {
+		requestID = s.diagnostic.id
+		s.diagnostic.record("terminal", map[string]any{"response_id": s.responseID, "event": event, "finish_reason": s.finishReason, "finish_reason_source": s.finishReasonSource, "finish_reason_path": s.finishReasonPath, "finish_reason_event": s.finishReasonEvent, "parsed_tool_calls": len(s.tools), "reason": reason})
+	}
+	log.Printf("[TRAECN] stage=terminal request_id=%q model=%q response_id=%q event=%q finish_reason=%q finish_reason_source=%q reason=%q declared_tools=%d tool_calls=%d reasoning_chars=%d output_chars=%d",
+		requestID, s.model, s.responseID, event, responsesIdentityLogValue(s.finishReason), s.finishReasonSource, responsesIdentityLogValue(reason), len(s.contracts), len(s.tools), len([]rune(s.reasoning.String())), len([]rune(s.text.String())))
 }
+
+const (
+	traeCNFinishReasonUpstream  = "upstream"
+	traeCNFinishReasonDefaulted = "gateway_default"
+)
 
 func (s *traeCNCanonicalState) consume(writer io.Writer, eventName string, data []byte) error {
 	if s.terminal {
 		return nil
 	}
 	if strings.TrimSpace(string(data)) == "[DONE]" {
+		if s.diagnostic != nil {
+			s.diagnostic.record("parsed", map[string]any{"event": "[DONE]", "raw_finish_reason": ""})
+		}
 		return s.emitCompleted(writer, "")
 	}
 	parsed, payloadEventName := parseTraePayload(data)
-	if reason := traeFirstText(parsed, "finish_reason", "stop_reason", "choices.0.finish_reason"); reason != "" {
-		s.finishReason = reason
-	}
 	name := strings.ToLower(strings.TrimSpace(eventName))
 	if name == "" || name == "data" {
 		name = strings.ToLower(payloadEventName)
 	}
 	if name == "" && parsed.Get("done").Bool() {
 		name = "done"
+	}
+	paths := []string{"finish_reason", "stop_reason", "choices.0.finish_reason"}
+	if name == "done" || name == "end" || name == "finish" || name == "message_end" {
+		paths = append(paths, "reason")
+	}
+	for _, path := range paths {
+		if reason := traeFirstText(parsed, path); reason != "" {
+			s.finishReason, s.finishReasonSource = reason, traeCNFinishReasonUpstream
+			s.finishReasonPath, s.finishReasonEvent = path, name
+			break
+		}
+	}
+	if s.diagnostic != nil {
+		s.diagnostic.recordParsed(name, parsed, payloadEventName)
 	}
 	if name == "error" || name == "failed" {
 		code, message := traeProviderError(parsed)
@@ -1717,8 +1758,7 @@ func (s *traeCNCanonicalState) consume(writer io.Writer, eventName string, data 
 				return err
 			}
 		}
-		finishReason := traeFirstText(parsed, "finish_reason", "stop_reason", "reason")
-		return s.emitCompleted(writer, finishReason)
+		return s.emitCompleted(writer, "")
 	case "metadata", "timing_cost", "extra_info", "progress_notice", "queue_begin", "request_wait_in_queue", "queue_end":
 		// Provider lifecycle/diagnostic events do not carry model output. They are
 		// dropped by default; with the opt-in passthrough they are forwarded as
@@ -1867,17 +1907,20 @@ func traeCNCanonicalStreamForTools(source io.ReadCloser, model string, bridges t
 
 // traeCNCanonicalStreamWithPreflight 允许调用方显式指定前置元数据下发策略，
 // 使转换器与本次请求的出口决策（含连续重试抑制）保持一致。
-func traeCNCanonicalStreamWithPreflight(source io.ReadCloser, model string, bridges traeCNBridges, contracts traeCNContracts, preflightPassthrough bool) io.ReadCloser {
+func traeCNCanonicalStreamWithPreflight(source io.ReadCloser, model string, bridges traeCNBridges, contracts traeCNContracts, preflightPassthrough bool, diagnostics ...*traeCNDiagnostic) io.ReadCloser {
 	reader, writer := io.Pipe()
 	go func() {
-		defer source.Close()
 		defer writer.Close()
+		defer source.Close()
 		// 保活写入器包住 pipe writer：长思考期间持续发 SSE 注释，避免反代按空闲
 		// 超时掐断连接（客户端会显示"正在重新连接 N/5"并整轮重试）。
 		pipeWriter := writer
 		keepalive := startTraeCNKeepalive(pipeWriter)
 		defer keepalive.Close()
 		state := newTraeCNCanonicalStateWithBridges(model, bridges, contracts)
+		if len(diagnostics) > 0 {
+			state.diagnostic = diagnostics[0]
+		}
 		state.preflightPassthrough = preflightPassthrough
 		if err := state.emitCreated(keepalive); err != nil {
 			return
@@ -2015,6 +2058,12 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 	if account == nil || !account.IsTraeCNAPI() {
 		return nil, ErrNoAvailableAccount()
 	}
+	requestID := uuid.NewString()
+	account.Mu().RLock()
+	diagnosticAccessToken, diagnosticRefreshToken := account.AccessToken, account.RefreshToken
+	account.Mu().RUnlock()
+	diagnostic := newTraeCNDiagnostic(ctx, requestID, inboundBody, downstreamHeaders, diagnosticAccessToken, diagnosticRefreshToken)
+	ctx = context.WithValue(ctx, traeCNDiagnosticContextKey{}, diagnostic)
 	// 取连耗时（与 Codex WS 侧同口径）：本 attempt 内把账号变成"可以发请求"的
 	// 花费 = 请求转换 + 懒刷新令牌/代理租约 + 客户端池选择 + 拿到可用连接。
 	// 不含上游生成首内容的时间，因此 first_token_ms - ws_acquire_ms 就是纯粹的
@@ -2035,12 +2084,21 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 		!responsesBodyRequestsImageGeneration(inboundBody) {
 		canonical = stripResponsesImageGenerationCapabilities(canonical)
 	}
+	if diagnostic.dir != "" {
+		diagnostic.record("canonical", traeCNDiagnosticRequestSummary(canonical))
+	}
+	diagnostic.artifact("canonical.json", canonical, len(canonical))
 	body, model, bridges, contracts, err := traeCNRequestBodyPlan(canonical, account.TraeCNEffectiveModels())
 	if err != nil {
 		return nil, ErrBadRequest("Trae CN request conversion failed: " + err.Error())
 	}
 	// Code 池见底、Work 池还有额度时切到 Work 端点（access_type=1），两个池分开消耗。
 	body = applyTraeCNAccessType(body, traeCNAccessTypeForAccount(account))
+	if diagnostic.dir != "" {
+		diagnostic.record("outbound", traeCNDiagnosticRequestSummary(body))
+		diagnostic.record("tool_contracts", contracts)
+	}
+	diagnostic.artifact("outbound.json", body, len(body))
 	proxyURL := strings.TrimSpace(proxyOverride)
 	if proxyURL == "" {
 		account.Mu().RLock()
@@ -2057,7 +2115,6 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 		return nil, ErrUpstream(http.StatusUnauthorized, "Trae CN token refresh failed", ensureErr)
 	}
 	host, accessToken := account.TraeCNCredentials()
-	requestID := uuid.NewString()
 	endpoint := host + auth.TraeCNChatPath
 	// Persisted accounts have a stable DBID and therefore a stable Resin lease.
 	// Store-independent fixtures with DBID=0 stay on their explicit proxy/direct
@@ -2107,6 +2164,14 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 			req.Header.Set(key, value)
 		}
 	}
+	// Refreshed/access/custom credentials can be echoed by an upstream error.
+	for key, values := range req.Header {
+		k := strings.ToLower(key)
+		if strings.Contains(k, "token") || strings.Contains(k, "key") || strings.Contains(k, "auth") || strings.Contains(k, "cookie") {
+			diagnostic.secrets = append(diagnostic.secrets, values...)
+		}
+	}
+	diagnostic.secrets = append(diagnostic.secrets, accessToken)
 	// Resin owns the sticky egress identity. Set this after account custom
 	// headers so an imported header cannot move the request to another lease.
 	if viaResin {
@@ -2135,6 +2200,8 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 		}
 		return nil, ErrUpstream(0, "请求 Trae CN 上游失败", err)
 	}
+	diagnostic.record("http_response", map[string]any{"status": resp.StatusCode, "via_resin": viaResin})
+	resp.Body = diagnostic.upstream(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		normalizeTraeCNLimitHTTPResponse(resp)
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
@@ -2152,7 +2219,7 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 		return resp, nil
 	}
 	upstreamBody := wrapTraeCNCreditsRemainScanner(wrapTraeCNResumeUpstream(ctx, client, req, resp.Body), account)
-	canonicalStream := traeCNCanonicalStreamWithPreflight(upstreamBody, model, bridges, contracts, traeCNPreflightPassthroughForContext(ctx))
+	canonicalStream := diagnostic.reader(traeCNCanonicalStreamWithPreflight(upstreamBody, model, bridges, contracts, traeCNPreflightPassthroughForContext(ctx), diagnostic), "responses.sse")
 	// Chat and Messages handlers deliberately aggregate canonical SSE for their
 	// non-stream response types. Native Responses non-stream instead expects one
 	// response JSON object, so aggregate only that inbound protocol here.

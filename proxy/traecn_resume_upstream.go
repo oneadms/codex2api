@@ -198,6 +198,9 @@ func wrapTraeCNResumeUpstream(ctx context.Context, client *http.Client, req *htt
 			_ = response.Body.Close()
 			return nil, fmt.Errorf("TRAE cursor resume HTTP status %d", response.StatusCode)
 		}
+		if diagnostic, _ := ctx.Value(traeCNDiagnosticContextKey{}).(*traeCNDiagnostic); diagnostic != nil {
+			return diagnostic.upstream(response.Body), nil
+		}
 		return response.Body, nil
 	})
 }

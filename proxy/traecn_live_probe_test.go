@@ -212,8 +212,8 @@ func TestLiveTraeCNWorkStreamTail(t *testing.T) {
 	t.Logf("canonical 结尾: %s", strings.ReplaceAll(convTail, "\n", "\\n"))
 }
 
-// TestLiveTraeCNWorkStreamWithTools 用带工具声明的真实 agent 形状请求验证 Work 池：
-// 看它是否也会正常发 done，还是像截图里的失败那样中途断流。
+// TestLiveTraeCNWorkStreamWithTools 验证 Work 池交付可执行的天气调用及城市参数。
+// HTTP 200 或事件名本身不代表工具调用成功。
 func TestLiveTraeCNWorkStreamWithTools(t *testing.T) {
 	exportPath := strings.TrimSpace(os.Getenv("TRAECN_LIVE_CREDITS_FILE"))
 	if exportPath == "" {
@@ -222,7 +222,7 @@ func TestLiveTraeCNWorkStreamWithTools(t *testing.T) {
 	account := loadTraeCNProbeAccount(t, exportPath)
 	tools := `"tools":[{"type":"function","name":"get_weather","description":"look up weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}],"tool_choice":"auto",`
 	canonical := []byte(`{"model":"Doubao_1_6",` + tools + `"stream":true,"max_output_tokens":400,"input":[{"role":"user","content":[{"type":"input_text","text":"用 get_weather 查一下上海的天气，然后告诉我结果。"}]}]}`)
-	body, _, err := buildTraeCNRequestBody(canonical)
+	body, model, bridges, contracts, err := traeCNRequestBodyPlan(canonical)
 	if err != nil {
 		t.Fatalf("构造请求体失败: %v", err)
 	}
@@ -231,29 +231,25 @@ func TestLiveTraeCNWorkStreamWithTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Work 抓取失败: %v", err)
 	}
-	names := []string{}
-	for _, line := range strings.Split(string(raw), "\n") {
-		if strings.HasPrefix(line, "event:") {
-			names = append(names, strings.TrimSpace(strings.TrimPrefix(line, "event:")))
-		}
+	if status != http.StatusOK {
+		t.Fatalf("Work HTTP %d", status)
 	}
-	counts := map[string]int{}
-	for _, name := range names {
-		counts[name]++
-	}
-	t.Logf("HTTP %d bytes=%d counts=%v last_events=%v", status, len(raw), counts, names[len(names)-min(6, len(names)):])
-	canonicalOut := traeCNCanonicalStream(io.NopCloser(bytes.NewReader(raw)), "Doubao_1_6")
+	canonicalOut := traeCNCanonicalStreamForTools(io.NopCloser(bytes.NewReader(raw)), model, bridges, contracts)
 	converted, err := io.ReadAll(canonicalOut)
 	if err != nil {
 		t.Fatalf("canonical 转换失败: %v", err)
 	}
-	types := []string{}
-	for _, line := range strings.Split(string(converted), "\n") {
-		if strings.HasPrefix(line, "data:") {
-			types = append(types, gjson.Get(strings.TrimPrefix(line, "data:"), "type").String())
-		}
+	completed, ok := findCanonicalEvent(canonicalSSEEvents(t, converted), "response.completed")
+	if !ok {
+		t.Fatal("Work did not complete with a usable response")
 	}
-	t.Logf("canonical 事件类型: %v", types)
+	call := completed.Get(`response.output.#(type=="function_call")`)
+	args := call.Get("arguments").String()
+	city := gjson.Get(args, "city").String()
+	if call.Get("name").String() != "get_weather" || call.Get("call_id").String() == "" || call.Get("status").String() != "completed" || !gjson.Valid(args) || (city != "上海" && city != "上海市" && !strings.EqualFold(city, "Shanghai")) {
+		t.Fatal("expected executable get_weather(city=上海) was not received")
+	}
+	t.Logf("HTTP %d bytes=%d verified=get_weather(city=上海)", status, len(raw))
 }
 
 // collectTraeCNProbeOutput 取 SSE 里的正文增量（IDE 事件与 Work 事件都认）。

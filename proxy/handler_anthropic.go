@@ -458,6 +458,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		rejectAnthropicMessagesRequest(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
 		return
 	}
+	captureTraeCNDiagnosticIngress(c, rawBody)
 	h.capturePromptRequestIngress(c, rawBody)
 
 	if len(rawBody) == 0 {

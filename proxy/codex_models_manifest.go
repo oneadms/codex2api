@@ -122,6 +122,14 @@ func (h *Handler) serveScopedCodexManifest(c *gin.Context, row *database.APIKeyR
 	if len(models) == 0 {
 		return false
 	}
+	if row != nil && row.Limits.ResolveUpstreamChannel() == database.UpstreamChannelTraeCN {
+		// Public aliases use owned_by=codex2api in the model list. That display
+		// ownership must not erase the selected channel's tool bridge when
+		// constructing the Codex manifest (including official-looking GPT aliases).
+		for i := range models {
+			models[i].OwnedBy = "trae"
+		}
+	}
 	body, err := buildScopedCodexManifest(models)
 	if err != nil {
 		log.Printf("build scoped Codex manifest: %v", err)

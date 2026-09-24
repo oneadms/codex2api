@@ -264,6 +264,13 @@ func (h *Handler) applyStoredModelCapabilities(ctx context.Context, row *databas
 	if h == nil || h.db == nil || h.store == nil || row == nil {
 		return body
 	}
+	// A TRAECN-only manifest describes the gateway's tool bridge. An alias such
+	// as gpt-6-astra does not make an unrelated Codex account's learned contract
+	// applicable here: intersecting its code_mode_only with an unknown Trae
+	// snapshot deletes tool_mode=direct (and apply_patch_tool_type).
+	if row.Limits.ResolveUpstreamChannel() == database.UpstreamChannelTraeCN {
+		return body
+	}
 	var accounts []*auth.Account
 	var ids []int64
 	for _, account := range h.store.Accounts() {

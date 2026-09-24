@@ -3871,6 +3871,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Failed to read request body", api.ErrorTypeInvalidRequest))
 		return
 	}
+	captureTraeCNDiagnosticIngress(c, rawBody)
 	h.capturePromptRequestIngress(c, rawBody)
 	finishIdentityDiagnostics := beginResponsesIdentityDiagnostics(c, rawBody)
 	defer finishIdentityDiagnostics()
@@ -6894,6 +6895,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Failed to read request body", api.ErrorTypeInvalidRequest))
 		return
 	}
+	captureTraeCNDiagnosticIngress(c, rawBody)
 	h.capturePromptRequestIngress(c, rawBody)
 
 	supportedModels := h.supportedModelIDs(c.Request.Context())
