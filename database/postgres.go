@@ -1652,12 +1652,16 @@ func (db *DB) migrate(ctx context.Context) error {
 	CREATE TABLE IF NOT EXISTS account_events (
 		id         SERIAL PRIMARY KEY,
 		account_id INT NOT NULL DEFAULT 0,
-		event_type VARCHAR(20) NOT NULL,
-		source     VARCHAR(30) DEFAULT '',
+		event_type VARCHAR(64) NOT NULL,
+		source     VARCHAR(255) DEFAULT '',
 		created_at TIMESTAMPTZ DEFAULT NOW()
 	);
 	CREATE INDEX IF NOT EXISTS idx_account_events_created ON account_events(created_at);
 	CREATE INDEX IF NOT EXISTS idx_account_events_type_created ON account_events(event_type, created_at);
+	-- CREATE TABLE IF NOT EXISTS will not widen an existing production column.
+	-- traecn_credits_probe_exhausted is 32 chars; the old VARCHAR(20) rejected it (SQLSTATE 22001).
+	ALTER TABLE account_events ALTER COLUMN event_type TYPE VARCHAR(64);
+	ALTER TABLE account_events ALTER COLUMN source TYPE VARCHAR(255);
 
 	CREATE TABLE IF NOT EXISTS image_prompt_templates (
 		id            SERIAL PRIMARY KEY,
@@ -8187,6 +8191,7 @@ func (db *DB) BatchInsertAccountEvents(ctx context.Context, ids []int64, eventTy
 	if len(ids) == 0 {
 		return nil
 	}
+	eventType, source = clipAccountEventFields(eventType, source)
 	const batchSize = 500
 	for i := 0; i < len(ids); i += batchSize {
 		end := i + batchSize
@@ -8797,8 +8802,32 @@ func (db *DB) GetAllSessionTokens(ctx context.Context) (map[string]bool, error) 
 
 // ==================== 账号事件 ====================
 
+const (
+	accountEventTypeMaxRunes   = 64
+	accountEventSourceMaxRunes = 255
+)
+
+func clipAccountEventFields(eventType, source string) (string, string) {
+	return clipRunes(eventType, accountEventTypeMaxRunes), clipRunes(source, accountEventSourceMaxRunes)
+}
+
+func clipRunes(value string, max int) string {
+	if max <= 0 || value == "" {
+		return value
+	}
+	n := 0
+	for i := range value {
+		if n == max {
+			return value[:i]
+		}
+		n++
+	}
+	return value
+}
+
 // InsertAccountEvent 插入一条账号事件记录
 func (db *DB) InsertAccountEvent(ctx context.Context, accountID int64, eventType string, source string) error {
+	eventType, source = clipAccountEventFields(eventType, source)
 	_, err := db.conn.ExecContext(ctx,
 		`INSERT INTO account_events (account_id, event_type, source) VALUES ($1, $2, $3)`,
 		accountID, eventType, source,
