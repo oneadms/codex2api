@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- **TRAECN logs inbound vs outbound tool counts on every request.** The compact `stage=plan` line records config_name, function, tool_choice, reasoning effort and tool counts before/after conversion, without prompts or credentials, so a `declared_tools=0` terminal can be distinguished from Codex omitting tools. Resume TTL remains a post-disconnect reconnect window (default 60s) that cancels the worker when the client is already gone.
+
 - **TRAECN preserves nested tool calls and mapped-model tool capabilities.** Empty top-level tool-call arrays no longer mask populated nested calls; mirrored fields still deliver once. TRAECN-only Codex manifests retain `direct`/freeform capabilities for GPT aliases and ignore unrelated Codex capability snapshots. Finish reasons distinguish observed upstream values from the gateway's default `stop`. Default-off, bounded local diagnostics correlate ingress, outbound requests, raw SSE and Responses output. See [investigation and validation](docs/traecn-tool-calls-investigation.md).
 
 ### Features

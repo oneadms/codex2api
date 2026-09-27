@@ -44,6 +44,13 @@ func responsesRelayUpstreamContext(c *gin.Context) (context.Context, context.Can
 	}
 	return newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
 }
+
+// traeCNResumeTTL is the reconnect window after the client detaches, not the
+// worker lifetime. The worker already has a 20-minute upstream timeout.
+// When the window elapses, expire() cancels the worker so a gone client does
+// not keep burning Trae credits; a later retry then bypasses resume and starts
+// a new generation. Keep this short: NewAPI STREAMING_TIMEOUT is 600s for the
+// live connection, but TTL only starts after that connection is already gone.
 func traeCNResumeTTL() time.Duration {
 	seconds, err := strconv.Atoi(os.Getenv("TRAECN_RESUME_TTL_SECONDS"))
 	if err != nil || seconds < 1 || seconds > 600 {

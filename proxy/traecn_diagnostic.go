@@ -243,6 +243,62 @@ func (d *traeCNDiagnostic) upstream(source io.ReadCloser) io.ReadCloser {
 	return d.reader(source, name)
 }
 
+func traeCNPlanString(value any) string {
+	if value == nil {
+		return ""
+	}
+	switch v := value.(type) {
+	case string:
+		return v
+	case json.Number:
+		return v.String()
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
+func logTraeCNRequestPlan(requestID, model string, canonical, outbound []byte) {
+	snap := traeCNPlanSnapshotFromBodies(canonical, outbound)
+	log.Printf("[TRAECN] stage=plan request_id=%q model=%q config_name=%q function=%q inbound_tools=%d outbound_tools=%d tool_choice=%q reasoning_effort=%q",
+		requestID, model, snap.ConfigName, snap.Function, snap.InboundTools, snap.OutboundTools, snap.ToolChoice, snap.ReasoningEffort)
+}
+
+type traeCNPlanSnapshot struct {
+	ConfigName, Function, ToolChoice, ReasoningEffort string
+	InboundTools, OutboundTools                       int
+}
+
+// traeCNPlanSnapshotFromBodies counts tools before and after conversion without
+// recording prompts, reasoning, or credentials. inbound includes additional_tools
+// carriers; outbound is the Trae tools array actually sent.
+func traeCNPlanSnapshotFromBodies(canonical, outbound []byte) traeCNPlanSnapshot {
+	in, out := traeCNDiagnosticRequestSummary(canonical), traeCNDiagnosticRequestSummary(outbound)
+	inCount, _ := in["tool_count"].(int)
+	outCount, _ := out["tool_count"].(int)
+	effort := traeCNPlanString(in["reasoning.effort"])
+	if effort == "" {
+		effort = traeCNPlanString(out["reasoning_effort"])
+	}
+	choice := ""
+	switch v := out["tool_choice"].(type) {
+	case string:
+		choice = v
+	case nil:
+	default:
+		if encoded, err := json.Marshal(v); err == nil {
+			choice = string(encoded)
+		}
+	}
+	return traeCNPlanSnapshot{
+		ConfigName:      gjson.GetBytes(outbound, "config_name").String(),
+		Function:        gjson.GetBytes(outbound, "function").String(),
+		ToolChoice:      choice,
+		ReasoningEffort: effort,
+		InboundTools:    inCount,
+		OutboundTools:   outCount,
+	}
+}
+
 func traeCNDiagnosticRequestSummary(body []byte) map[string]any {
 	root := gjson.ParseBytes(body)
 	result := map[string]any{"bytes": len(body)}

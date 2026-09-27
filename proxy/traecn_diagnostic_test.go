@@ -165,3 +165,42 @@ func TestTraeCNDiagnosticReaderDoesNotChangeStream(t *testing.T) {
 		t.Fatal("fragmented credential was not redacted")
 	}
 }
+
+func TestTraeCNPlanSnapshotCountsInboundAndOutboundTools(t *testing.T) {
+	canonical := []byte(`{
+		"model": "gpt-6-astra",
+		"reasoning": {"effort": "max"},
+		"tool_choice": "auto",
+		"tools": [{"type": "function", "name": "exec_command", "parameters": {"type": "object"}}, {"type": "web_search"}],
+		"input": [{"type": "additional_tools", "tools": [{"type": "function", "name": "read_file", "parameters": {"type": "object"}}]}]
+	}`)
+	outbound, model, _, contracts, err := traeCNRequestBodyPlan(canonical, []string{"gpt-6-astra"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != "gpt-6-astra" {
+		t.Fatalf("model=%q", model)
+	}
+	snap := traeCNPlanSnapshotFromBodies(canonical, outbound)
+	if snap.InboundTools != 3 {
+		t.Fatalf("inbound_tools=%d want 3 (2 top-level + additional_tools)", snap.InboundTools)
+	}
+	if snap.OutboundTools != 2 || len(contracts) != 2 {
+		t.Fatalf("outbound_tools=%d contracts=%d want 2 (web_search skipped)", snap.OutboundTools, len(contracts))
+	}
+	if snap.Function != "chat_v3" || snap.ToolChoice != "auto" || snap.ReasoningEffort != "max" {
+		t.Fatalf("snapshot=%+v", snap)
+	}
+}
+
+func TestTraeCNPlanSnapshotEmptyToolsIsNotADrop(t *testing.T) {
+	canonical := []byte(`{"model":"gpt-6-astra","input":"hello"}`)
+	outbound, _, _, _, err := traeCNRequestBodyPlan(canonical, []string{"gpt-6-astra"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := traeCNPlanSnapshotFromBodies(canonical, outbound)
+	if snap.InboundTools != 0 || snap.OutboundTools != 0 {
+		t.Fatalf("empty request counted tools: %+v", snap)
+	}
+}
