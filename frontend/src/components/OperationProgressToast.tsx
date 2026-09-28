@@ -34,7 +34,9 @@ export default function OperationProgressToast({
             tone: "text-red-600 dark:text-red-400",
           },
         ]
-      : progress.action === "batch_refresh" || progress.action === "grok_import"
+      : progress.action === "batch_refresh" ||
+        progress.action === "traecn_batch_checkin" ||
+        progress.action === "grok_import"
         ? [
             {
               label: t("accounts.operationProgressSuccess"),

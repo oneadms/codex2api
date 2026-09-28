@@ -1926,6 +1926,8 @@ func traeCNCanonicalStreamWithPreflight(source io.ReadCloser, model string, brid
 			return
 		}
 		br := bufio.NewReader(source)
+		streamStartedAt := time.Now()
+		var lastUpstreamReadAt time.Time
 		var eventName string
 		var data bytes.Buffer
 		flush := func() error {
@@ -1941,6 +1943,9 @@ func traeCNCanonicalStreamWithPreflight(source io.ReadCloser, model string, brid
 		}
 		for {
 			line, readErr := br.ReadString('\n')
+			if len(line) > 0 {
+				lastUpstreamReadAt = time.Now()
+			}
 			line = strings.TrimRight(line, "\r\n")
 			switch {
 			case strings.HasPrefix(line, "event:"):
@@ -1980,6 +1985,7 @@ func traeCNCanonicalStreamWithPreflight(source io.ReadCloser, model string, brid
 					}
 				}
 				if !state.terminal {
+					state.logStreamReadError(readErr, streamStartedAt, lastUpstreamReadAt)
 					message := "Trae CN upstream stream ended before a done event"
 					if readErr != io.EOF {
 						message = readErr.Error()

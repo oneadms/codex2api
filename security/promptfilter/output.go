@@ -16,6 +16,7 @@ type OutputScanner struct {
 	pending      []byte
 	recordBuffer []byte
 	semantic     []byte
+	sse          bool
 }
 
 func NewOutputScanner(cfg Config) *OutputScanner {
@@ -42,6 +43,15 @@ func (s *OutputScanner) Push(data []byte) ([]byte, error) {
 		return data, nil
 	}
 	s.pending = append(s.pending, data...)
+	if !s.sse {
+		prefix := bytes.TrimSpace(s.pending)
+		for _, field := range []string{"data:", "event:", "id:", "retry:", ":"} {
+			if bytes.HasPrefix(prefix, []byte(field)) {
+				s.sse = true
+				break
+			}
+		}
+	}
 	semantic, terminal := s.consumeRecords(data)
 	s.appendSemantic(semantic)
 	if (len(semantic) > 0 || terminal) && s.semanticBlocked() {
@@ -62,9 +72,28 @@ func (s *OutputScanner) Push(data []byte) ([]byte, error) {
 		return nil, nil
 	}
 	releaseLen := len(s.pending) - keep
+	if s.sse {
+		// 安全窗口可能停在 JSON 或 UTF-8 字符中间。SSE 只交付完整事件，
+		// 让独立保活始终落在事件之间，同时保留尚未通过过滤的尾部。
+		releaseLen = completeSSEPrefixLen(s.pending[:releaseLen])
+		if releaseLen == 0 {
+			return nil, nil
+		}
+	}
 	release := append([]byte(nil), s.pending[:releaseLen]...)
 	s.pending = append(s.pending[:0], s.pending[releaseLen:]...)
 	return release, nil
+}
+
+func completeSSEPrefixLen(data []byte) int {
+	end := 0
+	if index := bytes.LastIndex(data, []byte("\n\n")); index >= 0 {
+		end = index + 2
+	}
+	if index := bytes.LastIndex(data, []byte("\n\r\n")); index >= 0 {
+		end = max(end, index+3)
+	}
+	return end
 }
 
 func (s *OutputScanner) Flush() ([]byte, error) {
@@ -176,6 +205,9 @@ func extractOutputRecord(record []byte, allowDone bool) ([]byte, bool) {
 	parsed := gjson.ParseBytes(record)
 	eventType := parsed.Get("type").String()
 	terminal := eventType == "response.completed" || eventType == "response.failed" || eventType == "message_stop"
+	// Chat 的失败事件没有 type 和 [DONE]；收到协议内 error 后也要释放安全
+	// 窗口，否则下游只能看到截断流，拿不到真正的错误原因。
+	terminal = terminal || (allowDone && parsed.Get("error").IsObject())
 	return []byte(ExtractOutputText(record)), terminal
 }
 

@@ -17,6 +17,7 @@ export type BatchOperationAction =
   | "batch_test"
   | "batch_delete"
   | "batch_refresh"
+  | "traecn_batch_checkin"
   | "grok_import"
   | "clean";
 
@@ -202,7 +203,8 @@ export function useOperationProgress(
         if (
           showOperationResultsRef.current &&
           (event.action === "batch_test" ||
-            event.action === "batch_refresh")
+            event.action === "batch_refresh" ||
+            event.action === "traecn_batch_checkin")
         ) {
           setOperationResults({
             action: event.action,

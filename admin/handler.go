@@ -1183,6 +1183,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/traecn/oauth/claim", h.ClaimTraeCNOAuthAccount)
 	api.POST("/accounts/traecn/import-json", h.TraeCNImportJSON)
 	api.GET("/accounts/traecn/export", h.ExportTraeCNAccounts)
+	api.POST("/accounts/traecn/batch-checkin", h.BatchCheckinTraeCNAccounts)
 	api.POST("/accounts/:id/traecn/refresh", h.RefreshTraeCNAccount)
 	api.POST("/accounts/:id/traecn/checkin", h.TriggerTraeCNCheckin)
 	api.GET("/accounts/:id/traecn/credits", h.GetTraeCNCredits)

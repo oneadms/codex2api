@@ -7498,6 +7498,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		contentTokenSeen := false
 		gotTerminal := false // 是否收到 response.completed 或 response.failed
 		deltaCharCount := 0  // 累计 delta 字符数（用于断流时估算 token）
+		reasoningByteCount := 0
 		var readErr error
 		var writeErr error
 		wroteAnyBody := false
@@ -7574,6 +7575,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				// 累计 delta 字符数（文本 + function call 参数）
 				if eventType == "response.output_text.delta" || isCodexToolInputDeltaEvent(eventType) {
 					deltaCharCount += len(parsed.Get("delta").String())
+				}
+				if eventType == "response.reasoning_summary_text.delta" || eventType == "response.reasoning_text.delta" {
+					reasoningByteCount += len(parsed.Get("delta").String())
 				}
 				eventType, data, parsed = rewriteEmptyIncompleteTerminal(emptyIncomplete, eventType, data, parsed)
 				if isResponsesSuccessTerminalEvent(eventType) {
@@ -7724,7 +7728,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					deltaCharCount += len(delta)
 					fullContent.WriteString(delta)
 				case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
-					fullReasoning.WriteString(parsed.Get("delta").String())
+					delta := parsed.Get("delta").String()
+					reasoningByteCount += len(delta)
+					fullReasoning.WriteString(delta)
 				case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
 					deltaCharCount += len(parsed.Get("delta").String())
 				case "response.completed", "response.incomplete":
@@ -7869,7 +7875,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		}
 		logStatusCode := outcome.logStatusCode
 		if outcome.logStatusCode != http.StatusOK {
-			log.Printf("流异常结束 (account %d, /v1/chat/completions, status %d): %s，已转发约 %d 字符", account.ID(), outcome.logStatusCode, outcome.failureMessage, deltaCharCount)
+			log.Printf("流异常结束 (account %d, /v1/chat/completions, status %d): %s，已接收正文及工具参数 %d 字节、思考 %d 字节", account.ID(), outcome.logStatusCode, outcome.failureMessage, deltaCharCount, reasoningByteCount)
 			if deltaCharCount > 0 {
 				estOutputTokens := deltaCharCount / 3
 				if estOutputTokens < 1 {

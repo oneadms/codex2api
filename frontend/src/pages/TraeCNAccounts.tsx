@@ -775,6 +775,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const [importing, setImporting] = useState(false);
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [batchTesting, setBatchTesting] = useState(false);
+  const [batchCheckingIn, setBatchCheckingIn] = useState(false);
   const [jsonPreview, setJsonPreview] = useState<{ items: TraeCNImportPreviewItem[]; error?: string }>({ items: [] });
   const [jsonSelected, setJsonSelected] = useState<Set<number>>(new Set());
   // OAuth 授权会话：从 start 拿到授权链接，轮询到 ready 后自动建号。
@@ -1363,6 +1364,44 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
     setPage(1);
   };
 
+  // 批量签到：勾选时只签所选，否则签当前筛选结果；没有筛选才要求全量确认。
+  const handleBatchCheckin = async (checkinIDs?: number[]) => {
+    if (total === 0 && selectedIDs.size === 0 && !checkinIDs?.length) return;
+
+    const ids = checkinIDs?.length ? checkinIDs : Array.from(selectedIDs);
+    const scope = ids.length > 0 ? ids : null;
+    const confirmed = await confirm(
+      scope ? {
+        title: t("traecn.batchCheckinTitle"),
+        description: t("traecn.batchCheckinDesc", { count: scope.length }),
+        confirmText: t("traecn.batchCheckin"),
+      } : {
+        title: t("traecn.batchCheckinAllTitle"),
+        description: t("traecn.batchCheckinAllDesc", { count: total }),
+        confirmText: t("traecn.batchCheckin"),
+      },
+    );
+    if (!confirmed) return;
+
+    setBatchCheckingIn(true);
+    try {
+      const result = await runStreamingOperation(
+        "/accounts/traecn/batch-checkin?stream=true",
+        scope ? { ids: scope } : { selector: currentTraeCNSelector },
+        t("traecn.batchCheckinProgressTitle"),
+      );
+      showToast(
+        t("traecn.batchCheckinDone", { success: result?.success ?? 0, failed: result?.failed ?? 0 }),
+        result?.failed ? "warning" : "success",
+      );
+      await reload(true);
+    } catch (checkinError) {
+      showToast(t("traecn.batchCheckinFailed", { error: getErrorMessage(checkinError) }), "error");
+    } finally {
+      setBatchCheckingIn(false);
+    }
+  };
+
   const renderSortHead = (key: SortKey, label: string) => (
     <TableHead className="text-[13px] font-semibold">
       <button
@@ -1399,6 +1438,15 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
         onRefresh={() => void reload()}
         actions={
           <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              onClick={() => void handleBatchCheckin()}
+              disabled={batchCheckingIn || total === 0}
+              title={t("traecn.batchCheckin")}
+            >
+              {batchCheckingIn ? <Loader2 className="size-4 animate-spin" /> : <CalendarCheck className="size-4" />}
+              <span className="hidden sm:inline">{batchCheckingIn ? t("traecn.batchCheckinRunning") : t("traecn.batchCheckin")}</span>
+            </Button>
             <Button
               variant="outline"
               onClick={() => void handleBatchTest()}
@@ -1466,6 +1514,10 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
         <div className="sticky top-2 z-20 flex flex-col gap-2 rounded-xl border border-primary/20 bg-card/95 px-3 py-2 shadow-lg backdrop-blur-sm sm:flex-row sm:items-center sm:justify-between">
           <span className="text-sm font-medium">{t("traecn.selectedCount", { count: selectedIDs.size })}</span>
           <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+            <Button variant="outline" size="sm" onClick={() => void handleBatchCheckin(Array.from(selectedIDs))} disabled={batchCheckingIn || batchTesting || batchDeleting}>
+              {batchCheckingIn ? <Loader2 className="size-3.5 animate-spin" /> : <CalendarCheck className="size-3.5" />}
+              <span className="hidden sm:inline">{batchCheckingIn ? t("traecn.batchCheckinRunning") : t("traecn.batchCheckin")}</span>
+            </Button>
             <Button variant="outline" size="sm" onClick={() => void handleBatchTest(Array.from(selectedIDs))} disabled={batchTesting || batchDeleting}>
               {batchTesting ? <Loader2 className="size-3.5 animate-spin" /> : <FlaskConical className="size-3.5" />}
               <span className="hidden sm:inline">{batchTesting ? t("accounts.batchTesting") : t("accounts.batchTest")}</span>

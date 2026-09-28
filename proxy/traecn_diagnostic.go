@@ -33,6 +33,7 @@ type traeCNDiagnosticIngress struct {
 
 type traeCNDiagnostic struct {
 	id            string
+	ctx           context.Context
 	dir           string
 	raw           bool
 	limit         int
@@ -70,7 +71,7 @@ func captureTraeCNDiagnosticIngress(c *gin.Context, body []byte) {
 }
 
 func newTraeCNDiagnostic(ctx context.Context, id string, fallback []byte, headers http.Header, secrets ...string) *traeCNDiagnostic {
-	d := &traeCNDiagnostic{id: id, secrets: secrets}
+	d := &traeCNDiagnostic{id: id, ctx: ctx, secrets: secrets}
 	dir, count, size, raw := traeCNDiagnosticConfig()
 	if dir == "" || count == 0 {
 		return d

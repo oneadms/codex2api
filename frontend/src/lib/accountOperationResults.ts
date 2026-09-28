@@ -34,7 +34,7 @@ export interface AccountOperationResultsPage {
 }
 
 export interface AccountOperationResultsState {
-  action: "batch_test" | "batch_refresh" | "batch_usage_refresh";
+  action: "batch_test" | "batch_refresh" | "batch_usage_refresh" | "traecn_batch_checkin";
   results: AccountOperationResult[];
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -506,5 +507,173 @@ func (h *Handler) TriggerTraeCNCheckin(c *gin.Context) {
 		"credits":    outcome.Status.Credits,
 		"extra":      outcome.Status.Extra,
 		"date":       snapshot.Date,
+	})
+}
+
+// traeCNCheckinTask 是批量签到的一个工作单元：目标账号加上它的数据库 ID。
+// DBID 与运行时 ID 一致，事件与去重记录都使用它，避免两个 ID 各写各的。
+type traeCNCheckinTask struct {
+	account *auth.Account
+	dbID    int64
+}
+
+// traeCNCheckinProgress 把单账号结果汇成批量事件，供 SSE 进度与结果弹窗使用。
+func (h *Handler) traeCNCheckinProgress(
+	onProgress func(batchOperationEvent),
+	task traeCNCheckinTask,
+	current, total int,
+	success, failed int64,
+	status, message string,
+) {
+	if onProgress == nil {
+		return
+	}
+	name, email := h.accountOperationIdentity(task.dbID)
+	event := batchOperationEvent{
+		Type:         "progress",
+		Action:       "traecn_batch_checkin",
+		Status:       status,
+		Current:      current,
+		Total:        total,
+		Success:      success,
+		Failed:       failed,
+		AccountID:    task.dbID,
+		AccountName:  name,
+		AccountEmail: email,
+		Message:      message,
+	}
+	if status == "failed" {
+		event.Error = message
+	}
+	onProgress(event)
+}
+
+// runTraeCNBatchCheckin 对给定的账号并发签到，并发度固定为 3：足够快，
+// 又不至于把签到接口或账号代理出口打热。失败只计入计数，不中断整批。
+func (h *Handler) runTraeCNBatchCheckin(ctx context.Context, tasks []traeCNCheckinTask, onProgress func(batchOperationEvent)) (int64, int64) {
+	total := len(tasks)
+	var success, failed int64
+	completed := make(chan struct{}, total)
+	sem := make(chan struct{}, 3)
+	var wg sync.WaitGroup
+
+	for _, task := range tasks {
+		wg.Add(1)
+		go func(task traeCNCheckinTask) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			// 单账号签到上限 60 秒，超时或失败都不影响其它账号。
+			attemptCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			defer cancel()
+			outcome, checkinErr := proxy.RunTraeCNCheckin(attemptCtx, h.store, task.account, "")
+			message := outcome.Message()
+			snapshot := auth.TraeCNCheckinSnapshot{
+				Date:    time.Now().Format("2006-01-02"),
+				At:      time.Now(),
+				Credits: outcome.Status.Credits,
+				Result:  message,
+			}
+			status := "success"
+			if checkinErr != nil {
+				status = "failed"
+				snapshot.Result = fmt.Sprintf("签到失败（出口 %s）: %v", outcome.Egress, checkinErr)
+				snapshot.Credits = 0
+			}
+			h.store.PersistTraeCNCheckin(task.dbID, snapshot)
+			if h.db != nil {
+				h.db.InsertAccountEventAsync(task.dbID, "traecn_checkin", snapshot.Result)
+			}
+			if checkinErr != nil {
+				log.Printf("[traecn-checkin] 账号 %d 批量签到失败（出口 %s）: %v", task.dbID, outcome.Egress, checkinErr)
+			}
+
+			// 计数先落定再发进度，前端每次收到事件时汇总值一定是一致的。
+			if status == "success" {
+				success++
+			} else {
+				failed++
+			}
+			completed <- struct{}{}
+			h.traeCNCheckinProgress(onProgress, task, len(completed), total, success, failed, status, snapshot.Result)
+		}(task)
+	}
+	wg.Wait()
+	return success, failed
+}
+
+// BatchCheckinTraeCNAccounts 批量触发积分签到，行为与单账号手动签到一致。
+// POST /api/admin/accounts/traecn/batch-checkin（stream=true 时返回 SSE 进度）。
+func (h *Handler) BatchCheckinTraeCNAccounts(c *gin.Context) {
+	if h == nil || h.store == nil {
+		writeError(c, http.StatusServiceUnavailable, "账号服务不可用")
+		return
+	}
+	var req batchAccountIDsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if req.IDs != nil && req.Selector != nil {
+		writeError(c, http.StatusBadRequest, "ids 与 selector 不能同时提供")
+		return
+	}
+	var ids []int64
+	if req.IDs != nil {
+		ids = uniqueAccountIDs(*req.IDs)
+	}
+	if req.Selector != nil {
+		// 选择器按渠道解析，TRAECN 页面传 channel=traecn，防止误签其它渠道账号。
+		selectorCtx, selectorCancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+		resolvedIDs, err := h.resolveAccountOperationSelector(selectorCtx, req.Selector)
+		selectorCancel()
+		if err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		ids = resolvedIDs
+	}
+	if len(ids) == 0 {
+		writeError(c, http.StatusBadRequest, "请提供要签到的账号 ID 列表")
+		return
+	}
+
+	// 只保留 Trae CN 账号； selector 之外防御性过滤运行时不存在或渠道不符的 ID。
+	tasks := make([]traeCNCheckinTask, 0, len(ids))
+	for _, id := range ids {
+		account := h.store.FindByID(id)
+		if account == nil || !account.IsTraeCNAPI() {
+			continue
+		}
+		tasks = append(tasks, traeCNCheckinTask{account: account, dbID: id})
+	}
+	if len(tasks) == 0 {
+		writeError(c, http.StatusNotFound, "没有可签到的 Trae CN 账号")
+		return
+	}
+	total := len(tasks)
+
+	if strings.EqualFold(c.Query("stream"), "true") {
+		setupSSE(c)
+		sendSSEJSON(c, batchOperationEvent{Type: "start", Action: "traecn_batch_checkin", Total: total})
+		success, failed := h.runTraeCNBatchCheckin(c.Request.Context(), tasks, func(event batchOperationEvent) {
+			sendSSEJSON(c, event)
+		})
+		sendSSEJSON(c, batchOperationEvent{
+			Type:    "complete",
+			Action:  "traecn_batch_checkin",
+			Current: total,
+			Total:   total,
+			Success: success,
+			Failed:  failed,
+		})
+		return
+	}
+
+	success, failed := h.runTraeCNBatchCheckin(c.Request.Context(), tasks, nil)
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("已签到 %d 个账号，失败 %d 个", success, failed),
+		"success": success,
+		"failed":  failed,
 	})
 }
