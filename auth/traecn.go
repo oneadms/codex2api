@@ -1599,17 +1599,29 @@ func (s *Store) refreshTraeCNAccountWithProxy(ctx context.Context, account *Acco
 		return fmt.Errorf("traecn refresh_token is empty")
 	}
 
+	resinAccountID := ""
+	if dbID > 0 {
+		resinAccountID = strconv.FormatInt(dbID, 10)
+	}
+	normalizedHost, err := NormalizeTraeCNHost(host)
+	if err != nil {
+		return err
+	}
+	resinURL, viaResin := ResinRequestURL(ctx, traeCNExchangeHost(normalizedHost)+TraeCNExchangePath, resinAccountID)
 	proxyURL := ""
-	if proxyOverride != nil {
-		proxyURL = strings.TrimSpace(*proxyOverride)
-		if proxyURL == "" && s.GetProxyPoolEnabled() {
-			return fmt.Errorf("账号 %d 代理池已启用但当前请求没有可用代理，已拒绝直连刷新", dbID)
-		}
-	} else {
-		var usable bool
-		proxyURL, usable = s.ResolveUsableProxyForAccount(account)
-		if !usable {
-			return fmt.Errorf("账号 %d 代理池已启用但无可用代理，已拒绝直连刷新", dbID)
+	// Resin 已承担出口时，普通代理池为空不能阻止令牌刷新。
+	if !viaResin {
+		if proxyOverride != nil {
+			proxyURL = strings.TrimSpace(*proxyOverride)
+			if proxyURL == "" && s.GetProxyPoolEnabled() {
+				return fmt.Errorf("账号 %d 代理池已启用但当前请求没有可用代理，已拒绝直连刷新", dbID)
+			}
+		} else {
+			var usable bool
+			proxyURL, usable = s.ResolveUsableProxyForAccount(account)
+			if !usable {
+				return fmt.Errorf("账号 %d 代理池已启用但无可用代理，已拒绝直连刷新", dbID)
+			}
 		}
 	}
 	// ExchangeToken and the following durable write form one RT-consumption
@@ -1622,10 +1634,13 @@ func (s *Store) refreshTraeCNAccountWithProxy(ctx context.Context, account *Acco
 		criticalCtx, criticalCancel = context.WithTimeout(criticalCtx, TraeCNRefreshCriticalTimeout)
 		defer criticalCancel()
 	}
-	resinAccountID := ""
-	if dbID > 0 {
-		resinAccountID = strconv.FormatInt(dbID, 10)
-	}
+	// 固定刚才检查过的出口，避免配置热更新后绕过代理池保护直接刷新。
+	criticalCtx = WithResinRequestDecorator(criticalCtx, func(_ context.Context, targetURL, _ string) string {
+		if viaResin {
+			return resinURL
+		}
+		return targetURL
+	})
 	token, err := ExchangeTraeCNRefreshToken(criticalCtx, refreshToken, host, proxyURL, resinAccountID)
 	if err != nil {
 		return err

@@ -88,7 +88,7 @@ func TestRunTraeCNCheckinClaimsOnceWhenNotCheckedIn(t *testing.T) {
 	defer server.Close()
 
 	account := &auth.Account{DBID: 7, UpstreamType: auth.UpstreamTraeCN, AccessToken: "AT", ExpiresAt: time.Now().Add(time.Hour)}
-	outcome, err := runTraeCNCheckin(t.Context(), nil, account, "", server.URL)
+	outcome, err := runTraeCNCheckin(WithResinConfig(t.Context(), nil), nil, account, "", server.URL)
 	if err != nil {
 		t.Fatalf("runTraeCNCheckin() error = %v", err)
 	}
@@ -126,7 +126,7 @@ func TestRunTraeCNCheckinSkipsClaimWhenAlreadyCheckedInOrDisabled(t *testing.T) 
 			}))
 			defer server.Close()
 			account := &auth.Account{DBID: 8, UpstreamType: auth.UpstreamTraeCN, AccessToken: "AT", ExpiresAt: time.Now().Add(time.Hour)}
-			outcome, err := runTraeCNCheckin(t.Context(), nil, account, "", server.URL)
+			outcome, err := runTraeCNCheckin(WithResinConfig(t.Context(), nil), nil, account, "", server.URL)
 			if err != nil {
 				t.Fatalf("runTraeCNCheckin() error = %v", err)
 			}
@@ -140,7 +140,7 @@ func TestRunTraeCNCheckinSkipsClaimWhenAlreadyCheckedInOrDisabled(t *testing.T) 
 	}
 }
 
-// 签到地址对所有账号相同，成/败差异只来自账号自己的出口；出口与错误摘要必须能看懂。
+// 出口标签要便于排查问题，同时避免把代理凭据写入账号事件。
 func TestTraeCNCheckinEgressLabelHidesCredentials(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct{ in, want string }{

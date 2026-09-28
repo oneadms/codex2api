@@ -86,6 +86,8 @@ type traeCNCheckinStatus struct {
 type traeCNCheckinOutcome struct {
 	CheckedIn bool
 	Claimed   bool
+	// Egress 记录本次固定使用的脱敏出口，失败日志不再根据热更新后的配置推断。
+	Egress string
 	// Skipped 非空表示没有发起领取：disabled（上游关闭签到）、already（今天已签）、
 	// not_enabled（本账号无签到资格）。
 	Skipped string
@@ -126,6 +128,16 @@ func runTraeCNCheckin(ctx context.Context, store *auth.Store, account *auth.Acco
 		proxyOverride = strings.TrimSpace(account.ProxyURL)
 		account.Mu().RUnlock()
 	}
+	// 刷新令牌、查询状态和领取共用同一份 Resin 配置，避免热更新时中途切换出口。
+	ctx = WithResinConfig(ctx, ResinConfigFromContext(ctx))
+	viaResin := IsResinEnabledForContext(ctx) && account.ID() > 0
+	outcome.Egress = traeCNCheckinEgressLabel(proxyOverride)
+	if viaResin {
+		if ResinPlatformFromContext(ctx) == "" {
+			ctx = WithResinPlatform(ctx, ResinPlatformForSessionFromContext(ctx, ""))
+		}
+		outcome.Egress = "resin"
+	}
 	// 签到与推理共用同一枚会轮换的 RT/AT：先确保令牌有效再发请求。
 	var err error
 	if store != nil {
@@ -144,18 +156,36 @@ func runTraeCNCheckin(ctx context.Context, store *auth.Store, account *auth.Acco
 	if host == "" {
 		host = TraeCNCheckinHost
 	}
-	client := getPooledClient(account, proxyOverride)
+	var client *http.Client
+	if viaResin {
+		client = getResinHTTPClient(account)
+	} else {
+		client = getPooledClient(account, proxyOverride)
+	}
 	post := func(path string) (gjson.Result, error) {
 		requestCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
 		body, _ := json.Marshal(map[string]any{"req_source": 1})
-		req, requestErr := http.NewRequestWithContext(requestCtx, http.MethodPost, host+path, bytes.NewReader(body))
+		endpoint := host + path
+		if viaResin {
+			endpoint = BuildReverseProxyURLForContext(ctx, endpoint, ResinPlatformFromContext(ctx))
+		}
+		req, requestErr := http.NewRequestWithContext(requestCtx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if requestErr != nil {
 			return gjson.Result{}, requestErr
 		}
 		req.Header = auth.TraeCNCheckinHeaders(account, accessToken, uuid.NewString())
+		if viaResin {
+			req.Header.Set("X-Resin-Account", ResinAccountID(account))
+		}
 		resp, requestErr := client.Do(req)
 		if requestErr != nil {
+			// http.Client 的错误包含完整请求地址，Resin 路径中的访问令牌不能写入日志。
+			if viaResin {
+				if urlErr, ok := requestErr.(*url.Error); ok {
+					requestErr = urlErr.Err
+				}
+			}
 			return gjson.Result{}, requestErr
 		}
 		defer resp.Body.Close()

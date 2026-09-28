@@ -487,7 +487,7 @@ func (h *Handler) TriggerTraeCNCheckin(c *gin.Context) {
 	message := outcome.Message()
 	snapshot := auth.TraeCNCheckinSnapshot{Date: time.Now().Format("2006-01-02"), At: time.Now(), Credits: outcome.Status.Credits, Result: message}
 	if checkinErr != nil {
-		snapshot.Result = "签到失败: " + checkinErr.Error()
+		snapshot.Result = fmt.Sprintf("签到失败（出口 %s）: %v", outcome.Egress, checkinErr)
 		snapshot.Credits = 0
 	}
 	h.store.PersistTraeCNCheckin(id, snapshot)
