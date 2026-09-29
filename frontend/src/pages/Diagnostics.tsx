@@ -392,7 +392,7 @@ export default function Diagnostics() {
               >
                 <Input
                   type="url"
-                  placeholder="https://your-codex2api.example/v1"
+                  placeholder="http://localhost:8080/v1"
                   value={settings.model_url}
                   onChange={(e) => change('model_url', e.target.value)}
                 />
