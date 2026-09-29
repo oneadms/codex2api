@@ -44,9 +44,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # ============================================================
 FROM alpine:3.19
 
-RUN apk --no-cache add ca-certificates tzdata git github-cli
+RUN apk --no-cache add ca-certificates tzdata git github-cli nodejs npm
 
 COPY --from=go-builder /codex2api /usr/local/bin/codex2api
+COPY internal/diag/codex_runner.mjs /opt/codex2api/codex-sdk/codex_runner.mjs
+COPY internal/diag/package.json internal/diag/package-lock.json /opt/codex2api/codex-sdk/
+RUN npm ci --omit=dev --no-audit --no-fund --prefix /opt/codex2api/codex-sdk
 
 # 内核、订阅及节点状态与现有 /data 卷一同持久化。
 ENV DATA_DIR=/data

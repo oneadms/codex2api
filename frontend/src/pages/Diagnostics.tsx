@@ -387,29 +387,29 @@ export default function Diagnostics() {
                 </p>
               </div>
               <Field
-                label="模型 API 地址"
-                hint="填写完整的 Chat Completions 地址；远程地址使用 HTTPS。"
+                label="Codex Base URL"
+                hint="填写本服务的 /v1 地址。Codex SDK 会使用下方 API Key 调用 /v1/responses。"
               >
                 <Input
                   type="url"
-                  placeholder="https://api.example.com/v1/chat/completions"
+                  placeholder="https://your-codex2api.example/v1"
                   value={settings.model_url}
                   onChange={(e) => change('model_url', e.target.value)}
                 />
               </Field>
               <Field label="模型名称">
                 <Input
-                  placeholder="你的分析模型"
+                  placeholder="gpt-5.5"
                   value={settings.model}
                   onChange={(e) => change('model', e.target.value)}
                 />
               </Field>
               <Field
-                label="模型 API Key"
+                label="项目 API Key"
                 hint={
                   settings.has_api_key
                     ? '已保存，留空保留原值。'
-                    : '填入模型服务的 API Key。'
+                    : '填写本服务已创建的 API Key。'
                 }
               >
                 <Input

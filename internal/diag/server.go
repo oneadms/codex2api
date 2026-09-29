@@ -300,6 +300,9 @@ func (m *Manager) managedRun(ctx context.Context, cfg ServerConfig) (RunResult, 
 	if _, err = exec.LookPath("git"); err != nil {
 		return result, errors.New("当前运行环境缺少 Git，请使用内置 worker 的新版 Docker 镜像")
 	}
+	if _, err = exec.LookPath("node"); err != nil {
+		return result, errors.New("当前运行环境缺少 Node.js 或 Codex SDK，请使用新版 Docker 镜像")
+	}
 	if cfg.GitHubToken != "" {
 		if _, err = exec.LookPath("gh"); err != nil {
 			return result, errors.New("当前运行环境缺少 GitHub CLI，请使用新版 Docker 镜像")
@@ -337,7 +340,11 @@ func (m *Manager) managedRun(ctx context.Context, cfg ServerConfig) (RunResult, 
 	c.StateDir = m.stateDir(cfg)
 	c.MinCount, c.MaxPerRun, c.MinConfidence, c.Publish = cfg.MinCount, cfg.MaxPerRun, cfg.MinConfidence, cfg.Publish
 	c.Window = time.Duration(cfg.WindowHours) * time.Hour
-	w := Worker{Config: c, Exec: ex, Analyzer: &ChatAnalyzer{URL: cfg.ModelURL, Model: cfg.Model, APIKey: cfg.APIKey}}
+	sdkRoot := os.Getenv("CODEX_DIAG_SDK_ROOT")
+	if sdkRoot == "" {
+		sdkRoot = "/opt/codex2api/codex-sdk"
+	}
+	w := Worker{Config: c, Exec: ex, Codex: CodexSDKRunner{SDKRoot: sdkRoot, BaseURL: cfg.ModelURL, APIKey: cfg.APIKey, Model: cfg.Model}}
 	return w.Run(ctx)
 }
 

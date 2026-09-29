@@ -50,7 +50,7 @@ func TestDiagnosticAdminRoutesPersistAndProtectSettings(t *testing.T) {
 	}
 	settings := diag.DefaultServerConfig().Public()
 	settings["enabled"] = true
-	settings["model_url"] = "http://127.0.0.1:1/v1/chat/completions"
+	settings["model_url"] = "http://127.0.0.1:1/v1"
 	settings["model"] = "fixture"
 	settings["api_key"] = "private-model-key"
 	settings["github_token"] = "private-github-token"

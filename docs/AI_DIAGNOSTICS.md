@@ -17,7 +17,7 @@ Codex2API：HTTP 5xx / panic / 已接入的上游 400、5xx
 
 部署包含本功能的新版 Docker 镜像后，进入管理后台 **AI 诊断**（`/admin/diagnostics`）：
 
-1. 填写模型完整 Chat Completions API 地址、模型名称、API Key。
+1. 填写本服务 Base URL（以 /v1 结尾）、Codex 模型名称和本服务 API Key。
 2. 确认 GitHub 仓库，默认 `oneadms/codex2api`。私有仓库读取或创建 PR 时填写 GitHub Token，授权目标仓库 Contents / Pull requests 读写权限。
 3. 开启「日志采集」，按需开启「自动诊断」和「创建草稿 PR」，点击「保存配置」。也可以保存后点「立即扫描」。
 4. 在同一页面查看采集状态、任务错误、近期错误、诊断报告、补丁及草稿 PR 链接。
@@ -28,7 +28,7 @@ Codex2API：HTTP 5xx / panic / 已接入的上游 400、5xx
 
 默认关闭采集、自动诊断及 PR 发布。采集开启后直到首次错误才有事件，空日志正常；未达到次数阈值时不会克隆仓库或调用模型。默认每 5 分钟扫描最近 24 小时、同类错误至少 3 次、每批最多 1 个问题，置信度门槛 0.8，均可在 UI 调整。
 
-模型接口需支持非流式 Chat Completions 的 `messages`、`max_tokens` 和 JSON 文本输出，完成时返回 `finish_reason=stop`。远程地址要求 HTTPS；仅回环地址允许 HTTP，不跟随重定向。每次模型请求超时 3 分钟、响应最大 256 KiB。可填写现有代理的接口；独立模型端点可避免服务自身故障影响分析。
+Codex SDK 使用配置的 API Key 作为 `CODEX_API_KEY`，并将 Base URL 指向本服务 `/v1`，实际请求为 `/v1/responses`。远程地址要求 HTTPS；仅回环地址允许 HTTP。Codex 在隔离的仓库副本中修改代码并运行相关 Go 测试，不访问业务容器文件系统。
 
 所有诊断管理 API 都使用已有管理密钥认证。只生成报告时，公共仓库不需要 GitHub Token；启用创建草稿 PR 后需要 Token。避免使用 GitHub Actions 自带的 `GITHUB_TOKEN`，其创建 PR 的事件通常不会触发新的 CI。细粒度 PAT 到期后可直接在 UI 更新。
 

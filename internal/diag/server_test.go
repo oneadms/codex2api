@@ -107,8 +107,9 @@ func TestManagedRunRejectsConcurrentAndCancelsOnDisable(t *testing.T) {
 	t.Cleanup(m.Close)
 	cfg := m.Config()
 	cfg.Enabled = true
-	cfg.ModelURL = "http://127.0.0.1/v1/chat/completions"
+	cfg.ModelURL = "http://127.0.0.1/v1"
 	cfg.Model = "test"
+	cfg.APIKey = "test-key"
 	if err := m.Update(t.Context(), cfg, false, false); err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +161,7 @@ func TestManagedEmptyScanNeedsNoCloneOrModelRequest(t *testing.T) {
 	t.Cleanup(m.Close)
 	cfg := m.Config()
 	cfg.Enabled = true
-	cfg.ModelURL = "http://127.0.0.1:1/v1/chat/completions"
+	cfg.ModelURL = "http://127.0.0.1:1/v1"
 	cfg.Model = "test"
 	if err := m.Update(t.Context(), cfg, false, false); err != nil {
 		t.Fatal(err)
@@ -191,8 +192,9 @@ func TestManagedConfigRejectsUnsafeSettings(t *testing.T) {
 		t.Fatal("automatic scan without collection accepted")
 	}
 	cfg.Enabled = true
-	cfg.ModelURL = "http://127.0.0.1/v1/chat/completions"
+	cfg.ModelURL = "http://127.0.0.1/v1"
 	cfg.Model = "test"
+	cfg.APIKey = "test-key"
 	cfg.Publish = true
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("publication without GitHub token accepted")

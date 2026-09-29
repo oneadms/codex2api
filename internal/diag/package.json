@@ -1,0 +1,8 @@
+{
+  "name": "codex2api-diagnostics",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@openai/codex-sdk": "0.159.0"
+  }
+}

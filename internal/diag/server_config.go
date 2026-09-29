@@ -47,8 +47,7 @@ func (c ServerConfig) Validate() error {
 		return errors.New("模型或凭据字段格式无效")
 	}
 	if c.ModelURL != "" {
-		a := ChatAnalyzer{URL: c.ModelURL, Model: "validate-url"}
-		if err := a.Validate(); err != nil {
+		if err := (CodexSDKRunner{BaseURL: c.ModelURL, Model: "validate-url"}).Validate(); err != nil && !strings.Contains(err.Error(), "模型名称") {
 			return err
 		}
 	}
@@ -65,8 +64,11 @@ func (c ServerConfig) ValidateRun() error {
 	if !c.Enabled {
 		return errors.New("请先开启日志采集")
 	}
-	if err := (&ChatAnalyzer{URL: c.ModelURL, Model: c.Model}).Validate(); err != nil {
+	if err := (CodexSDKRunner{BaseURL: c.ModelURL, Model: c.Model, APIKey: c.APIKey}).Validate(); err != nil {
 		return err
+	}
+	if c.APIKey == "" {
+		return errors.New("请填写本服务的 API Key")
 	}
 	if c.Publish && c.GitHubToken == "" {
 		return errors.New("创建草稿 PR 需要填写 GitHub Token")
