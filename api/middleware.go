@@ -205,6 +205,7 @@ func BodyCacheMiddleware() gin.HandlerFunc {
 // RecoveryMiddleware provides enhanced panic recovery with standardized error response
 func RecoveryMiddleware() gin.HandlerFunc {
 	return gin.CustomRecovery(func(c *gin.Context, recovered interface{}) {
+		recordDiagnosticPanic(c, recovered)
 		log.Printf("Panic recovered: %v", recovered)
 
 		// Return a generic message to the client to avoid leaking internal details.

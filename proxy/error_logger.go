@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/codex2api/internal/diag"
 	"github.com/codex2api/security"
 )
 
@@ -101,6 +102,9 @@ func (fl *fileLogger) writeEntry(endpoint string, statusCode int, model string, 
 
 // logUpstreamError 根据状态码分发到对应日志文件
 func logUpstreamError(endpoint string, statusCode int, model string, accountID int64, body []byte) {
+	if diag.Enabled() && (statusCode == 400 || (statusCode >= 500 && statusCode <= 599)) {
+		diag.Record(diag.Event{Kind: "upstream", Route: endpoint, Status: statusCode, Model: model, Message: diag.UpstreamMessage(body)})
+	}
 	switch {
 	case statusCode == 400:
 		badRequestLogger.writeEntry(endpoint, statusCode, model, accountID, body)

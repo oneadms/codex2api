@@ -1,0 +1,22 @@
+[Unit]
+Description=Codex2API diagnostic repair drafts for custom/main
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=codex-diag
+Group=codex-diag
+StateDirectory=codex2api-diag
+WorkingDirectory=/opt/codex2api-diag
+EnvironmentFile=/etc/codex2api-diag.env
+ExecStart=/opt/codex2api-diag/diagnose watch --repo /opt/codex2api-diag/repo --logs /var/log/codex2api/diagnostics.jsonl --state-dir /var/lib/codex2api-diag --interval 5m --publish
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

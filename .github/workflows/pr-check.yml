@@ -2,6 +2,7 @@ name: CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
     paths-ignore:
       - 'docs/**'
       - 'README.md'
@@ -9,6 +10,7 @@ on:
   push:
     branches:
       - main
+      - custom/main
       - codex/**
     paths-ignore:
       - 'docs/**'
@@ -23,6 +25,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  diagnostic-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require diagnostic repairs to target custom/main
+        env:
+          PR_HEAD: ${{ github.head_ref }}
+          PR_BASE: ${{ github.base_ref }}
+        run: |
+          if [[ "$PR_HEAD" == codex/autofix/* && "$PR_BASE" != custom/main ]]; then
+            echo 'Diagnostic repairs must target custom/main. main is reserved for upstream updates.' >&2
+            exit 1
+          fi
+
   frontend:
     runs-on: ubuntu-latest
     timeout-minutes: 8
@@ -101,6 +117,9 @@ jobs:
 
       - name: Run Go tests
         run: go test -count=1 -timeout 8m ./...
+
+      - name: Build Go packages
+        run: go build ./...
 
   postgres-compatibility:
     runs-on: ubuntu-latest

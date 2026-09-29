@@ -55,6 +55,9 @@
 ### 7. NewAPI 审计与生产验收
 - [NewAPI 身份与执行适配器](newapi-audit-integration.md)
 
+### 8. AI 日志诊断与修复草稿
+- [采集、独立 worker、custom/main 草稿 PR 与部署配置](AI_DIAGNOSTICS.md)
+
 ## 快速开始
 
 1. **新用户**: 先阅读主 README.md，然后参考 [DEPLOYMENT.md](DEPLOYMENT.md) 进行部署
