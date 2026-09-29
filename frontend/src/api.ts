@@ -1,4 +1,5 @@
 import { qualityTestFilterQuery, type QualityTestJob, type QualityTestJobsFilter, type QualityTestJobsResponse, type QualityTestPrompt } from './lib/qualityTest.ts'
+import type { DiagnosticSettings, DiagnosticStatus, DiagnosticHistoryItem, DiagnosticIncident, DiagnosticReport, diagnosticPayload } from './lib/diagnostics'
 import type { HarvestSnapshot, HarvestControls, HarvestControlSnapshot, HarvestScope, HarvestPage, HarvestNodeRecord, HarvestEvent, HarvestManualRequest, HarvestJob, MihomoStatus, MihomoAction } from './lib/codexHarvest'
 import type {
   AccountEventTrendPoint,
@@ -548,6 +549,13 @@ export function buildUsageLogSearchParams(params: UsageLogQueryParams) {
 }
 
 export const api = {
+	getDiagnosticSettings: () => request<DiagnosticSettings>('/diagnostics/settings'),
+	saveDiagnosticSettings: (data: ReturnType<typeof diagnosticPayload>) => request<DiagnosticSettings>('/diagnostics/settings', { method: 'PUT', body: JSON.stringify(data) }),
+	getDiagnosticStatus: () => request<DiagnosticStatus>('/diagnostics/status'),
+	runDiagnosticScan: () => request<DiagnosticStatus>('/diagnostics/run', { method: 'POST' }),
+	getDiagnosticHistory: () => request<{ items: DiagnosticHistoryItem[] }>('/diagnostics/history'),
+	getDiagnosticIncidents: () => request<{ groups: DiagnosticIncident[]; malformed_lines: number; overflow_events: number }>('/diagnostics/incidents'),
+	getDiagnosticReport: (id: string) => request<DiagnosticReport>(`/diagnostics/runs/${encodeURIComponent(id)}`),
   getBranding: () => requestPublic<SiteBranding>('/api/branding'),
   // 公开账号自助门户:生成 OpenAI 授权链接(无鉴权)。
   generateAccountPortalAuthURL: (data: { contact_email: string }) =>

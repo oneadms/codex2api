@@ -23,7 +23,6 @@ import (
 	"github.com/codex2api/cache"
 	"github.com/codex2api/config"
 	"github.com/codex2api/database"
-	"github.com/codex2api/internal/diag"
 	"github.com/codex2api/internal/imagestore"
 	"github.com/codex2api/internal/mihomo"
 	"github.com/codex2api/internal/version"
@@ -52,15 +51,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("加载核心环境配置失败 (请检查 .env 文件): %v", err)
 	}
-	diagCollector, err := diag.StartFromEnv()
-	if err != nil {
-		log.Fatalf("初始化诊断日志失败: %v", err)
-	}
-	defer func() {
-		if err := diagCollector.Close(); err != nil {
-			log.Printf("关闭诊断日志失败: %v", err)
-		}
-	}()
 	proxy.ConfigureDownstreamKeepaliveFromEnv()
 	log.Printf("物理层配置加载成功: port=%d, database=%s, cache=%s, tz=%s", cfg.Port, cfg.Database.Label(), cfg.Cache.Label(), time.Local)
 
@@ -400,6 +390,7 @@ func main() {
 	store.TriggerAutoCleanupAsync()
 	defer store.Stop()
 	backgroundCtx, cancelBackground := context.WithCancel(context.Background())
+	adminHandler.StartDiagnostics(backgroundCtx, harvestDataDir)
 	adminHandler.StartQualityTests(backgroundCtx)
 	defer cancelBackground()
 	if !proxy.StartResponseCacheSettingsPoller(backgroundCtx, db) {
@@ -699,6 +690,7 @@ func main() {
 	adminHandler.WaitAutoResetCredits()
 	adminHandler.WaitAutoActivate5hWindow()
 	adminHandler.WaitQualityTests()
+	adminHandler.StopDiagnostics()
 	wsKeepalive.Stop()
 	wsrelay.ShutdownExecutor()
 	if !proxy.DrainResponseCacheBackendWrites(2 * time.Second) {

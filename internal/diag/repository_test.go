@@ -178,3 +178,33 @@ func TestFetchBasePreservesDeveloperFetchHead(t *testing.T) {
 		t.Fatalf("temporary fetch ref leaked: %s", refs)
 	}
 }
+
+func TestWorkspaceSupportsManagedBareClone(t *testing.T) {
+	_, remote, expected := fixtureRepository(t)
+	root := t.TempDir()
+	repo := filepath.Join(root, "managed.git")
+	gitTest(t, root, "clone", "--bare", "--depth", "1", "--single-branch", "--branch", RepairBaseBranch, "file://"+remote, repo)
+	sha, err := FetchBase(t.Context(), Commands{}, repo, "origin", RepairBaseBranch)
+	if err != nil || sha != expected {
+		t.Fatalf("bare fetch: %s %v", sha, err)
+	}
+	w, err := NewWorkspace(t.Context(), Commands{}, repo, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := w.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	sources, err := w.Sources([]SourceRequest{{Path: "counter.go"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = w.Apply(t.Context(), validDiagnosis(), sources); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitTest(t, repo, "rev-parse", "refs/heads/"+RepairBaseBranch); got != expected {
+		t.Fatal("managed baseline changed")
+	}
+}

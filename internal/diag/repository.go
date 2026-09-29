@@ -22,7 +22,7 @@ type Executor interface {
 	Run(context.Context, string, string, ...string) (string, error)
 }
 
-type Commands struct{}
+type Commands struct{ GitHubToken string }
 
 type limitedOutput struct{ bytes.Buffer }
 
@@ -34,26 +34,39 @@ func (b *limitedOutput) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func (Commands) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
+func (runner Commands) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	if name == "git" {
 		args = append([]string{"-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false"}, args...)
+		if runner.GitHubToken != "" {
+			args = append([]string{"-c", "credential.helper=", "-c", "credential.https://github.com.helper=!gh auth git-credential"}, args...)
+		}
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.WaitDelay = 2 * time.Second
 	// Git/gh need credentials, but no LLM keys, database DSNs or service secrets.
 	for _, key := range []string{"PATH", "HOME", "USER", "TMPDIR", "SYSTEMROOT", "SSH_AUTH_SOCK", "XDG_CONFIG_HOME", "GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN"} {
+		if runner.GitHubToken != "" && (key == "GH_TOKEN" || key == "GITHUB_TOKEN") {
+			continue
+		}
 		if value, ok := os.LookupEnv(key); ok {
 			cmd.Env = append(cmd.Env, key+"="+value)
 		}
+	}
+	if runner.GitHubToken != "" {
+		cmd.Env = append(cmd.Env, "GH_TOKEN="+runner.GitHubToken)
 	}
 	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1")
 	var stdout, stderr limitedOutput
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("%s failed: %w: %s", name, err, bounded(SafeText(stderr.String()), 2000))
+		message := stderr.String()
+		if runner.GitHubToken != "" {
+			message = strings.ReplaceAll(message, runner.GitHubToken, "[redacted]")
+		}
+		return "", fmt.Errorf("%s failed: %w: %s", name, err, bounded(SafeText(message), 2000))
 	}
 	if stdout.Len() >= 2<<20 {
 		return "", fmt.Errorf("%s output exceeds 2 MiB", name)
@@ -159,7 +172,7 @@ func allowedPath(name string) bool {
 			return false
 		}
 	}
-	return !strings.HasPrefix(name, "internal/diag/") && !strings.HasPrefix(name, "cmd/diagnose/") && name != "api/diagnostic.go"
+	return !strings.HasPrefix(name, "internal/diag/") && !strings.HasPrefix(name, "cmd/diagnose/") && name != "api/diagnostic.go" && name != "admin/diagnostics.go" && name != "database/diagnostic_settings.go"
 }
 
 func (w *Workspace) Inventory() []string {

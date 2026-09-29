@@ -18,6 +18,7 @@ const RuntimeStatus = lazy(() => import('./pages/RuntimeStatus'))
 const Proxies = lazy(() => import('./pages/Proxies'))
 const SchedulerBoard = lazy(() => import('./pages/SchedulerBoard'))
 const Settings = lazy(() => import('./pages/Settings'))
+const Diagnostics = lazy(() => import('./pages/Diagnostics'))
 const Docs = lazy(() => import('./pages/Docs'))
 const APIKeys = lazy(() => import('./pages/APIKeys'))
 const APIKeyUsagePortal = lazy(() => import('./pages/APIKeyUsagePortal'))
@@ -87,6 +88,7 @@ function AdminApp() {
           <Route path="/payload-rules/:view" element={<PayloadRules />} />
           <Route path="/theme" element={<ThemeSettings />} />
           <Route path="/settings" element={<Settings />} />
+          <Route path="/diagnostics" element={<Diagnostics />} />
           <Route path="/docs" element={<Docs />} />
           <Route path="/guide" element={<Navigate to="/docs" replace />} />
           <Route path="/api-reference" element={<Navigate to="/docs#model-api" replace />} />

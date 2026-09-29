@@ -34,6 +34,7 @@ import (
 	"github.com/codex2api/auth"
 	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
+	"github.com/codex2api/internal/diag"
 	"github.com/codex2api/internal/imagestore"
 	"github.com/codex2api/internal/mihomo"
 	"github.com/codex2api/internal/openaiidentity"
@@ -46,6 +47,7 @@ import (
 
 // Handler 管理后台 API 处理器
 type Handler struct {
+	diagnostics        *diag.Manager
 	mihomo             *mihomo.Manager
 	codexHarvest       *proxy.CodexHarvestManager
 	qualityTestContext context.Context
@@ -1303,6 +1305,13 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.PUT("/settings/visible-channels", h.UpdateVisibleChannelsSettings)
 	api.GET("/settings/channel-tests", h.GetChannelTestSettings)
 	api.PUT("/settings/channel-tests", h.UpdateChannelTestSettings)
+	api.GET("/diagnostics/settings", h.GetDiagnosticSettings)
+	api.PUT("/diagnostics/settings", h.UpdateDiagnosticSettings)
+	api.GET("/diagnostics/status", h.GetDiagnosticStatus)
+	api.POST("/diagnostics/run", h.RunDiagnosticScan)
+	api.GET("/diagnostics/history", h.ListDiagnosticHistory)
+	api.GET("/diagnostics/incidents", h.ListDiagnosticIncidents)
+	api.GET("/diagnostics/runs/:id", h.GetDiagnosticReport)
 	api.GET("/settings/antigravity", h.GetAntigravitySettings)
 	api.PUT("/settings/antigravity", h.UpdateAntigravitySettings)
 	api.GET("/settings/traecn", h.GetTraeCNSettings)

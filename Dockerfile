@@ -44,7 +44,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # ============================================================
 FROM alpine:3.19
 
-RUN apk --no-cache add ca-certificates tzdata
+RUN apk --no-cache add ca-certificates tzdata git github-cli
 
 COPY --from=go-builder /codex2api /usr/local/bin/codex2api
 

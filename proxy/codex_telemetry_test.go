@@ -381,6 +381,7 @@ func TestCodexTelemetryTimingProbeGate(t *testing.T) {
 
 // TestCodexTelemetryTimingProbeRecordsParse 校验探针开启时统计事件数与解析耗时。
 func TestCodexTelemetryTimingProbeRecordsParse(t *testing.T) {
+	isolateCodexTelemetryQueue(t)
 	t.Setenv("CODEX_TELEMETRY_TIMING_DEBUG", "1")
 	attempt := &codexTelemetryAttempt{profile: testCodexTelemetryProfile(), timing: true}
 	stream := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n" +
@@ -404,6 +405,7 @@ func TestCodexTelemetryTimingProbeRecordsParse(t *testing.T) {
 // wsrelay.websocketResponseToHTTP 把每个 WebSocket 帧写成 `data: <json>\n\n`，
 // 与 HTTP 路径同形，所以两种传输共用同一套观测逻辑。
 func TestCodexTelemetryParsesWebsocketSSE(t *testing.T) {
+	queue := isolateCodexTelemetryQueue(t)
 	attempt := &codexTelemetryAttempt{profile: testCodexTelemetryProfile()}
 	stream := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n" +
 		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ws\"}}\n\n"
@@ -419,6 +421,9 @@ func TestCodexTelemetryParsesWebsocketSSE(t *testing.T) {
 	}
 	if attempt.firstToken.IsZero() {
 		t.Fatal("WebSocket-shaped SSE stream did not record first token")
+	}
+	if len(queue.queue) == 0 {
+		t.Fatal("terminal telemetry was not queued")
 	}
 }
 
@@ -487,6 +492,7 @@ func TestCodexTelemetryProfileIgnoresLocalAffinityKey(t *testing.T) {
 }
 
 func TestCodexTelemetryBodyCloseRacesRead(t *testing.T) {
+	isolateCodexTelemetryQueue(t)
 	pr, pw := io.Pipe()
 	attempt := &codexTelemetryAttempt{profile: testCodexTelemetryProfile()}
 	body := &codexTelemetryBody{ReadCloser: pr, attempt: attempt}
@@ -509,4 +515,16 @@ func TestCodexTelemetryBodyCloseRacesRead(t *testing.T) {
 	time.Sleep(time.Millisecond)
 	_ = body.Close()
 	<-done
+}
+
+// Parser tests enqueue terminal telemetry, but must not start real network workers
+// that can outlive the test and accidentally use a later test's global Resin route.
+func isolateCodexTelemetryQueue(t *testing.T) *codexTelemetryManager {
+	t.Helper()
+	previous := codexTelemetryGlobal
+	isolated := newCodexTelemetryManager()
+	isolated.once.Do(func() {})
+	codexTelemetryGlobal = isolated
+	t.Cleanup(func() { codexTelemetryGlobal = previous })
+	return isolated
 }

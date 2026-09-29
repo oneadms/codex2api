@@ -92,6 +92,26 @@ func StartFromEnv() (*Collector, error) {
 
 func Enabled() bool { return activeCollector.Load() != nil }
 
+// StartManagedCollector is used by the admin-configured runtime, without env edits.
+func StartManagedCollector(path string) (*Collector, error) {
+	if flag := strings.ToLower(strings.TrimSpace(os.Getenv("LOG_DISABLED"))); flag == "true" || flag == "1" || flag == "yes" || flag == "y" || flag == "on" {
+		return nil, errors.New("服务器设置了 LOG_DISABLED，无法开启诊断文件采集")
+	}
+	revision := strings.TrimSpace(os.Getenv("CODEX_DIAG_REVISION"))
+	if revision != "" && !shaPattern.MatchString(revision) {
+		return nil, errors.New("CODEX_DIAG_REVISION 必须是完整 commit SHA")
+	}
+	c, err := NewCollector(path, defaultLogLimit, revision)
+	if err != nil {
+		return nil, err
+	}
+	if !activeCollector.CompareAndSwap(nil, c) {
+		_ = c.Close()
+		return nil, errors.New("已有诊断采集器运行")
+	}
+	return c, nil
+}
+
 // Record does no disk or network I/O on the request goroutine.
 func Record(e Event) {
 	if c := activeCollector.Load(); c != nil {

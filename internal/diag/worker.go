@@ -91,12 +91,11 @@ func (w *Worker) Run(ctx context.Context) (RunResult, error) {
 	if err = os.MkdirAll(c.StateDir, 0700); err != nil {
 		return result, err
 	}
-	lock := filepath.Join(c.StateDir, ".lock")
-	if err = os.Mkdir(lock, 0700); err != nil {
-		return result, fmt.Errorf("cannot acquire diagnostic worker lock %s: %w (if stale, verify the old worker has stopped before removing it)", lock, err)
+	unlock, err := acquireWorkerLock(c.StateDir)
+	if err != nil {
+		return result, err
 	}
-	defer os.RemoveAll(lock)
-	_ = os.WriteFile(filepath.Join(lock, "owner"), []byte(fmt.Sprintf("pid=%d\nstarted=%s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339))), 0600)
+	defer unlock()
 	state := map[string]Entry{}
 	stateFile := filepath.Join(c.StateDir, "state.json")
 	if err = readJSON(stateFile, &state); err != nil && !os.IsNotExist(err) {

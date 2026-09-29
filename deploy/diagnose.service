@@ -1,3 +1,4 @@
+# Optional standalone CLI worker. The admin UI embedded worker does not need this service.
 [Unit]
 Description=Codex2API diagnostic repair drafts for custom/main
 Wants=network-online.target
