@@ -1,4 +1,5 @@
 import { ImageBillingCost } from '../components/image-studio/ImageBillingCost'
+import { mediaBillingUnit, type MediaBillingUnit } from '../lib/imageBilling'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { createPortal } from 'react-dom'
@@ -10,6 +11,7 @@ import Pagination from '../components/Pagination'
 import ChannelFilter, { useUsageChannel } from '../components/ChannelFilter'
 import ChannelLogo from '../components/ChannelLogo'
 import CompactionBadges from '../components/CompactionBadges'
+import UsageDaybreakBadge from '../components/UsageDaybreakBadge'
 import ModelLogo from '../components/ModelLogo'
 import Modal from '../components/Modal'
 import ColumnSettingsMenu from '../components/ColumnSettingsMenu'
@@ -78,6 +80,74 @@ function ReasoningEffortBadge({ effort }: { effort: string }) {
     >
       {label}
     </Badge>
+  )
+}
+
+// ===== 上游响应模型审计（移植自 sub2api）=====
+// 变体归一化：剥掉 -latest 与日期后缀（-20250101 / -2025-01-01）后比较。
+// 归一化相等 → 「疑似变体」（琥珀）；否则 → 「模型不一致」（橙）。
+function normalizeModelVariant(model: string): string {
+  return model
+    .trim()
+    .toLowerCase()
+    .replace(/-latest$/, '')
+    .replace(/-\d{4}-\d{2}-\d{2}$/, '')
+    .replace(/-\d{8}$/, '')
+}
+
+function isLikelyModelVariant(sentModel: string, responseModel: string): boolean {
+  const sent = sentModel.trim()
+  const response = responseModel.trim()
+  return sent !== '' && response !== '' && normalizeModelVariant(sent) === normalizeModelVariant(response)
+}
+
+function UpstreamResponseModelBadge({
+  log,
+  sentModel,
+}: {
+  log: UsageLog
+  sentModel: string
+}) {
+  const { t } = useTranslation()
+  // 三态语义：mismatch 非真（未自报为 null/undefined）一律不显示。
+  if (log.upstream_model_mismatch !== true || !log.upstream_response_model) return null
+  const responseModel = log.upstream_response_model
+  const variant = isLikelyModelVariant(sentModel, responseModel)
+  const titleLines = [
+    `${t('usage.requestedModel')}: ${log.model || '-'}`,
+    `${t('usage.sentUpstreamModel')}: ${sentModel || '-'}`,
+    `${t('usage.upstreamResponseModel')}: ${responseModel}`,
+  ]
+  // Fast 档 + 模型不一致的组合提示：上游若同时降档（换便宜模型 + 降档），
+  // 仅看 Fast 徽章或仅看 mismatch 徽章都会漏掉组合情况。
+  if (isFastTier(log.billing_service_tier || log.service_tier)) {
+    titleLines.push(t('usage.modelMismatchFastTierHint'))
+  }
+  return (
+    <div
+      className="w-full break-all pl-3 text-[11px]"
+      title={titleLines.join('\n')}
+    >
+      <span className="mr-1 text-muted-foreground">↳ {t('usage.upstreamResponseModel')}:</span>
+      <span
+        className={
+          variant
+            ? 'font-medium text-amber-600 dark:text-amber-400'
+            : 'font-medium text-orange-600 dark:text-orange-400'
+        }
+      >
+        {responseModel}
+      </span>
+      <span
+        className={`ml-1 inline-flex rounded px-1 py-px text-[10px] font-medium ring-1 ring-inset ${
+          variant
+            ? 'bg-amber-500/10 text-amber-700 ring-amber-500/30 dark:bg-amber-500/15 dark:text-amber-300 dark:ring-amber-500/30'
+            : 'bg-orange-500/10 text-orange-700 ring-orange-500/30 dark:bg-orange-500/15 dark:text-orange-300 dark:ring-orange-500/30'
+        }`}
+      >
+        {variant ? t('usage.modelVariant') : t('usage.modelMismatch')}
+      </span>
+    </div>
   )
 }
 
@@ -354,7 +424,10 @@ function formatServiceTierLabel(t: ReturnType<typeof useTranslation>['t'], tier?
 
 function UsageCostCell({ log }: { log: UsageLog }) {
   const { t } = useTranslation()
-  if (log.user_billing_mode === 'per_image') return <ImageBillingCost count={log.billed_image_count} unitPrice={log.image_unit_price} userBilled={log.user_billed} accountBilled={log.account_billed} />
+  const mediaUnit = mediaBillingUnit(log.effective_model || log.model)
+  const mode = log.user_billing_mode || ''
+  if (mode === 'per_image' || mode === 'per_video' || mode === 'per_second') return <ImageBillingCost mode={mode} media={mediaUnit !== ''} count={log.billed_image_count} unitPrice={log.image_unit_price} userBilled={log.user_billed} accountBilled={log.account_billed} />
+  if (mediaUnit) return <MediaUsageCost log={log} unit={mediaUnit} />
   const accountBilled = safeNumber(log.account_billed)
   const userBilled = safeNumber(log.user_billed)
   const totalCost = safeNumber(log.total_cost)
@@ -464,6 +537,42 @@ function UsageCostCell({ log }: { log: UsageLog }) {
               valueClassName="text-orange-300"
             />
           )}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+// MediaUsageCost 是 Grok Imagine 媒体行(用户按上游成本计费)的价格列:展示计费单位
+// (张数 / 视频秒数)与上游成本;视频提交行在完成时才结算,成功但无单价的行标"未定价"。
+function MediaUsageCost({ log, unit }: { log: UsageLog; unit: MediaBillingUnit }) {
+  const { t } = useTranslation()
+  const accountBilled = safeNumber(log.account_billed)
+  const userBilled = safeNumber(log.user_billed)
+  const units = unit === 'second' ? safeNumber(log.video_seconds) : safeNumber(log.image_count)
+  if (log.status_code >= 400) {
+    return <span className={`${usageTableMonoClass} text-muted-foreground/50`}>-</span>
+  }
+  if (unit === 'second' && units <= 0) {
+    return <span className="text-[11px] text-muted-foreground">{t('usage.videoSettlesOnDone')}</span>
+  }
+  if (units > 0 && accountBilled <= 0) {
+    return <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-600 dark:text-amber-400" title={t('usage.mediaUnpricedHint')}><AlertTriangle className="size-3.5" />{t('settings.pricing.mediaBilling.unpriced')}</span>
+  }
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button type="button" className="group inline-flex cursor-help items-center gap-1.5 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+          <span className="text-[13px] font-semibold leading-none tabular-nums text-emerald-600 antialiased dark:text-emerald-400">{formatUSD(userBilled > 0 ? userBilled : accountBilled)}</span>
+          <Info className="size-3.5 shrink-0 text-muted-foreground transition-colors group-hover:text-blue-500" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="right" sideOffset={8} className="w-72 max-w-none whitespace-nowrap rounded-lg border border-slate-700 bg-slate-950 px-3 py-2.5 text-xs text-slate-50 shadow-xl">
+        <div className="space-y-1.5">
+          <div className="mb-1 text-xs font-semibold text-slate-300">{t('usage.costDetails')}</div>
+          <CostTooltipRow label={t('usage.mediaBillingBasis')} value={t(unit === 'second' ? 'usage.mediaUnitsVideo' : 'usage.mediaUnitsImage', { count: units })} />
+          <CostTooltipRow label={t('usage.mediaUpstreamCostLabel')} value={formatUSD(accountBilled)} />
+          {units > 0 && <CostTooltipRow label={t('settings.pricing.mediaBilling.upstreamCost')} value={`${formatUSD(accountBilled / units)}${t(unit === 'second' ? 'settings.pricing.perSecondUnit' : 'settings.pricing.perImageUnit')}`} valueClassName="text-sky-300" />}
         </div>
       </TooltipContent>
     </Tooltip>
@@ -1054,6 +1163,34 @@ function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
 
 // New usage rows resolve by immutable incident ID. Only historical rows without
 // an ID fall back to the legacy nearest-timestamp inference endpoint.
+function TurnStateCell({ log }: { log: UsageLog }) {
+  const { t } = useTranslation()
+  const note = log.turn_state_rewrite_note?.trim() || ''
+  const overridden = Boolean(log.turn_state_overridden)
+  if (!note && !overridden) {
+    return null
+  }
+  const label = overridden
+    ? (note || t('usage.turnStateOverridden'))
+    : (note === 'pass' ? t('usage.turnStatePreserved') : (note || t('usage.turnStatePreserved')))
+  return (
+    <div className="mt-1 flex min-w-0 items-center gap-1.5 font-mono text-[11px] leading-relaxed" title={t('usage.turnStateLabel')}>
+      <span className="shrink-0 font-sans font-semibold text-muted-foreground">TS</span>
+      <Badge
+        variant="outline"
+        className={`shrink-0 border-transparent px-1.5 py-0 text-[10px] font-semibold ${
+          overridden
+            ? 'bg-amber-500/12 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300'
+            : 'bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300'
+        }`}
+      >
+        {label}
+      </Badge>
+    </div>
+  )
+}
+
+
 function CyberPolicyDetailButton({ log }: { log: UsageLog }) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
@@ -1605,6 +1742,7 @@ export default function Usage() {
   const [filterAccountLabel, setFilterAccountLabel] = useState('')
   const [filterFast, setFilterFast] = useState('')
   const [filterUltra, setFilterUltra] = useState('')
+  const [filterModelMismatch, setFilterModelMismatch] = useState(false)
   const [filterType, setFilterType] = useState<UsageTypeFilter>('')
   const [filterErrorKind, setFilterErrorKind] = useState('')
   const [filterRetry, setFilterRetry] = useState<UsageRetryFilter>('')
@@ -1667,6 +1805,7 @@ export default function Usage() {
       accountId: filterAccountId || undefined,
       fast: filterFast || undefined,
       ultra: filterUltra || undefined,
+      upstreamModelMismatch: filterModelMismatch ? 'true' : undefined,
       stream: filterType === 'stream' ? 'true' : filterType === 'sync' ? 'false' : undefined,
       compact: filterType === 'compact' ? 'true' : undefined,
       hasCompactionHistory: filterType === 'history' ? 'true' : undefined,
@@ -1674,7 +1813,7 @@ export default function Usage() {
       retry: filterRetry || undefined,
       viaWebsocket: filterTransport === 'ws' ? 'true' : filterTransport === 'http' ? 'false' : undefined,
     }
-  }, [timeRange, customRange, searchQuery, filterModel, filterEndpoint, filterApiKeyId, filterAccountId, filterFast, filterUltra, filterType, channel, filterRetry, filterTransport])
+  }, [timeRange, customRange, searchQuery, filterModel, filterEndpoint, filterApiKeyId, filterAccountId, filterFast, filterUltra, filterModelMismatch, filterType, channel, filterRetry, filterTransport])
 
   const buildLogFilterParams = useCallback(() => {
     return {
@@ -1686,13 +1825,20 @@ export default function Usage() {
   }, [buildDimensionFilterParams, filterStatus, filterErrorKind])
 
   // 选中某个账号(或密钥/模型/搜索)后,卡片只统计命中的请求;累计字段始终全局。
+  // 若 loadStats 依赖 buildDimensionFilterParams,则每次筛选变化都会让 useDataLoader
+  // 以非静默方式自动重跑,把整页换成骨架屏、卸载搜索框并丢失焦点,表现为"每输入一个字都像刷新页面"。
+  // 因此 loadStats 保持稳定引用(从 ref 读取最新筛选),首次加载仍走全页骨架屏,
+  // 后续筛选变化由下方 useEffect 用 reloadSilently 原地静默刷新,搜索框焦点不丢失。
+  const statsFilterParamsRef = useRef(buildDimensionFilterParams)
+  statsFilterParamsRef.current = buildDimensionFilterParams
+
   const loadStats = useCallback(async () => {
     const [stats, settings] = await Promise.all([
-      api.getUsageStats(buildDimensionFilterParams()),
+      api.getUsageStats(statsFilterParamsRef.current()),
       api.getSettings().catch((): SystemSettings | null => null),
     ])
     return { stats, settings }
-  }, [buildDimensionFilterParams])
+  }, [])
 
   const { data, loading, error, reload, reloadSilently } = useDataLoader<{
     stats: UsageStats | null
@@ -1701,6 +1847,17 @@ export default function Usage() {
     initialData: { stats: null, settings: null },
     load: loadStats,
   })
+
+  // 维度筛选(时间范围/账号/密钥/模型/端点/搜索/形态)变化时,静默原地刷新统计卡片:
+  // 保留页面与搜索框焦点,避免整页骨架屏闪烁;首次加载已由 useDataLoader 全页骨架屏承担。
+  const statsFiltersFirstRunRef = useRef(true)
+  useEffect(() => {
+    if (statsFiltersFirstRunRef.current) {
+      statsFiltersFirstRunRef.current = false
+      return
+    }
+    void reloadSilently()
+  }, [buildDimensionFilterParams, reloadSilently])
 
   // 服务端分页加载日志
   const loadLogs = useCallback(async () => {
@@ -1864,6 +2021,7 @@ export default function Usage() {
     filterType,
     filterFast,
     filterUltra,
+    filterModelMismatch ? 'true' : '',
     filterErrorKind,
     filterRetry,
     filterTransport,
@@ -1878,6 +2036,7 @@ export default function Usage() {
     || filterType
     || filterFast
     || filterUltra
+    || filterModelMismatch
     || filterErrorKind
     || filterRetry
     || filterTransport,
@@ -1918,6 +2077,7 @@ export default function Usage() {
     setFilterType('')
     setFilterFast('')
     setFilterUltra('')
+    setFilterModelMismatch(false)
     setFilterErrorKind('')
     setFilterRetry('')
     setFilterTransport('')
@@ -2453,6 +2613,20 @@ export default function Usage() {
                     <Sparkles className="size-3.5" />
                     Ultra
                   </button>
+                  <button
+                    type="button"
+                    title={t('usage.filterModelMismatchHint')}
+                    onClick={() => { setFilterModelMismatch(!filterModelMismatch); setPage(1) }}
+                    className={cn(
+                      'inline-flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-2.5 text-[13px] font-medium transition-colors',
+                      filterModelMismatch
+                        ? 'border-orange-500/40 bg-orange-500/12 text-orange-600 dark:bg-orange-500/20 dark:text-orange-300'
+                        : 'border-border bg-background text-muted-foreground hover:bg-muted/50 hover:text-foreground',
+                    )}
+                  >
+                    <AlertTriangle className="size-3.5" />
+                    {t('usage.filterModelMismatch')}
+                  </button>
                   </div>
                 </div>
               ) : null}
@@ -2531,11 +2705,15 @@ export default function Usage() {
                             </Badge>
                           ) : null}
                           {visibleColumns.type && <StreamBadge stream={log.stream} />}
+                          {visibleColumns.type && <UsageDaybreakBadge program={log.daybreak_program} />}
                           <CompactionBadges
                             compact={log.compact}
                             hasCompactionHistory={log.has_compaction_history}
                           />
                           <InternalRequestBadge log={log} />
+                          {log.upstream_model_mismatch === true && log.upstream_response_model && (
+                            <UpstreamResponseModelBadge log={log} sentModel={log.effective_model || log.model} />
+                          )}
                         </div>
                         {visibleColumns.time && (
                           <div className="shrink-0 whitespace-nowrap text-right text-[11px] tabular-nums text-muted-foreground">
@@ -2583,7 +2761,7 @@ export default function Usage() {
                           )}
                           {visibleColumns.userAgent && (
                             <div className="border-t border-border/60 pt-2">
-                              <UserAgentCell log={log} mobile />
+                              <div><UserAgentCell log={log} mobile /><TurnStateCell log={log} /></div>
                             </div>
                           )}
                         </div>
@@ -2767,6 +2945,9 @@ export default function Usage() {
                                 {formatServiceTierLabel(t, log.billing_service_tier || log.service_tier)}
                               </Badge>
                             )}
+                            {log.upstream_model_mismatch === true && log.upstream_response_model && (
+                              <UpstreamResponseModelBadge log={log} sentModel={log.effective_model || log.model} />
+                            )}
                           </div>
                         </TableCell>}
                         {visibleColumns.account && <TableCell className={`${usageTableTextClass} text-muted-foreground`}>
@@ -2796,7 +2977,7 @@ export default function Usage() {
                           </span>
                         </TableCell>}
                         {visibleColumns.userAgent && <TableCell>
-                          <UserAgentCell log={log} />
+                          <div><UserAgentCell log={log} /><TurnStateCell log={log} /></div>
                         </TableCell>}
                         {visibleColumns.endpoint && <TableCell>
                           <div
@@ -2812,8 +2993,9 @@ export default function Usage() {
                           </div>
                         </TableCell>}
                         {visibleColumns.type && <TableCell>
-                          <div className="flex flex-wrap items-center gap-1.5">
+                          <div className="flex flex-col items-start gap-1.5">
                             <StreamBadge stream={log.stream} />
+                            <UsageDaybreakBadge program={log.daybreak_program} />
                             <CompactionBadges
                               compact={log.compact}
                               hasCompactionHistory={log.has_compaction_history}

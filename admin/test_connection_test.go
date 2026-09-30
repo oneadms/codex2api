@@ -40,13 +40,14 @@ func TestConnectionAntigravityUsesNativeExecutorAndStreamsContent(t *testing.T) 
 	account := newAntigravityConnectionTestAccount()
 	store.AddAccount(account)
 	handler := &Handler{store: store}
-	var gotModel string
+	var gotModel, gotPrompt string
 	var gotStream bool
 	handler.antigravityCapabilityProbe = func(_ context.Context, acc *auth.Account, model string, body []byte, stream bool, _ string) (*http.Response, error) {
 		if acc != account {
 			t.Fatalf("executor received account %+v, want runtime account", acc)
 		}
 		gotModel, gotStream = model, stream
+		gotPrompt = gjson.GetBytes(body, "input.0.content.0.text").String()
 		if gjson.GetBytes(body, "model").String() != model || !gjson.GetBytes(body, "input").Exists() {
 			t.Fatalf("unexpected Responses payload: %s", body)
 		}
@@ -60,7 +61,7 @@ func TestConnectionAntigravityUsesNativeExecutorAndStreamsContent(t *testing.T) 
 	router.GET("/api/admin/accounts/:id/test", handler.TestConnection)
 
 	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/admin/accounts/7/test", nil))
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/admin/accounts/7/test?prompt=manual+prompt", nil))
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
@@ -70,6 +71,9 @@ func TestConnectionAntigravityUsesNativeExecutorAndStreamsContent(t *testing.T) 
 	}
 	if gotModel != "gemini-3.5-flash-low" {
 		t.Fatalf("test model = %q, want published cheapest flash tier", gotModel)
+	}
+	if gotPrompt != "manual prompt" {
+		t.Fatalf("test prompt = %q, want manual prompt", gotPrompt)
 	}
 	body := recorder.Body.String()
 	for _, needle := range []string{`"type":"test_start"`, `"text":"pong"`, `"type":"test_complete"`, `"success":true`} {

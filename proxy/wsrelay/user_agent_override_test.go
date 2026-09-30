@@ -67,7 +67,7 @@ func TestWebsocketHandshakePreservesRawUserAgentAfterSettingsReload(t *testing.T
 	t.Cleanup(manager.Stop)
 	executor := NewExecutorWithManager(manager)
 	account := &auth.Account{DBID: 42, AccountID: "ua-account", DynamicConcurrencyLimit: 1}
-	headers := executor.prepareWebsocketHeaders("token", account, account.AccountID, "ua-session", "ua-key", nil, http.Header{}, nil)
+	headers := executor.prepareWebsocketHeaders(ctx, "token", account, account.AccountID, "ua-session", "ua-key", nil, http.Header{}, nil, "")
 	conn, _, err := manager.AcquireConnection(ctx, account, "ws"+strings.TrimPrefix(server.URL, "http"), "ua-session", headers, "")
 	if err != nil {
 		t.Fatal(err)

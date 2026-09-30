@@ -2,6 +2,95 @@ export type ToastType = 'success' | 'error' | 'warning' | 'info'
 export type ISODateString = string
 export type UpstreamChannel = 'codex' | 'grok' | 'antigravity' | 'traecn' | 'claude'
 
+export type ChannelMonitorStatus = 'unknown' | 'operational' | 'degraded' | 'failed'
+export type ChannelMonitorBillingStatus = 'unknown' | 'ok' | 'unsupported' | 'failed'
+
+export interface ChannelMonitorConfig {
+  account_id: number
+  enabled: boolean
+  interval_minutes: number
+  model: string
+  available_models: string[]
+  last_checked_at?: ISODateString
+  next_check_at?: ISODateString
+}
+
+export interface ChannelMonitorBillingData {
+  object?: string
+  schema_version?: number
+  billing_scope?: string
+  group_rate_multiplier?: number
+  user_rate_multiplier?: number
+  resolved_rate_multiplier?: number
+  peak_rate_enabled?: boolean
+  peak_start?: string
+  peak_end?: string
+  peak_rate_multiplier?: number
+  applied_peak_multiplier?: number
+  effective_rate_multiplier?: number
+  timezone?: string
+  observed_at?: ISODateString
+}
+
+export interface ChannelMonitorBillingSnapshot {
+  status: ChannelMonitorBillingStatus
+  data?: ChannelMonitorBillingData
+  message?: string
+  http_status?: number
+  checked_at?: ISODateString
+  success_at?: ISODateString
+  next_check_at?: ISODateString
+  failure_count?: number
+}
+
+export interface ChannelMonitorCheck {
+  status: ChannelMonitorStatus
+  http_status?: number
+  latency_ms: number
+  first_token_ms: number
+  checked_at: ISODateString
+}
+
+export interface ChannelMonitorCard {
+  account_id: number
+  name: string
+  base_url: string
+  model: string
+  interval_minutes: number
+  status: ChannelMonitorStatus
+  http_status?: number
+  latency_ms: number
+  first_token_ms: number
+  message?: string
+  last_checked_at?: ISODateString
+  next_check_at?: ISODateString
+  availability_7d?: number
+  checks_7d: number
+  billing: ChannelMonitorBillingSnapshot
+  recent_checks: ChannelMonitorCheck[]
+}
+
+export interface ChannelMonitorListResponse {
+  items: ChannelMonitorCard[]
+  generated_at: ISODateString
+}
+
+export interface ChannelMonitorBillingRateItem {
+  account_id: number
+  billing: ChannelMonitorBillingSnapshot
+}
+
+export interface ChannelMonitorBillingRatesResponse {
+  items: ChannelMonitorBillingRateItem[]
+  generated_at: ISODateString
+}
+
+export interface UpdateChannelMonitorConfigRequest {
+  enabled: boolean
+  interval_minutes: number
+  model: string
+}
+
 // 管理台可见渠道设置（GET/PUT /settings/visible-channels）
 export interface ChannelTestSettings {
   test_model: string
@@ -170,8 +259,10 @@ export type AccountStatus = 'active' | 'ready' | 'cooldown' | 'error' | 'refresh
 export type CodexClientMetadataMode = 'auto' | 'always' | 'off'
 /** OpenAI Responses 中转账号的 Codex 身份透传档位，默认 off（不透传）。 */
 export type CodexPassthroughMode = 'off' | 'auto' | 'always'
+/** OpenAI Responses 中转账号的上游传输，默认 http。 */
+export type ResponsesUpstreamTransport = 'http' | 'websocket'
 /** Codex 官方出站请求的设备指纹收敛档位，默认 off（不收敛）。 */
-export type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
+export type CodexFingerprintMode = 'off' | 'device' | 'session' | 'single_machine_multi_window' | 'full'
 export type ModelCooldownMode = 'off' | 'fixed' | 'adaptive'
 
 export type ResponseCacheWritePolicy = 'always' | 'on_demand'
@@ -290,6 +381,19 @@ export interface SubscriptionRefreshResponse {
   subscription_expires_at?: ISODateString
 }
 
+/** Excel Basispoints route health of one account (automatic 403 pause / 429 cooldown). */
+export interface ExcelBpsPauseView {
+  /** "account" pauses every model; "models" pauses only `models`. */
+  scope?: 'account' | 'models'
+  reason?: 'forbidden' | 'model_access' | string
+  models?: string[]
+  paused_at?: string
+  last_probe_at?: string
+  next_probe_at?: string
+  failures?: number
+  rate_limited_until?: string
+}
+
 export interface AccountRow {
   codex_last_refresh_at?: string
   codex_refresh_error?: string
@@ -322,10 +426,21 @@ export interface AccountRow {
   claude_base_url?: string
   antigravity_auth_kind?: 'oauth' | 'api_key' | string
   agent_identity?: boolean
+  /** Account-level Excel Basispoints opt-in (forces BPS on). */
+  openai_excel_bps?: boolean
+  /** Excludes the account from the global Basispoints default. */
+  openai_excel_bps_opt_out?: boolean
+  /** Whether requests from this account currently use Basispoints. */
+  openai_excel_bps_effective?: boolean
+  /** Basispoints route health; absent when the route is healthy. */
+  bps_pause?: ExcelBpsPauseView
   grok_auth_kind?: string
   /** Safe, allowlisted User-Agent observed/generated for Claude upstream calls. */
   claude_user_agent?: string
   grok_plan?: GrokPlanInfo
+  grok_plan_display?: { plan: string; source: string; status: "fresh" | "stale" | "unknown"; observed_at?: string; expires_at?: string }
+  /** Upstream directory, separate from the editable models whitelist. */
+  grok_models?: { models: string[]; status: "fresh" | "stale" | "unknown"; updated_at?: string }
   grok_billing?: GrokBillingDetail
   // 上游逐请求返回的配额余量(x-ratelimit-* 头),运行时快照
   grok_rate_limit?: GrokRateLimitSnapshot
@@ -361,6 +476,7 @@ export interface AccountRow {
   model_mapping?: string
   codex_client_metadata_mode?: CodexClientMetadataMode
   codex_passthrough_mode?: CodexPassthroughMode
+  responses_upstream_transport?: ResponsesUpstreamTransport
   codex_fingerprint_mode?: CodexFingerprintMode
   claude_fingerprint_mode?: 'preserve' | 'force' | ''
   claude_client_platform?: 'any' | 'claude_code_cli_only'
@@ -375,6 +491,8 @@ export interface AccountRow {
   /** True once the OAuth usage probe has run for this row (even with no windows). */
   claude_usage_windows_probed?: boolean
   timezone?: string
+  /** 账号页跳转地址;空值回退打开 base_url(api-base)。 */
+  account_href?: string
   custom_headers?: Record<string, string> | null
   /** Forced X-Codex-Turn-State injected on every outbound Codex request; empty = off. */
   codex_turn_state?: string
@@ -432,6 +550,9 @@ export interface AccountRow {
   usage_percent_5h?: number | null
   usage_percent_spark?: number | null
   rate_limit_reset_credits?: number | null
+  daybreak_supported?: boolean
+  daybreak_models?: Record<string, string[]>
+  daybreak_checked_at?: number
   applicable_reset_credits?: number | null
   credits_valid?: boolean
   credits_balance?: string | null
@@ -566,7 +687,13 @@ export interface AccountPageStatsResponse {
 }
 
 export interface AccountLiveStateResponse {
-  accounts: Record<string, { active_requests: number; occupied_requests: number }>
+  accounts: Record<string, {
+    active_requests: number
+    occupied_requests: number
+    // 调度器当前实际执行的并发上限与配置值；旧后端不返回时保留列表里的值。
+    dynamic_concurrency_limit?: number
+    base_concurrency_effective?: number
+  }>
   session_slot_buffer_enabled: boolean
 }
 
@@ -613,7 +740,7 @@ export interface AccountsPageParams {
   proxyFilter?: 'all' | 'unbound' | 'this' | 'other'
   /** 订阅状态筛选(Codex 渠道),值见 SUBSCRIPTION_FILTER_OPTIONS。 */
   subscription?: SubscriptionFilter
-  sort?: 'requests' | 'today' | 'usage' | 'created_at' | 'updated_at' | 'scheduler_priority' | 'group' | 'risk' | 'dispatch_score' | 'latency_penalty' | 'unauthorized'
+  sort?: 'requests' | 'today' | 'usage' | 'created_at' | 'updated_at' | 'scheduler_priority' | 'group' | 'risk' | 'dispatch_score' | 'latency_penalty' | 'unauthorized' | 'id'
   order?: 'asc' | 'desc'
 }
 
@@ -989,6 +1116,7 @@ export interface AddOpenAIResponsesAccountRequest {
   model_mapping?: string
   codex_client_metadata_mode?: CodexClientMetadataMode
   codex_passthrough_mode?: CodexPassthroughMode
+  responses_upstream_transport?: ResponsesUpstreamTransport
   proxy_url: string
   custom_headers?: Record<string, string> | null
 }
@@ -1002,6 +1130,7 @@ export interface UpdateOpenAIResponsesAccountRequest {
   model_mapping?: string
   codex_client_metadata_mode?: CodexClientMetadataMode
   codex_passthrough_mode?: CodexPassthroughMode
+  responses_upstream_transport?: ResponsesUpstreamTransport
   proxy_url: string
   custom_headers?: Record<string, string> | null
 }
@@ -1677,6 +1806,9 @@ export interface UpdateAccountSchedulerRequest {
   timezone?: string | null
   codex_turn_state?: string | null
   codex_turn_state_models?: string | null
+  account_href?: string | null
+  openai_excel_bps?: boolean
+  openai_excel_bps_opt_out?: boolean
 }
 
 export interface BatchUpdateAccountsRequest extends UpdateAccountSchedulerRequest {
@@ -2259,6 +2391,7 @@ export interface SystemSettings {
   auto_clean_full_usage: boolean
   auto_clean_error: boolean
   auto_clean_expired: boolean
+  auto_reset_credits_on_exhaustion_enabled: boolean
   auto_reset_credits_enabled: boolean
   auto_reset_credits_before_expiry_min: number
   auto_activate_5h_window_enabled: boolean
@@ -2269,6 +2402,12 @@ export interface SystemSettings {
   codex_telemetry_enabled: boolean
   codex_telemetry_timing_debug: boolean
   codex_request_compression: boolean
+  codex_basispoints_enabled: boolean
+  codex_basispoints_models: string
+  codex_basispoints_403_auto_pause: boolean
+  codex_basispoints_403_probe_interval_minutes: number
+  codex_basispoints_429_cooldown_seconds: number
+  codex_basispoints_cache_creation_as_input: boolean
   codex_ws_weak_network_mode: boolean
   codex_ws_keepalive_enabled: boolean
   codex_ws_keepalive_interval_sec: number
@@ -2396,6 +2535,9 @@ export interface SystemSettings {
   codex_cli_version_sync_enabled: boolean
   codex_cli_version_sync_interval_hours: number
   codex_synced_cli_version?: string
+  codex_synced_desktop_mac_build?: string
+  codex_synced_desktop_windows_build?: string
+  codex_synced_vscode_build?: string
   codex_effective_cli_version?: string
   codex_user_agent_config: string
   usage_log_mode: 'full' | 'errors' | 'off' | string
@@ -3632,9 +3774,15 @@ export interface APIKeyAccountStatsResponse {
   membership_basis: 'current_and_deleted_last_membership'
 }
 
+export type UserBillingMode = 'token' | 'per_image' | 'per_video' | 'per_second'
+
 export interface UsageLog {
-  user_billing_mode?: '' | 'token' | 'per_image'
+  /** Generated video duration (seconds) on Grok video settlement rows. */
+  video_seconds?: number
+  user_billing_mode?: '' | UserBillingMode
+  /** Unit price for unit billing modes (per image / video / second). */
   image_unit_price?: number
+  /** Billed units: images, videos or seconds depending on user_billing_mode. */
   billed_image_count?: number
   request_id?: string
   upstream_request_id?: string
@@ -3652,11 +3800,18 @@ export interface UsageLog {
   client_user_agent: string
   upstream_user_agent: string
   user_agent_overridden: boolean
+  turn_state_overridden?: boolean
+  turn_state_rewrite_note?: string
   internal_reason: string
   parent_request_id: string
   endpoint: string
   model: string
   effective_model: string
+  daybreak_program?: string
+  /** 上游响应自报的模型名（未自报/历史行为空）。 */
+  upstream_response_model?: string
+  /** 三态：undefined/null=上游未自报无法比对；true/false=自报与实发是否一致。 */
+  upstream_model_mismatch?: boolean | null
   prompt_tokens: number
   completion_tokens: number
   total_tokens: number
@@ -3766,8 +3921,10 @@ export interface ChartAggregation {
 }
 
 export interface ModelPricingOverride {
-  user_billing_mode?: 'token' | 'per_image'
+  user_billing_mode?: UserBillingMode
   image_unit_price?: number
+  /** Upstream cost per media unit (USD / image or USD / second) for Grok Imagine models. */
+  media_unit_cost?: number
   image_input?: number
   cached_image_input?: number
   source?: string
@@ -4110,13 +4267,17 @@ export interface PublicAPIKeyUsageBreakdown {
 }
 
 export interface PublicAPIKeyUsageLog {
-  user_billing_mode?: '' | 'token' | 'per_image'
+  user_billing_mode?: '' | UserBillingMode
+  /** Unit price for unit billing modes (per image / video / second). */
   image_unit_price?: number
+  /** Billed units: images, videos or seconds depending on user_billing_mode. */
   billed_image_count?: number
   id: number
+  channel?: UpstreamChannel | ''
   endpoint: string
   model: string
   effective_model: string
+  daybreak_program?: string
   status_code: number
   duration_ms: number
   first_token_ms: number
@@ -4144,11 +4305,23 @@ export interface PublicAPIKeyUsageLog {
   created_at: ISODateString
 }
 
+/** Request-log filters for the public key usage page; they only narrow recent_logs. */
+export interface PublicAPIKeyUsageLogFilter {
+  model?: string
+  endpoint?: string
+  status?: '' | 'success' | 'error' | '4xx' | '5xx' | '429'
+  stream?: '' | 'stream' | 'sync'
+  channel?: '' | UpstreamChannel
+}
+
 export interface PublicAPIKeyUsageReport {
   summary: PublicAPIKeyUsageSummary
   windows: PublicAPIKeyUsageWindows
   models: PublicAPIKeyUsageBreakdown[]
   endpoints: PublicAPIKeyUsageBreakdown[]
+  /** Requested models / inbound endpoints seen in the range (unaffected by log filters). */
+  log_models?: string[]
+  log_endpoints?: string[]
   recent_logs: PublicAPIKeyUsageLog[]
   recent_logs_total: number
   recent_logs_page: number
@@ -4346,7 +4519,9 @@ export interface CodexUserAgentCatalogKind {
   default_terminal: string
   app_names: CodexUserAgentCatalogOption[] | null
   terminals: CodexUserAgentCatalogOption[] | null
+  reference_terminals?: string[] | null
   platforms: CodexUserAgentCatalogPlatform[] | null
+  reference_platforms?: CodexUserAgentCatalogPlatform[] | null
   version_pairs: CodexUserAgentCatalogVersionPair[] | null
 }
 

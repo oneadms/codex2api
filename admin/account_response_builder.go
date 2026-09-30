@@ -128,6 +128,9 @@ func (h *Handler) buildAccountResponse(
 			planType = "traecn"
 		}
 	}
+	if isGrokAccount && row.GrokPlanDisplay != nil {
+		planType = row.GrokPlanDisplay.Plan
+	}
 	var grokPlan *auth.GrokPlan
 	if isGrokAccount {
 		if resolved, ok := auth.ResolveGrokPlan(planType); ok {
@@ -141,6 +144,10 @@ func (h *Handler) buildAccountResponse(
 	codexPassthroughMode := ""
 	if isOpenAIResponsesAccount && includeDetails {
 		codexPassthroughMode = auth.NormalizeCodexPassthroughMode(row.GetCredential("codex_passthrough_mode"))
+	}
+	responsesUpstreamTransport := ""
+	if isOpenAIResponsesAccount && includeDetails {
+		responsesUpstreamTransport = auth.NormalizeOpenAIResponsesUpstreamTransport(row.GetCredential(auth.OpenAIResponsesUpstreamTransportCredentialKey))
 	}
 	balanceQueryURL := ""
 	if isOpenAIResponsesAccount && includeDetails {
@@ -293,11 +300,16 @@ func (h *Handler) buildAccountResponse(
 		Subscription:                 subscriptionStatusViewForRow(row, planType),
 		CodexLastRefreshAt:           row.GetCredential("codex_last_refresh_at"),
 		CodexRefreshError:            row.GetCredential("codex_refresh_error"),
+		ExcelBPSEnabled:              row.GetCredentialBool(auth.ExcelBPSCredentialKey),
+		ExcelBPSOptOut:               row.GetCredentialBool(auth.ExcelBPSOptOutCredentialKey),
+		GrokPlanDisplay:              row.GrokPlanDisplay,
+		GrokModels:                   row.GrokModels,
 		BalanceQueryURL:              balanceQueryURL,
 		Models:                       row.GetCredentialStringSlice("models"),
 		ModelMapping:                 modelMapping,
 		CodexClientMetadataMode:      codexClientMetadataMode,
 		CodexPassthroughMode:         codexPassthroughMode,
+		ResponsesUpstreamTransport:   responsesUpstreamTransport,
 		CodexFingerprintMode:         codexFingerprintMode,
 		ClaudeFingerprintMode:        claudeFingerprintMode,
 		ClaudeUserAgent:              claudeUserAgent,
@@ -311,6 +323,7 @@ func (h *Handler) buildAccountResponse(
 		CodexTurnState:               strings.TrimSpace(row.GetCredential(auth.CodexTurnStateCredentialKey)),
 		CodexTurnStateModels:         auth.NormalizeCodexTurnStateModels(row.GetCredential(auth.CodexTurnStateModelsCredentialKey)),
 		CodexTurnStateSetAt:          strings.TrimSpace(row.GetCredential(auth.CodexTurnStateSetAtCredentialKey)),
+		AccountHref:                  strings.TrimSpace(row.GetCredential(auth.AccountHrefCredentialKey)),
 		CustomHeaders:                customHeaders,
 		UpstreamRequestIDHeader:      row.GetCredential(auth.UpstreamRequestIDHeaderCredentialKey),
 		ProxyURL:                     row.ProxyURL,
@@ -358,6 +371,10 @@ func (h *Handler) buildAccountResponse(
 		}
 		resp.UsageLimitOverride = runtimeAccount.GetIgnoreUsageLimitStatusOverride()
 		resp.UsageLimitEffective = runtimeAccount.IgnoresUsageLimitStatus()
+		resp.ExcelBPSEffective = runtimeAccount.IsExcelBPSEnabled()
+		if resp.ExcelBPSEffective {
+			resp.ExcelBPSPause = excelBPSPauseForAccount(row.ID)
+		}
 		if isGrokAccount {
 			if snap, hasSnap := runtimeAccount.GetGrokRateLimitSnapshot(); hasSnap {
 				resp.GrokRateLimit = &snap
@@ -414,6 +431,10 @@ func (h *Handler) buildAccountResponse(
 		if credits, ok := runtimeAccount.GetRateLimitResetCredits(); ok {
 			resp.RateLimitResetCredits = &credits
 		}
+		daybreak := runtimeAccount.DaybreakSnapshot()
+		resp.DaybreakSupported = len(daybreak.Models) > 0
+		resp.DaybreakModels = daybreak.Models
+		resp.DaybreakCheckedAt = daybreak.CheckedAt / int64(time.Second)
 		if applicable, ok := runtimeAccount.GetApplicableResetCredits(); ok {
 			resp.ApplicableResetCredits = &applicable
 		}

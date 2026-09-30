@@ -17,8 +17,7 @@ type upstreamTraceAttempt struct {
 	accountID int64
 	requestID string
 	proxy     auth.ProxyAuditLabel
-	// injectedTurnState 是本次尝试实际注入到出站请求上的凭据级 X-Codex-Turn-State；
-	// upstreamTurnState 是上游响应回带的观测值。均为空串表示没有。
+	// upstreamTurnState 是上游响应回带的 X-Codex-Turn-State，空串表示没有。
 	injectedTurnState string
 	upstreamTurnState string
 }

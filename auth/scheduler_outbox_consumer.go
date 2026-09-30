@@ -501,10 +501,9 @@ func (s *Store) applyPersistentAccountSnapshot(dst, src *Account, enabled bool) 
 	dst.CodexClientMetadataMode = src.CodexClientMetadataMode
 	dst.CodexPassthroughMode = src.CodexPassthroughMode
 	dst.CodexFingerprintMode = src.CodexFingerprintMode
+	dst.ExcelBPSEnabled = src.ExcelBPSEnabled
+	dst.ExcelBPSOptOut = src.ExcelBPSOptOut
 	dst.Timezone = src.Timezone
-	dst.CodexTurnState = src.CodexTurnState
-	dst.CodexTurnStateModels = src.CodexTurnStateModels
-	dst.CodexTurnStateSetAt = src.CodexTurnStateSetAt
 	dst.ClaudeFingerprintMode = src.ClaudeFingerprintMode
 	dst.claudeSessionWindow = src.claudeSessionWindow
 	dst.CodexAuthMode = src.CodexAuthMode
@@ -522,6 +521,8 @@ func (s *Store) applyPersistentAccountSnapshot(dst, src *Account, enabled bool) 
 	dst.GrokLivePlanObservedAt = src.GrokLivePlanObservedAt
 	dst.GrokLivePlanExpiresAt = src.GrokLivePlanExpiresAt
 	dst.GrokLivePlanKnown = src.GrokLivePlanKnown
+	dst.GrokDisplayPlan = src.GrokDisplayPlan
+	dst.GrokDisplayPlanExpiresAt = src.GrokDisplayPlanExpiresAt
 	dst.GrokAccessAllowed = cloneBoolPtr(src.GrokAccessAllowed)
 	dst.GrokAccessExpiresAt = src.GrokAccessExpiresAt
 	dst.GrokBillingExhausted = src.GrokBillingExhausted

@@ -3,7 +3,6 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"net/http"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -11,6 +10,7 @@ import (
 	"github.com/codex2api/auth"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"net/http"
 )
 
 // 凭据级 X-Codex-Turn-State 强制注入（配置见 auth/codex_turn_state.go）。
@@ -269,9 +269,11 @@ func codexTurnStateFromFrame(payload []byte) string {
 }
 
 // ObserveCodexTurnStateFrame 供 WS 中继在逐帧转发时调用：发现上游回带的 turn state
-// 就记到本次尝试的追踪里（用量日志据此显示"回带 Turn State"）。
-func ObserveCodexTurnStateFrame(ctx context.Context, payload []byte) {
-	if state := codexTurnStateFromFrame(payload); state != "" {
+// 就记到本次尝试的追踪里（用量日志据此显示“回带 Turn State”）。
+func ObserveCodexTurnStateFrame(ctx context.Context, payload []byte) string {
+	state := codexTurnStateFromFrame(payload)
+	if state != "" {
 		noteUpstreamTurnState(ctx, state)
 	}
+	return state
 }

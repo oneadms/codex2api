@@ -3,13 +3,12 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"github.com/codex2api/auth"
+	"github.com/tidwall/gjson"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/codex2api/auth"
-	"github.com/tidwall/gjson"
 )
 
 func turnStateTraceContext() (context.Context, *upstreamTraceAudit) {

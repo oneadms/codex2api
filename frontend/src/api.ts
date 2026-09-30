@@ -69,6 +69,9 @@ import type {
   AccountPageStatsResponse,
   AccountLiveStateResponse,
   ChartAggregation,
+  ChannelMonitorConfig,
+  ChannelMonitorBillingRatesResponse,
+  ChannelMonitorListResponse,
   CreateAccountResponse,
   CreateAPIKeyResponse,
   CreateAPIKeyRequest,
@@ -125,6 +128,7 @@ import type {
   PromptReviewTestRequest,
   PromptReviewTestResponse,
   PromptReviewAPIKeysResponse,
+  PublicAPIKeyUsageLogFilter,
   PublicAPIKeyUsageResponse,
   ImageStudioQuota,
   RecycleBinAccountsResponse,
@@ -142,6 +146,7 @@ import type {
   CodexUserAgentCatalog,
   CodexUserAgentPreview,
   UpdateAccountSchedulerRequest,
+  UpdateChannelMonitorConfigRequest,
   UpdateAPIKeyRequest,
   UpdatePromptFilterNewAPIBindingRequest,
   UpdateOAuthAccountRequest,
@@ -511,6 +516,7 @@ export type UsageLogQueryParams = {
   accountId?: string
   fast?: string
   ultra?: string
+  upstreamModelMismatch?: string
   stream?: string
   compact?: string
   hasCompactionHistory?: string
@@ -535,6 +541,7 @@ export function buildUsageLogSearchParams(params: UsageLogQueryParams) {
   if (params.accountId) search.set('account_id', params.accountId)
   if (params.fast) search.set('fast', params.fast)
   if (params.ultra) search.set('ultra', params.ultra)
+  if (params.upstreamModelMismatch) search.set('upstream_model_mismatch', params.upstreamModelMismatch)
   if (params.stream) search.set('stream', params.stream)
   if (params.compact) search.set('compact', params.compact)
   if (params.hasCompactionHistory) search.set('has_compaction_history', params.hasCompactionHistory)
@@ -569,11 +576,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  getPublicAPIKeyUsage: (apiKey: string, range = '30d', params: { page?: number; pageSize?: number } = {}) => {
+  getPublicAPIKeyUsage: (apiKey: string, range = '30d', params: { page?: number; pageSize?: number } & PublicAPIKeyUsageLogFilter = {}) => {
     const search = new URLSearchParams()
     search.set('range', range)
     if (params.page) search.set('page', String(params.page))
     if (params.pageSize) search.set('page_size', String(params.pageSize))
+    if (params.model) search.set('model', params.model)
+    if (params.endpoint) search.set('endpoint', params.endpoint)
+    if (params.status) search.set('status', params.status)
+    if (params.stream) search.set('stream', params.stream)
+    if (params.channel) search.set('channel', params.channel)
     return requestAPIKeyUsage<PublicAPIKeyUsageResponse>(`/summary?${search.toString()}`, apiKey)
   },
   getPortalImageQuota: (apiKey: string) =>
@@ -583,13 +595,14 @@ export const api = {
   createPortalImageEditJob: (apiKey: string, data: CreateImageJobPayload) =>
     requestImageStudioPortal<ImageJobResponse>('/edit-jobs', apiKey, { method: 'POST', body: JSON.stringify(data) }),
   getPortalImageJobs: (apiKey: string, params: { page?: number; pageSize?: number } = {}) => {
-    const sp = new URLSearchParams()
+    const sp = new URLSearchParams({ summary: '1' })
     if (params.page) sp.set('page', String(params.page))
     if (params.pageSize) sp.set('page_size', String(params.pageSize))
     return requestImageStudioPortal<ImageJobsResponse>(`/jobs?${sp.toString()}`, apiKey)
   },
-  getPortalImageJob: (apiKey: string, id: number, params: { includeCache?: boolean } = {}) => {
+  getPortalImageJob: (apiKey: string, id: number, params: { includeCache?: boolean; summary?: boolean } = {}) => {
     const sp = new URLSearchParams()
+    if (params.summary === true || (params.summary !== false && !params.includeCache)) sp.set('summary', '1')
     if (params.includeCache) sp.set('include_cache', '1')
     const query = sp.toString()
     return requestImageStudioPortal<ImageJobResponse>(`/jobs/${id}${query ? `?${query}` : ''}`, apiKey)
@@ -674,6 +687,22 @@ export const api = {
       `/accounts/${id}/openai-responses/balance${force ? '?refresh=1' : ''}`,
       { signal, timeoutMs: 25_000 },
     ),
+  getChannelMonitorConfig: (id: number, signal?: AbortSignal) =>
+    request<ChannelMonitorConfig>(`/accounts/${id}/channel-monitor`, { signal }),
+  updateChannelMonitorConfig: (id: number, data: UpdateChannelMonitorConfigRequest) =>
+    request<ChannelMonitorConfig>(`/accounts/${id}/channel-monitor`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  getChannelMonitors: (signal?: AbortSignal) =>
+    request<ChannelMonitorListResponse>('/channel-monitors', { signal }),
+  getChannelMonitorBillingRates: (signal?: AbortSignal) =>
+    request<ChannelMonitorBillingRatesResponse>('/channel-monitors/billing-rates', { signal }),
+  probeChannelMonitor: (id: number) =>
+    request<MessageResponse>(`/channel-monitors/${id}/probe`, {
+      method: 'POST',
+      timeoutMs: 80_000,
+    }),
   addGrokAccount: (data: AddGrokAccountRequest) =>
     request<CreateAccountResponse>('/accounts/grok', { method: 'POST', body: JSON.stringify(data) }),
   fetchGrokModels: (data: AddGrokAccountRequest) =>
@@ -968,6 +997,9 @@ export const api = {
     request<import('./types').SubscriptionRefreshResponse>(`/accounts/${id}/subscription/refresh`, { method: 'POST', timeoutMs: 30_000 }),
   updateAccountScheduler: (id: number, data: UpdateAccountSchedulerRequest) =>
     request<MessageResponse>(`/accounts/${id}/scheduler`, { method: 'PATCH', body: JSON.stringify(data) }),
+  // 立即恢复账号的 Excel BPS 路由(清除 403 自动暂停与 429 冷却)。
+  clearAccountExcelBpsPause: (id: number) =>
+    request<{ message: string; cleared: boolean }>(`/accounts/${id}/bps-pause/clear`, { method: 'POST' }),
   // 设置 OAuth 账号的支持模型白名单;空数组表示清空(该账号可调度所有模型)。返回归一化后的白名单。
   updateAccountModels: (id: number, models: string[]) =>
     request<{ models: string[] }>(`/accounts/${id}/models`, { method: 'PATCH', body: JSON.stringify({ models }) }),
@@ -1353,13 +1385,14 @@ export const api = {
   createImageEditJob: (data: CreateImageJobPayload) =>
     request<ImageJobResponse>('/images/edit-jobs', { method: 'POST', body: JSON.stringify(data) }),
   getImageJobs: (params: { page?: number; pageSize?: number } = {}) => {
-    const sp = new URLSearchParams()
+    const sp = new URLSearchParams({ summary: '1' })
     if (params.page) sp.set('page', String(params.page))
     if (params.pageSize) sp.set('page_size', String(params.pageSize))
     return request<ImageJobsResponse>(`/images/jobs?${sp.toString()}`)
   },
-  getImageJob: (id: number, params: { includeCache?: boolean } = {}) => {
+  getImageJob: (id: number, params: { includeCache?: boolean; summary?: boolean } = {}) => {
     const sp = new URLSearchParams()
+    if (params.summary === true || (params.summary !== false && !params.includeCache)) sp.set('summary', '1')
     if (params.includeCache) sp.set('include_cache', '1')
     const query = sp.toString()
     return request<ImageJobResponse>(`/images/jobs/${id}${query ? `?${query}` : ''}`)
@@ -1602,6 +1635,14 @@ export const api = {
       builtin_version: string
       updated: boolean
     }>('/codex-cli-version/sync', { method: 'POST' }),
+  syncCodexClientVersions: () =>
+    request<Record<'cli' | 'desktop_mac' | 'desktop_windows' | 'vscode', {
+      fetched_version?: string
+      synced_version?: string
+      effective_version: string
+      updated: boolean
+      error?: string
+    }>>('/codex-client-versions/sync', { method: 'POST' }),
   listModelPricing: () =>
     request<{
       models: Array<{

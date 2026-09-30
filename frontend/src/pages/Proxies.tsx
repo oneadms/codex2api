@@ -63,7 +63,7 @@ import { cn } from "@/lib/utils";
 const PROXY_SCHEMES = ["http:", "https:", "socks5:", "socks5h:"];
 
 type BindFilter = "all" | "unbound" | "this" | "other";
-type BindKindFilter = "all" | "codex" | "grok" | "claude" | "antigravity" | "traecn";
+type BindKindFilter = "all" | "codex" | "grok" | "antigravity" | "claude" | "traecn";
 type StatusFilter = "all" | "enabled" | "disabled" | "error" | "untested";
 type RiskFilter = "all" | "unscored" | "low" | "medium" | "high" | "very_high" | "error" | "stale";
 

@@ -14,10 +14,10 @@ import (
 //   {originator}/{cli版本} ({os} {os版本}; {arch}) {terminal} ({app名}; {app版本})
 // 末尾标记按形态各不相同:codex-tui / codex_exec 复用前缀与 CLI 版本;ChatGPT 桌面端固定
 // "Codex Desktop" 加桌面端构建号;VS Code 插件写宿主 IDE 名(VS Code / Cursor / Windsurf)
-// 加插件构建号。CLI 版本与构建号成对出现,随意组合会生成真实流量里从未出现过的指纹。
+// 加插件构建号。目录中的历史版本对仅用作未同步时的默认画像。
 //
 // 下面的权重来自 2026-09-07~08 约 6.5 万条去重请求的下游 UA 统计(按百分比取整),
-// 用于:预设默认值、管理页的搭配候选、号池画像分布,以及 CLI 版本→构建号配对。
+// 用于:预设默认值、管理页的搭配候选和号池画像分布。
 
 // CodexClientKind 是可模拟的 Codex 客户端形态。
 type CodexClientKind string
@@ -63,8 +63,12 @@ type codexUAKindSpec struct {
 	DefaultTerminal string
 	AppNames        []codexUAWeighted // 末尾标记名候选,首个为默认
 	Terminals       []codexUAWeighted
-	Platforms       []codexUAPlatform
-	VersionPairs    []codexUAVersionPair // 从新到旧;AppFollowsCLI 时为空
+	// ReferenceTerminals 只作管理页预设与搭配校验,不参与号池抽样,因此不会改变既有账号画像。
+	ReferenceTerminals []string
+	Platforms          []codexUAPlatform
+	// ReferencePlatforms 同 ReferenceTerminals:只作预设与搭配校验,不参与号池抽样。
+	ReferencePlatforms []codexUAPlatform
+	VersionPairs       []codexUAVersionPair // 未同步时的画像默认值;AppFollowsCLI 时为空
 }
 
 var codexUAKindOrder = []CodexClientKind{
@@ -72,6 +76,36 @@ var codexUAKindOrder = []CodexClientKind{
 	CodexClientKindDesktop,
 	CodexClientKindVSCode,
 	CodexClientKindExec,
+}
+
+// codexUAReferenceTerminals 是流量统计里没出现、但真实终端会产生的 token,按 Codex
+// terminal-detection 规则推导:有 TERM_PROGRAM 时取 "TERM_PROGRAM/TERM_PROGRAM_VERSION",
+// 其次是 Konsole / VTE 等专属环境变量,最后回退 TERM。版本取 2026-09 各终端最新稳定版。
+var codexUAReferenceTerminals = []string{
+	"iTerm.app/3.7.3",
+	"Apple_Terminal/470.2",
+	"ghostty/1.3.1",
+	"WarpTerminal/v0.2026.09.16.08.27.stable_02",
+	"WezTerm/20240203-110809-5046fc22",
+	"WezTerm/20260819-012343-33891b4a",
+	"vscode/1.139.1",
+	"vscode/3.19.19", // Cursor:TERM_PROGRAM=vscode,版本为 Cursor 自身版本
+	"zed/1.21.0",
+	"kitty",
+	"Alacritty",
+	"Konsole/260801",
+	"gnome-terminal",
+	"VTE/8401",
+	"WindowsTerminal",
+	"mintty/3.8.3",
+	"xterm-256color",
+	"tmux-256color",
+	"screen-256color",
+}
+
+// codexUAReferencePlatforms 是流量统计之后发布、尚未观测到的平台。
+var codexUAReferencePlatforms = []codexUAPlatform{
+	{OSName: "Mac OS", OSVersion: "27.0.0", Arch: "arm64"},
 }
 
 // 默认号池配比(按真实流量占比取整):桌面端过半,VS Code 次之,TUI 再次。
@@ -94,6 +128,7 @@ var codexUACatalog = map[CodexClientKind]*codexUAKindSpec{
 			{"vscode/1.135.0", 3}, {"vscode/1.126.0", 3}, {"Apple_Terminal/470.2", 3}, {"Apple_Terminal/455.1", 2},
 			{"gnome-terminal", 3}, {"iTerm.app/3.6.11", 2}, {"vscode/1.101.2", 2}, {"xterm", 2}, {"ghostty/1.3.1", 1},
 		},
+		ReferenceTerminals: codexUAReferenceTerminals,
 		Platforms: []codexUAPlatform{
 			{"Windows", "10.0.26200", "x86_64", 47}, {"NixOS", "26.5.0", "x86_64", 8}, {"Ubuntu", "22.4.0", "x86_64", 7},
 			{"Windows", "10.0.19045", "x86_64", 6}, {"Ubuntu", "24.4.0", "x86_64", 4}, {"Ubuntu", "20.4.0", "aarch64", 3},
@@ -101,6 +136,7 @@ var codexUACatalog = map[CodexClientKind]*codexUAKindSpec{
 			{"CentOS", "7.0.0", "x86_64", 1}, {"Windows", "10.0.26100", "x86_64", 1}, {"Mac OS", "15.7.7", "x86_64", 1},
 			{"Mac OS", "15.7.3", "arm64", 1}, {"Mac OS", "15.5.0", "arm64", 1},
 		},
+		ReferencePlatforms: codexUAReferencePlatforms,
 	},
 	CodexClientKindDesktop: {
 		Kind:            CodexClientKindDesktop,
@@ -117,6 +153,7 @@ var codexUACatalog = map[CodexClientKind]*codexUAKindSpec{
 			{"Windows", "10.0.26220", "x86_64", 1}, {"Mac OS", "26.4.1", "arm64", 1}, {"Mac OS", "15.7.3", "arm64", 1},
 			{"Mac OS", "26.4.0", "arm64", 1},
 		},
+		ReferencePlatforms: codexUAReferencePlatforms,
 		// 只收录正式版配对;alpha 构建不进预设。
 		VersionPairs: []codexUAVersionPair{
 			{"0.153.4", "26.901.51231", 63}, {"0.153.4", "26.901.41600", 7}, {"0.153.3", "26.901.41123", 2},
@@ -138,6 +175,7 @@ var codexUACatalog = map[CodexClientKind]*codexUAKindSpec{
 			{"Windows", "10.0.26100", "x86_64", 2}, {"Mac OS", "15.7.9", "arm64", 2}, {"CentOS", "7.0.0", "x86_64", 2},
 			{"Windows", "10.0.22631", "aarch64", 1}, {"Mac OS", "26.5.2", "arm64", 1},
 		},
+		ReferencePlatforms: codexUAReferencePlatforms,
 		// 插件主力仍是 0.153.0,与 CLI 最新版 0.153.4 不同步。
 		VersionPairs: []codexUAVersionPair{
 			{"0.153.4", "26.901.22334", 1}, {"0.153.0", "26.901.22334", 96}, {"0.147.0", "26.519.32039", 1},
@@ -145,18 +183,20 @@ var codexUACatalog = map[CodexClientKind]*codexUAKindSpec{
 		},
 	},
 	CodexClientKindExec: {
-		Kind:            CodexClientKindExec,
-		ClientName:      "codex_exec",
-		AppFollowsCLI:   true,
-		DefaultPlatform: codexUAPlatform{OSName: "Windows", OSVersion: "10.0.19045", Arch: "x86_64"},
-		DefaultTerminal: "unknown",
-		AppNames:        []codexUAWeighted{{"codex_exec", 100}},
-		Terminals:       []codexUAWeighted{{"unknown", 56}, {"dumb", 43}, {"kitty", 1}},
+		Kind:               CodexClientKindExec,
+		ClientName:         "codex_exec",
+		AppFollowsCLI:      true,
+		DefaultPlatform:    codexUAPlatform{OSName: "Windows", OSVersion: "10.0.19045", Arch: "x86_64"},
+		DefaultTerminal:    "unknown",
+		AppNames:           []codexUAWeighted{{"codex_exec", 100}},
+		Terminals:          []codexUAWeighted{{"unknown", 56}, {"dumb", 43}, {"kitty", 1}},
+		ReferenceTerminals: codexUAReferenceTerminals,
 		Platforms: []codexUAPlatform{
 			{"Windows", "10.0.19045", "x86_64", 52}, {"Ubuntu", "24.4.0", "x86_64", 40}, {"Ubuntu", "22.4.0", "x86_64", 3},
 			{"Windows", "10.0.26100", "x86_64", 2}, {"Windows", "10.0.26200", "x86_64", 1}, {"Mac OS", "26.6.2", "arm64", 1},
 			{"NixOS", "26.5.0", "x86_64", 1},
 		},
+		ReferencePlatforms: codexUAReferencePlatforms,
 	},
 }
 
@@ -347,6 +387,43 @@ func resolveCodexVersionPair(spec *codexUAKindSpec, cliVersion, appVersion, vers
 	return last.CLIVersion, last.AppVersion
 }
 
+type codexVersionSelection struct {
+	OSName       string
+	CLIOverride  string
+	AppOverride  string
+	VersionFloor string
+	Fallback     codexUAVersionPair
+}
+
+// resolveCodexCurrentVersions 优先使用同步缓存，旧画像版本对只作默认值。
+func resolveCodexCurrentVersions(spec *codexUAKindSpec, choice codexVersionSelection) (string, string) {
+	if spec == nil || (spec.Kind != CodexClientKindDesktop && spec.Kind != CodexClientKindVSCode) {
+		return resolveCodexVersionPair(spec, choice.CLIOverride, choice.AppOverride, choice.VersionFloor)
+	}
+	settings := CurrentRuntimeSettings()
+	autoCLI := choice.Fallback.CLIVersion
+	if strings.TrimSpace(settings.CodexSyncedCLIVersion) != "" {
+		autoCLI = effectiveLatestCodexCLIVersion()
+	}
+	autoApp := choice.Fallback.AppVersion
+	hasSyncedApp := false
+	if spec.Kind == CodexClientKindVSCode {
+		hasSyncedApp = strings.TrimSpace(settings.CodexSyncedVSCodeBuild) != ""
+		autoApp = firstNonEmptyString(settings.CodexSyncedVSCodeBuild, autoApp)
+	} else if strings.EqualFold(choice.OSName, "Windows") {
+		hasSyncedApp = strings.TrimSpace(settings.CodexSyncedDesktopWindowsBuild) != ""
+		autoApp = firstNonEmptyString(settings.CodexSyncedDesktopWindowsBuild, autoApp)
+	} else if strings.EqualFold(choice.OSName, "Mac OS") {
+		hasSyncedApp = strings.TrimSpace(settings.CodexSyncedDesktopMacBuild) != ""
+		autoApp = firstNonEmptyString(settings.CodexSyncedDesktopMacBuild, autoApp)
+	}
+	if !hasSyncedApp && choice.CLIOverride != "" && choice.AppOverride == "" {
+		_, autoApp = resolveCodexVersionPair(spec, choice.CLIOverride, "", choice.VersionFloor)
+	}
+	cli := effectiveCodexClientVersion(firstNonEmptyString(choice.CLIOverride, autoCLI), choice.VersionFloor)
+	return cli, firstNonEmptyString(choice.AppOverride, autoApp)
+}
+
 // heaviestCodexPair 返回观测占比最高的配对,作为该形态的默认版本(VS Code 插件主力
 // 停在 0.153.0 而非 CLI 最新版,按"最新"取默认会选到罕见组合)。
 func heaviestCodexPair(pairs []codexUAVersionPair) codexUAVersionPair {
@@ -420,14 +497,14 @@ func codexPoolPersona(cfg CodexUserAgentConfig, accountID int64, versionFloor st
 	if !spec.AppFollowsCLI {
 		appName = pickCodexUAWeighted(spec.AppNames, "app:"+seed)
 	}
-	var cliVersion, appVersion string
-	if spec.AppFollowsCLI {
-		cliVersion, appVersion = resolveCodexVersionPair(spec, "", "", versionFloor)
-	} else if p, picked := pickCodexUAVersionPair(codexPairsMeetingFloor(spec.VersionPairs, versionFloor), "version:"+seed); picked {
-		cliVersion, appVersion = p.CLIVersion, p.AppVersion
-	} else {
-		cliVersion, appVersion = resolveCodexVersionPair(spec, "", "", versionFloor)
+	fallback := codexUAVersionPair{}
+	if len(spec.VersionPairs) > 0 {
+		fallback = heaviestCodexPair(spec.VersionPairs)
+		if pair, picked := pickCodexUAVersionPair(spec.VersionPairs, "version:"+seed); picked {
+			fallback = pair
+		}
 	}
+	cliVersion, appVersion := resolveCodexCurrentVersions(spec, codexVersionSelection{OSName: platform.OSName, VersionFloor: versionFloor, Fallback: fallback})
 	return formatCodexUserAgentWithApp(spec.ClientName, cliVersion, platform.OSName, platform.OSVersion, platform.Arch, terminal, appName, appVersion), cliVersion, true
 }
 
@@ -452,16 +529,19 @@ type CodexUserAgentCatalogVersionPair struct {
 }
 
 type CodexUserAgentCatalogKind struct {
-	Kind            string                             `json:"kind"`
-	ClientName      string                             `json:"client_name"`
-	AppFollowsCLI   bool                               `json:"app_follows_cli"`
-	DefaultAppName  string                             `json:"default_app_name"`
-	DefaultPlatform CodexUserAgentCatalogPlatform      `json:"default_platform"`
-	DefaultTerminal string                             `json:"default_terminal"`
-	AppNames        []CodexUserAgentCatalogOption      `json:"app_names"`
-	Terminals       []CodexUserAgentCatalogOption      `json:"terminals"`
-	Platforms       []CodexUserAgentCatalogPlatform    `json:"platforms"`
-	VersionPairs    []CodexUserAgentCatalogVersionPair `json:"version_pairs"`
+	Kind            string                        `json:"kind"`
+	ClientName      string                        `json:"client_name"`
+	AppFollowsCLI   bool                          `json:"app_follows_cli"`
+	DefaultAppName  string                        `json:"default_app_name"`
+	DefaultPlatform CodexUserAgentCatalogPlatform `json:"default_platform"`
+	DefaultTerminal string                        `json:"default_terminal"`
+	AppNames        []CodexUserAgentCatalogOption `json:"app_names"`
+	Terminals       []CodexUserAgentCatalogOption `json:"terminals"`
+	// ReferenceTerminals 已剔除与 Terminals 重复的值。
+	ReferenceTerminals []string                           `json:"reference_terminals"`
+	Platforms          []CodexUserAgentCatalogPlatform    `json:"platforms"`
+	ReferencePlatforms []CodexUserAgentCatalogPlatform    `json:"reference_platforms"`
+	VersionPairs       []CodexUserAgentCatalogVersionPair `json:"version_pairs"`
 }
 
 type CodexUserAgentCatalogView struct {
@@ -494,8 +574,20 @@ func CodexUserAgentCatalog() CodexUserAgentCatalogView {
 		for _, t := range spec.Terminals {
 			item.Terminals = append(item.Terminals, CodexUserAgentCatalogOption{Value: t.Value, Weight: t.Weight})
 		}
+		item.ReferenceTerminals = []string{}
+		for _, term := range spec.ReferenceTerminals {
+			if !codexUAHasOption(spec.Terminals, term) {
+				item.ReferenceTerminals = append(item.ReferenceTerminals, term)
+			}
+		}
 		for _, p := range spec.Platforms {
 			item.Platforms = append(item.Platforms, CodexUserAgentCatalogPlatform{OSName: p.OSName, OSVersion: p.OSVersion, Arch: p.Arch, Weight: p.Weight})
+		}
+		item.ReferencePlatforms = []CodexUserAgentCatalogPlatform{}
+		for _, p := range spec.ReferencePlatforms {
+			if !codexUAHasPlatform(spec.Platforms, p) {
+				item.ReferencePlatforms = append(item.ReferencePlatforms, CodexUserAgentCatalogPlatform{OSName: p.OSName, OSVersion: p.OSVersion, Arch: p.Arch})
+			}
 		}
 		for _, p := range spec.VersionPairs {
 			item.VersionPairs = append(item.VersionPairs, CodexUserAgentCatalogVersionPair{CLIVersion: p.CLIVersion, AppVersion: p.AppVersion, Weight: p.Weight})
@@ -563,14 +655,14 @@ func PreviewCodexUserAgentConfig(raw, versionFloor string, sampleAccountIDs []in
 	return preview, nil
 }
 
-// codexUserAgentComboWarnings 提示目录里从未出现过的搭配(不阻止保存)。
+// codexUserAgentComboWarnings 提示目录里从未出现过的静态画像字段(不阻止保存)。
 func codexUserAgentComboWarnings(cfg CodexUserAgentConfig, kind CodexClientKind) []string {
 	spec, ok := codexUAKindSpecFor(kind)
 	if !ok || cfg.RawUserAgent != "" {
 		return nil
 	}
 	var warnings []string
-	if term := strings.TrimSpace(cfg.Terminal); term != "" && !codexUAHasOption(spec.Terminals, term) {
+	if term := strings.TrimSpace(cfg.Terminal); term != "" && !codexUAHasOption(spec.Terminals, term) && !codexUAHasReferenceTerminal(spec, term) {
 		warnings = append(warnings, "terminal")
 	}
 	if name := strings.TrimSpace(cfg.AppName); name != "" && !codexUAHasOption(spec.AppNames, name) {
@@ -582,21 +674,8 @@ func codexUserAgentComboWarnings(cfg CodexUserAgentConfig, kind CodexClientKind)
 			OSVersion: firstNonEmptyString(cfg.OSVersion, spec.DefaultPlatform.OSVersion),
 			Arch:      firstNonEmptyString(cfg.Arch, spec.DefaultPlatform.Arch),
 		}
-		if !codexUAHasPlatform(spec.Platforms, platform) {
+		if !codexUAHasPlatform(spec.Platforms, platform) && !codexUAHasPlatform(spec.ReferencePlatforms, platform) {
 			warnings = append(warnings, "platform")
-		}
-	}
-	if !spec.AppFollowsCLI && cfg.AppVersion != "" {
-		cli := firstNonEmptyString(cfg.ClientVersion, spec.VersionPairs[0].CLIVersion)
-		known := false
-		for _, p := range spec.VersionPairs {
-			if p.CLIVersion == cli && p.AppVersion == cfg.AppVersion {
-				known = true
-				break
-			}
-		}
-		if !known {
-			warnings = append(warnings, "version_pair")
 		}
 	}
 	return warnings
@@ -605,6 +684,15 @@ func codexUserAgentComboWarnings(cfg CodexUserAgentConfig, kind CodexClientKind)
 func codexUAHasOption(items []codexUAWeighted, value string) bool {
 	for _, it := range items {
 		if strings.EqualFold(it.Value, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexUAHasReferenceTerminal(spec *codexUAKindSpec, value string) bool {
+	for _, term := range spec.ReferenceTerminals {
+		if strings.EqualFold(term, value) {
 			return true
 		}
 	}

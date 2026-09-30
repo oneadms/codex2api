@@ -371,10 +371,8 @@ var codexAllowedForwardHeaders = []string{
 	"X-Client-Request-Id",
 	"X-Codex-Beta-Features",
 	codexResponsesLiteHeader,
-	// DeviceCheck 设备认证头（上游 openai/codex#20619）。仅在下游真实 Codex
-	// 客户端携带时原样透传——本代理无法（也不该）伪造：token 是 Apple 硬件
-	// 背书、服务端向 Apple 验证，假值必然验证失败、比"不携带"更暴露特征。
-	// 缺失是合法状态（纯 CLI / 非 macOS 客户端本就不发）。
+	// 下游真实客户端的证明优先透传。Windows Desktop 身份缺失时，会在出站头
+	// 装配结束后补官方客户端的 DeviceCheck 不可用状态；macOS 不模拟硬件证明。
 	"X-Oai-Attestation",
 }
 
@@ -565,6 +563,10 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	headers = headers.Clone()
+	if headers == nil {
+		headers = make(http.Header)
+	}
 	ctx = WithResinConfig(ctx, ResinConfigFromContext(ctx))
 	viaResin := IsResinEnabledForContext(ctx)
 	resinPlatform := ""
@@ -584,7 +586,8 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 
 	// Payload 规则改写：在 WS/HTTP 分叉前统一应用，两条上游路径共享改写结果。
 	// 生图请求跳过——其 instructions/工具由网关自行构造，改写会破坏桥接协议。
-	if !responsesBodyRequestsImageGeneration(requestBody) {
+	detectorProbe := isCodexDetectorRequest(ctx)
+	if !responsesBodyRequestsImageGeneration(requestBody) && !detectorProbe {
 		RecordObservedInstructions(requestBody, headers)
 		requestBody = ApplyPayloadRulesToBody(requestBody, gjson.GetBytes(requestBody, "model").String(), headers, PayloadRuleIdentityFromContext(ctx))
 		// 规则改写发生在各 handler 的 service_tier 净化之后，规则注入的 flex/auto 等
@@ -592,8 +595,14 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		// requested tier 归因走 EffectiveRequestedServiceTier（净化前取值），不受影响。
 		requestBody = sanitizeServiceTierForUpstream(requestBody)
 	}
+	var daybreakErr error
+	requestBody, daybreakErr = guardDaybreakUpstream(ctx, account, requestBody)
+	if daybreakErr != nil {
+		return nil, daybreakErr
+	}
 	// 指纹收敛在 WS/HTTP 分叉前统一改写请求体，两条上游路径共享结果；请求头侧的
 	// 收敛（ApplyCodexFingerprintHeaders）从同一份「账号 + 下游头」推导，取值一致。
+	headers = PrepareCodexFingerprintHeaders(account, headers, requestBody)
 	requestBody = ApplyCodexFingerprintToBody(requestBody, account, headers)
 	// 账号绑定时区：改写 environment_context 的时区/日期，与指纹收敛一样在分叉前统一处理。
 	requestBody = ApplyCodexTimezoneToBody(requestBody, account, time.Now())
@@ -610,10 +619,13 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	if account.IsCodexAgentIdentity() {
 		wantWebsocket = false
 	}
-	telemetryAttempt := beginCodexTelemetry(codexTelemetryRequest{
-		account: account, body: requestBody, sessionID: sessionID, proxyOverride: proxyOverride,
-		apiKey: apiKey, deviceCfg: deviceCfg, headers: headers,
-	})
+	var telemetryAttempt *codexTelemetryAttempt
+	if !detectorProbe {
+		telemetryAttempt = beginCodexTelemetry(codexTelemetryRequest{
+			account: account, body: requestBody, sessionID: sessionID, proxyOverride: proxyOverride,
+			apiKey: apiKey, deviceCfg: deviceCfg, headers: headers,
+		})
+	}
 	defer func() { telemetryAttempt.observeResult(upstreamResponse, upstreamErr) }()
 	// 凭据级 turn state 强制注入：模型已由入口映射/规则定稿，传输方式也已定。
 	// 未配置的账号这里是空操作。
@@ -748,15 +760,49 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// 两次重放必须发同一份字节。routing hint 等需要读字段的改写点继续用明文
 	// requestBody——它们解析 JSON，拿到压缩帧只会静默失配。
 	requestBody = ApplyCodexTicketRequestBody(ctx, requestBody, false)
-	outboundBody, contentEncoding := CompressCodexRequestBody(requestBody)
+	var outboundBody []byte
+	var contentEncoding string
+	if pipelineFromContext(ctx) != nil {
+		outboundBody, contentEncoding = compressPipelineRequestBody(requestBody)
+	} else {
+		outboundBody, contentEncoding = CompressCodexRequestBody(requestBody)
+	}
 
-	// 统一解析出口，同时沿用请求固定的 Resin 配置与会话平台。
-	egress := ResolveCodexEgressForContext(ctx, account, endpoint, proxyURL)
+	// 出口链路统一由 ResolveCodexEgress 决定(Resin > 代理 > 直连,见 egress.go)。
+	egress := ResolveCodexRequestEgress(ctx, account, endpoint, proxyURL, false)
 	endpoint = egress.URL
 	client := egress.Client()
 
+	var pipelineFile *os.File
+	var routingHeaders http.Header
+	requestModel := strings.Clone(gjson.GetBytes(requestBody, "model").String())
+	if pipeline := pipelineFromContext(ctx); pipeline != nil {
+		var err error
+		pipelineFile, err = pipeline.spool(outboundBody)
+		if err != nil {
+			return nil, ErrInternalError("cannot spool upstream image request", err)
+		}
+		defer removePipelineFile(pipelineFile)
+		routingHeaders = make(http.Header)
+		ApplyCodexRoutingHint(routingHeaders, account, requestBody)
+		// Queue-generated image requests contain no encrypted input items. Clear
+		// transformed and compressed payloads before waiting on the HTTP transport.
+		requestBody = nil
+		outboundBody = nil
+	}
 	send := func() (*http.Response, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(outboundBody))
+		var reader io.Reader = bytes.NewReader(outboundBody)
+		var input *os.File
+		if pipelineFile != nil {
+			var err error
+			input, err = os.Open(pipelineFile.Name())
+			if err != nil {
+				return nil, err
+			}
+			defer input.Close()
+			reader = input
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, reader)
 		if err != nil {
 			return nil, ErrInternalError("创建请求失败", err)
 		}
@@ -772,13 +818,30 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 			req.Header.Set("Content-Encoding", contentEncoding)
 		}
 		// routing hint 由网关按最终出站 body 合成，须在账号自定义头之后设置。
-		ApplyCodexRoutingHint(req.Header, account, requestBody)
+		if pipelineFile != nil {
+			stat, err := input.Stat()
+			if err != nil {
+				return nil, err
+			}
+			req.ContentLength = stat.Size()
+			req.GetBody = func() (io.ReadCloser, error) { return os.Open(pipelineFile.Name()) }
+			deleteHeaderCaseInsensitive(req.Header, codexRoutingHintHeader)
+			for key, values := range routingHeaders {
+				req.Header[key] = append([]string(nil), values...)
+			}
+		} else {
+			ApplyCodexRoutingHint(req.Header, account, requestBody)
+		}
 
 		egress.ApplyHeaders(req.Header)
 		logCodexFingerprintDebug("http", account, egress.DialProxyURL, req.Header)
 
-		if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(requestBody, "model").String()); err != nil {
+		if err := ConsumeAPIKeyModelRequestQuota(ctx, requestModel); err != nil {
 			return nil, err
+		}
+		if pipeline := pipelineFromContext(ctx); pipeline != nil {
+			pipeline.Release()
+			log.Printf("[image-pipeline] job=%d stage=waiting_upstream request_bytes=%d", pipeline.jobID, req.ContentLength)
 		}
 		resp, err := doTracedUpstreamRequest(client, req, account, proxyURL)
 		if err != nil {
@@ -850,6 +913,11 @@ func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, r
 			}
 		}
 	}
+	// 账号自行打开的 Responses WebSocket。生图仍走下面的 HTTP。
+	// 握手失败由执行器返回上游状态或传输错误，这里不改回 HTTP。
+	if openAIResponsesRelayUsesUpstreamWebsocket(account, requestBody) {
+		return executeOpenAIResponsesWebsocket(ctx, account, requestBody, proxyURL, headers, baseURL, apiKey)
+	}
 
 	client := getPooledClient(account, proxyURL)
 	send := func(body []byte) (*http.Response, error) {
@@ -906,6 +974,46 @@ func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, r
 		openAIResponsesCodexMetadataRequired.Store(capabilityKey, struct{}{})
 	}
 	return retryResp, nil
+}
+
+// ExecuteOpenAIResponsesBillingRequest probes the optional Sub2API-compatible
+// billing declaration exposed by a Responses relay. The probe uses the same
+// account transport, proxy and custom headers as normal Responses traffic.
+func ExecuteOpenAIResponsesBillingRequest(ctx context.Context, account *auth.Account, proxyOverride string) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if account == nil || !account.IsOpenAIResponsesAPI() {
+		return nil, ErrNoAvailableAccount()
+	}
+	baseURL, apiKey := account.OpenAIResponsesCredentials()
+	account.Mu().RLock()
+	proxyURL := account.ProxyURL
+	account.Mu().RUnlock()
+	if proxyOverride != "" {
+		proxyURL = proxyOverride
+	}
+	if baseURL == "" || apiKey == "" {
+		return nil, ErrNoAvailableAccount()
+	}
+
+	endpoint := auth.OpenAIResponsesEndpoint(baseURL, "/v1/sub2api/billing")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, ErrInternalError("创建倍率探测请求失败", err)
+	}
+	applyOpenAIResponsesRequestHeaders(req, account, apiKey, nil)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Del("Content-Type")
+
+	resp, err := getPooledClient(account, proxyURL).Do(req)
+	if err != nil {
+		if shouldRecyclePooledClient(err) {
+			recyclePooledClient(account, proxyURL)
+		}
+		return nil, ErrUpstream(0, "请求上游倍率接口失败", err)
+	}
+	return resp, nil
 }
 
 func openAIResponsesCodexMetadataCapabilityKey(account *auth.Account, baseURL string) string {
@@ -1025,6 +1133,10 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	headers = headers.Clone()
+	if headers == nil {
+		headers = make(http.Header)
+	}
 	ctx = WithResinConfig(ctx, ResinConfigFromContext(ctx))
 	viaResin := IsResinEnabledForContext(ctx)
 	resinPlatform := ""
@@ -1071,6 +1183,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	// 真实标识，上游看到「头说设备 A、体说设备 B」这种真实客户端不会有的矛盾。
 	// 必须用 prepareCodexResponsesLiteTransport 之后的 headers（它可能返回克隆），
 	// 与下方 applyCodexRequestHeaders 取同一份下游头，两处推导结果才一致。
+	headers = PrepareCodexFingerprintHeaders(account, headers, requestBody)
 	requestBody = ApplyCodexFingerprintToBody(requestBody, account, headers)
 	requestBody = ApplyCodexTimezoneToBody(requestBody, account, time.Now())
 	// 凭据级 turn state 强制注入：compact 与普通轮共用同一条回合状态。
@@ -1334,6 +1447,7 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	// 可整体退回旧的 Session_id 形态。
 	ApplyCodexSessionHeaders(req.Header, account, cacheKey, downstreamHeaders, false)
 	applyAccountCustomHeaders(req, account)
+	ApplyWindowsDesktopAttestation(req.Header, account)
 	RecordUpstreamUserAgent(req.Context(), req.Header.Get("User-Agent"))
 }
 
