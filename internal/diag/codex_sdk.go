@@ -23,6 +23,7 @@ type CodexSDKRunner struct {
 	BaseURL  string
 	APIKey   string
 	Model    string
+	EventLog string
 }
 
 type CodexRepairResult struct {
@@ -72,7 +73,9 @@ func (r CodexSDKRunner) Repair(ctx context.Context, workingDirectory, prompt str
 	payload, err := json.Marshal(map[string]any{
 		"baseUrl": inputBaseURL(r.BaseURL), "apiKey": r.APIKey, "model": r.Model,
 		"workingDirectory": workingDirectory, "prompt": prompt, "timeoutMs": int((12 * time.Minute).Milliseconds()),
-		"env": codexChildEnvironment(),
+		"idleTimeoutMs": int((3 * time.Minute).Milliseconds()),
+		"eventLog":      r.EventLog,
+		"env":           codexChildEnvironment(),
 	})
 	if err != nil {
 		return result, err

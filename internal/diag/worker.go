@@ -292,7 +292,9 @@ func (w *Worker) processWithCodex(ctx context.Context, ex Executor, p Publisher,
 - 不要访问网络，不要读取或打印密钥。
 - 运行能覆盖修改的 Go 测试；测试失败时继续修复。无法证明是代码缺陷时不要改文件。
 - 最终只返回 JSON：{"title":"简短标题","root_cause":"证据和不确定性","confidence":0.0,"can_fix":false}。`, incident)
-		repair, err := w.Codex.Repair(ctx, ws.Root, prompt)
+		runner := w.Codex
+		runner.EventLog = filepath.Join(dir, "codex_events.log")
+		repair, err := runner.Repair(ctx, ws.Root, prompt)
 		if err != nil {
 			return outcome, err
 		}
