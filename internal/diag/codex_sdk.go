@@ -59,6 +59,9 @@ func (r CodexSDKRunner) Repair(ctx context.Context, workingDirectory, prompt str
 	if err := r.Validate(); err != nil {
 		return result, err
 	}
+	if _, err := exec.LookPath("go"); err != nil {
+		return result, errors.New("诊断环境缺少 Go，无法运行验证测试；请更新到包含 Go 工具链和依赖缓存的 Docker 镜像")
+	}
 	node := r.NodePath
 	if node == "" {
 		var err error
@@ -109,10 +112,14 @@ func inputBaseURL(raw string) string { return strings.TrimRight(strings.TrimSpac
 
 func codexChildEnvironment() map[string]string {
 	env := map[string]string{}
-	for _, key := range []string{"PATH", "HOME", "USER", "TMPDIR", "LANG", "LC_ALL"} {
+	for _, key := range []string{"PATH", "HOME", "USER", "TMPDIR", "LANG", "LC_ALL", "GOMODCACHE", "GOCACHE"} {
 		if value, ok := os.LookupEnv(key); ok {
 			env[key] = value
 		}
 	}
+	// Tests use the bundled dependencies and compiler, never network downloads
+	// or host Go configuration. Keep go.mod/go.sum unchanged during diagnosis.
+	env["GOPROXY"], env["GOSUMDB"], env["GOTOOLCHAIN"] = "off", "off", "local"
+	env["GOENV"], env["CGO_ENABLED"], env["GOFLAGS"] = "off", "0", "-mod=readonly"
 	return env
 }

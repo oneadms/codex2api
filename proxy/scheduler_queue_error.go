@@ -42,6 +42,12 @@ func writeSchedulerQueueError(c *gin.Context, err error, protocol continuousRetr
 		c.Header("Retry-After", "1")
 	}
 	message := apiErr.Message
+	state := "selection_timeout"
+	if errors.Is(err, auth.ErrSchedulerQueueFull) {
+		state = "queue_full"
+	}
+	api.SetDiagnosticScheduler(c, state)
+	api.SetDiagnosticError(c, apiErr, http.StatusServiceUnavailable)
 	switch protocol {
 	case continuousRetryProtocolGemini:
 		writeGeminiNativeError(c, http.StatusServiceUnavailable, message)

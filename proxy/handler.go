@@ -1668,6 +1668,7 @@ func (h *Handler) logUsageForRequest(c *gin.Context, input *database.UsageLogInp
 	populateUserAgentMetaFromRequest(c, input)
 	populateWsAcquireFromRequest(c, input)
 	populateUpstreamTrace(c, input)
+	captureDiagnosticUpstream(c, input)
 	populateCompactUsageMetaFromRequest(c, input)
 	populateUltraUsageMetaFromRequest(c, input)
 	markCyberPolicyUsageKind(input)
@@ -4268,6 +4269,7 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 				return
 			}
 			if h.accountPoolConcurrencySaturated(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy) {
+				api.SetDiagnosticScheduler(c, "account_pool_concurrency_saturated")
 				setConcurrencySaturatedRetryAfter(c)
 				if isStream && writeCommittedResponsesRetryError(c, concurrencySaturatedMessageZH) {
 					return
@@ -4275,6 +4277,7 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 				c.JSON(http.StatusServiceUnavailable, concurrencySaturatedError())
 				return
 			}
+			api.SetDiagnosticScheduler(c, "no_available_account")
 			if isStream && writeCommittedResponsesRetryError(c, noAvailableAccountMessage(effectiveModel)) {
 				return
 			}
@@ -6350,6 +6353,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 					return
 				}
 				if h.accountPoolConcurrencySaturated(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy) {
+					api.SetDiagnosticScheduler(c, "account_pool_concurrency_saturated")
 					setConcurrencySaturatedRetryAfter(c)
 					c.JSON(http.StatusServiceUnavailable, concurrencySaturatedError())
 					return
@@ -7209,6 +7213,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				return
 			}
 			if h.accountPoolConcurrencySaturated(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy) {
+				api.SetDiagnosticScheduler(c, "account_pool_concurrency_saturated")
 				setConcurrencySaturatedRetryAfter(c)
 				if isStream && writeCommittedChatRetryError(c, concurrencySaturatedMessageZH) {
 					return
@@ -7216,6 +7221,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				c.JSON(http.StatusServiceUnavailable, concurrencySaturatedError())
 				return
 			}
+			api.SetDiagnosticScheduler(c, "no_available_account")
 			if isStream && writeCommittedChatRetryError(c, noAvailableAccountMessage(effectiveModel)) {
 				return
 			}

@@ -29,15 +29,19 @@ ENV GOPROXY=https://goproxy.cn,direct
 
 WORKDIR /app
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
+# Keep the module cache in the image layer: the diagnostic worker uses these
+# exact dependencies offline after deployment.
+RUN go mod download
 
 COPY . .
 COPY --from=frontend-builder /frontend/dist ./frontend/dist
 
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
+RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -ldflags="-s -w -X github.com/codex2api/internal/version.Version=${BUILD_VERSION}" -o /codex2api .
+
+# This stage follows TARGETPLATFORM. The cross-build stage's Go executable
+# follows BUILDPLATFORM and would not run in an arm64 runtime image.
+FROM golang:1.26.6-alpine AS diagnostic-toolchain
 
 # ============================================================
 # Stage 3: 最终运行镜像
@@ -45,6 +49,23 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM alpine:3.19
 
 RUN apk --no-cache add ca-certificates tzdata git github-cli nodejs npm
+
+COPY --from=diagnostic-toolchain /usr/local/go /usr/local/go
+COPY --from=go-builder /go/pkg/mod /opt/codex2api/go-mod
+# Login shells may replace PATH, so expose Go through the standard bin path too.
+RUN ln -s /usr/local/go/bin/go /usr/local/bin/go \
+    && ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+ENV PATH="/usr/local/go/bin:${PATH}" \
+    GOMODCACHE=/opt/codex2api/go-mod \
+    GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local CGO_ENABLED=0
+
+# Verify the native compiler and cached modules in BOTH runtime architectures,
+# with networking disabled. This catches missing Go and missing dependencies.
+COPY go.mod go.sum /tmp/diag-go-smoke/
+RUN --network=none cd /tmp/diag-go-smoke \
+    && go version \
+    && go test -mod=readonly -count=1 -run '^TestParseAny$' github.com/tidwall/gjson \
+    && rm -rf /tmp/diag-go-smoke
 
 COPY --from=go-builder /codex2api /usr/local/bin/codex2api
 COPY internal/diag/codex_runner.mjs /opt/codex2api/codex-sdk/codex_runner.mjs

@@ -155,6 +155,14 @@ func (c *Collector) Record(e Event) {
 	e.Message, e.Stack = bounded(e.Message, 8192), bounded(e.Stack, 8192)
 	e.Route, e.Model, e.RequestID = bounded(e.Route, 512), bounded(e.Model, 256), bounded(e.RequestID, 256)
 	e.Kind, e.Method = bounded(e.Kind, 32), bounded(e.Method, 16)
+	e.ErrorCode, e.ErrorType = bounded(e.ErrorCode, 256), bounded(e.ErrorType, 256)
+	e.SchedulerState = bounded(e.SchedulerState, 128)
+	if e.Upstream != nil {
+		u := *e.Upstream
+		u.ErrorKind, u.RequestID = bounded(u.ErrorKind, 256), bounded(u.RequestID, 256)
+		u.Message = bounded(u.Message, 8192)
+		e.Upstream = &u
+	}
 	e.Revision = c.revision
 	c.mu.Lock()
 	defer c.mu.Unlock()

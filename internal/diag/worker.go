@@ -290,6 +290,8 @@ func (w *Worker) processWithCodex(ctx context.Context, ex Executor, p Publisher,
 - 只修改证明存在缺陷所需的已跟踪 Go 源文件，可在同目录新增 *_test.go。
 - 不要修改 internal/diag、cmd/diagnose、api/diagnostic.go、admin/diagnostics.go、database/diagnostic_settings.go、依赖、工作流、环境文件或认证策略。
 - 不要访问网络，不要读取或打印密钥。
+- 环境内提供 Go 和离线依赖缓存；直接运行 go test，无需下载依赖。工具链或依赖不可用时，在报告中明确标记为环境阻塞，不要当成代码缺陷。
+- error_code、scheduler_state 和 upstream 是同一 request_id 的错误上下文。历史日志只有通用状态文本时，出现次数不代表同一根因；不能据此推断代码缺陷。
 - 运行能覆盖修改的 Go 测试；测试失败时继续修复。无法证明是代码缺陷时不要改文件。
 - 最终只返回 JSON：{"title":"简短标题","root_cause":"证据和不确定性","confidence":0.0,"can_fix":false}。`, incident)
 		runner := w.Codex

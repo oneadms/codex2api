@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/codex2api/api"
 	"github.com/codex2api/auth"
 	"github.com/gin-gonic/gin"
 )
@@ -643,6 +644,7 @@ func writeCommittedResponsesRetryError(c *gin.Context, message string) bool {
 		code = ErrorCodeUpstreamTimeout
 		message = continuousRetryTimeoutMessage
 	}
+	api.SetDiagnosticError(c, api.NewAPIError(api.ErrorCode(code), message, api.ErrorTypeUpstream), http.StatusBadGateway)
 	payload, _ := json.Marshal(gin.H{
 		"type": "response.failed",
 		"response": gin.H{
@@ -682,6 +684,7 @@ func writeCommittedChatRetryError(c *gin.Context, message string) bool {
 		code = ErrorCodeUpstreamTimeout
 		message = continuousRetryTimeoutMessage
 	}
+	api.SetDiagnosticError(c, api.NewAPIError(api.ErrorCode(code), message, api.ErrorTypeUpstream), http.StatusBadGateway)
 	payload, _ := json.Marshal(gin.H{
 		"error": gin.H{"message": message, "type": ErrorTypeUpstreamError, "code": code},
 	})
@@ -715,6 +718,7 @@ func writeCommittedAnthropicRetryError(c *gin.Context, errorType, message string
 		errorType = "api_error"
 		message = continuousRetryTimeoutMessage
 	}
+	api.SetDiagnosticError(c, api.NewAPIError("", message, api.ErrorType(errorType)), http.StatusBadGateway)
 	payload, _ := json.Marshal(gin.H{
 		"type":  "error",
 		"error": gin.H{"type": errorType, "message": message},

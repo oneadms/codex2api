@@ -46,7 +46,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Validate Mihomo and harvest integration on Linux
-        run: go test -count=1 -timeout 8m ./internal/mihomo ./internal/harvest ./internal/util/logredact ./auth ./database ./proxy ./proxy/wsrelay ./admin
+        run: go test -count=1 -timeout 8m ./internal/mihomo ./internal/harvest ./internal/util/logredact ./internal/diag ./api ./auth ./database ./proxy ./proxy/wsrelay ./admin
       - name: Validate harvest persistence in isolated PostgreSQL
         env:
           CODEX2API_TEST_POSTGRES_DSN: postgres://codex2api_test:test-only@localhost:5432/codex2api_test?sslmode=disable

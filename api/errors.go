@@ -144,11 +144,12 @@ func HTTPStatusCode(code ErrorCode) int {
 // SendError sends a standardized error response
 func SendError(c *gin.Context, err *APIError) {
 	status := HTTPStatusCode(err.Code)
-	c.JSON(status, ErrorResponse{Error: *err})
+	SendErrorWithStatus(c, err, status)
 }
 
 // SendErrorWithStatus sends an error response with a specific HTTP status
 func SendErrorWithStatus(c *gin.Context, err *APIError, status int) {
+	SetDiagnosticError(c, err, status)
 	c.JSON(status, ErrorResponse{Error: *err})
 }
 

@@ -168,3 +168,30 @@ func TestScanDropsStaleEventsAndBoundsLines(t *testing.T) {
 		t.Fatal("oversized line accepted")
 	}
 }
+
+func TestDiagnosticFingerprintUsesCauseNotRequestIdentity(t *testing.T) {
+	e := Event{Kind: "http", Route: "/v1/responses", Status: 503, Message: "Service unavailable",
+		ErrorCode: "overloaded", ErrorType: "upstream_error",
+		Upstream: &UpstreamAttempt{Status: 503, ErrorKind: "capacity", AccountID: 1, Attempt: 1, RequestID: "one"},
+	}
+	fp := Fingerprint(e)
+	e.RequestID = "another"
+	e.Upstream.AccountID, e.Upstream.Attempt, e.Upstream.RequestID = 2, 3, "two"
+	if Fingerprint(e) != fp {
+		t.Fatal("volatile IDs split the same cause")
+	}
+	e.Upstream.ErrorKind = "transport"
+	if Fingerprint(e) == fp {
+		t.Fatal("different upstream causes were merged")
+	}
+	e.Upstream.ErrorKind = "capacity"
+	e.ErrorCode = "no_available_account"
+	if Fingerprint(e) == fp {
+		t.Fatal("different error codes were merged")
+	}
+	e.ErrorCode = "overloaded"
+	e.SchedulerState = "queue_full"
+	if Fingerprint(e) == fp {
+		t.Fatal("scheduler failures were merged with upstream errors")
+	}
+}

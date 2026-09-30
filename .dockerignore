@@ -4,6 +4,7 @@
 
 # Frontend build artifacts & deps (rebuilt in Docker)
 frontend/node_modules/
+internal/diag/node_modules/
 frontend/dist/
 
 # IDE
