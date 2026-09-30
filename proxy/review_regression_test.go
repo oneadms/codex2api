@@ -264,6 +264,11 @@ func newReviewWSClient(t *testing.T, execute func(context.Context, *auth.Account
 	store.AddAccount(account)
 	h := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
 	r := gin.New()
+	handlerDone := make(chan struct{})
+	r.Use(func(c *gin.Context) {
+		defer close(handlerDone)
+		c.Next()
+	})
 	h.RegisterRoutes(r)
 	server := httptest.NewServer(r)
 	t.Cleanup(server.Close)
@@ -271,7 +276,16 @@ func newReviewWSClient(t *testing.T, execute func(context.Context, *auth.Account
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { conn.Close() })
+	t.Cleanup(func() {
+		_ = conn.Close()
+		// httptest.Server.Close does not wait for hijacked WebSocket handlers.
+		// Join this handler before stopping its store or resetting global state.
+		select {
+		case <-handlerDone:
+		case <-time.After(5 * time.Second):
+			t.Error("WebSocket handler did not stop after client disconnect")
+		}
+	})
 	return conn, account
 }
 
@@ -292,8 +306,8 @@ func TestReviewWSHTTPFallbackMissingContextReleasesLease(t *testing.T) {
 	if !websocket.IsCloseError(err, websocket.ClosePolicyViolation) || account.GetActiveRequests() != 0 {
 		t.Fatalf("fallback lease leaked: %d, %v", account.GetActiveRequests(), err)
 	}
-	if GetResponseCacheStats().KnownUnavailableErrors != 1 {
-		t.Fatal("WS failure was not counted")
+	if got := GetResponseCacheStats().KnownUnavailableErrors; got != 1 {
+		t.Fatalf("KnownUnavailableErrors = %d, want 1", got)
 	}
 }
 
