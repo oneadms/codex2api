@@ -34,6 +34,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 import { Badge } from '@/components/ui/badge'
 import {
   Dialog,
@@ -402,6 +403,24 @@ export default function Diagnostics() {
                   placeholder="gpt-5.5"
                   value={settings.model}
                   onChange={(e) => change('model', e.target.value)}
+                />
+              </Field>
+              <Field
+                label="推理模式"
+                hint="修复任务使用的推理强度，越高越准但越慢、消耗越多。"
+              >
+                <Select
+                  value={settings.reasoning_effort || 'medium'}
+                  onValueChange={(value) => change('reasoning_effort', value)}
+                  options={[
+                    { label: 'minimal', value: 'minimal' },
+                    { label: 'low', value: 'low' },
+                    { label: 'medium（默认）', value: 'medium' },
+                    { label: 'high', value: 'high' },
+                    { label: 'xhigh', value: 'xhigh' },
+                    { label: 'max', value: 'max' },
+                    { label: 'ultra', value: 'ultra' },
+                  ]}
                 />
               </Field>
               <Field

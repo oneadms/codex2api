@@ -17,13 +17,14 @@ import (
 // CodexSDKRunner invokes the official Codex SDK in an isolated repository checkout.
 // The configured API key is sent as CODEX_API_KEY and the base URL targets this project's /v1 endpoint.
 type CodexSDKRunner struct {
-	NodePath string
-	SDKRoot  string
-	Script   string
-	BaseURL  string
-	APIKey   string
-	Model    string
-	EventLog string
+	NodePath        string
+	SDKRoot         string
+	Script          string
+	BaseURL         string
+	APIKey          string
+	Model           string
+	ReasoningEffort string
+	EventLog        string
 }
 
 type CodexRepairResult struct {
@@ -73,9 +74,10 @@ func (r CodexSDKRunner) Repair(ctx context.Context, workingDirectory, prompt str
 	payload, err := json.Marshal(map[string]any{
 		"baseUrl": inputBaseURL(r.BaseURL), "apiKey": r.APIKey, "model": r.Model,
 		"workingDirectory": workingDirectory, "prompt": prompt, "timeoutMs": int((12 * time.Minute).Milliseconds()),
-		"idleTimeoutMs": int((3 * time.Minute).Milliseconds()),
-		"eventLog":      r.EventLog,
-		"env":           codexChildEnvironment(),
+		"idleTimeoutMs":   int((3 * time.Minute).Milliseconds()),
+		"reasoningEffort": r.ReasoningEffort,
+		"eventLog":        r.EventLog,
+		"env":             codexChildEnvironment(),
 	})
 	if err != nil {
 		return result, err

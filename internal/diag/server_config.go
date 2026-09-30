@@ -6,6 +6,12 @@ import (
 	"strings"
 )
 
+// validReasoningEfforts 是 Codex CLI 支持的推理强度取值。
+var validReasoningEfforts = map[string]bool{
+	"minimal": true, "low": true, "medium": true, "high": true,
+	"xhigh": true, "max": true, "ultra": true,
+}
+
 // ServerConfig is persisted by the host application. Secrets never appear in GET responses.
 type ServerConfig struct {
 	Enabled         bool    `json:"enabled"`
@@ -14,6 +20,7 @@ type ServerConfig struct {
 	Repository      string  `json:"repository"`
 	ModelURL        string  `json:"model_url"`
 	Model           string  `json:"model"`
+	ReasoningEffort string  `json:"reasoning_effort"`
 	APIKey          string  `json:"api_key,omitempty"`
 	GitHubToken     string  `json:"github_token,omitempty"`
 	IntervalMinutes int     `json:"interval_minutes"`
@@ -24,13 +31,14 @@ type ServerConfig struct {
 }
 
 func DefaultServerConfig() ServerConfig {
-	return ServerConfig{Repository: "oneadms/codex2api", IntervalMinutes: 5, WindowHours: 24, MinCount: 3, MaxPerRun: 1, MinConfidence: 0.8}
+	return ServerConfig{Repository: "oneadms/codex2api", IntervalMinutes: 5, WindowHours: 24, MinCount: 3, MaxPerRun: 1, MinConfidence: 0.8, ReasoningEffort: "medium"}
 }
 
 func (c ServerConfig) Normalized() ServerConfig {
 	c.Repository = strings.TrimSpace(c.Repository)
 	c.ModelURL = strings.TrimSpace(c.ModelURL)
 	c.Model = strings.TrimSpace(c.Model)
+	c.ReasoningEffort = strings.TrimSpace(strings.ToLower(c.ReasoningEffort))
 	c.APIKey = strings.TrimSpace(c.APIKey)
 	c.GitHubToken = strings.TrimSpace(c.GitHubToken)
 	return c
@@ -45,6 +53,9 @@ func (c ServerConfig) Validate() error {
 	}
 	if len(c.APIKey) > 8192 || len(c.GitHubToken) > 8192 || len(c.Model) > 128 || len(c.ModelURL) > 2048 || strings.ContainsAny(c.APIKey+c.GitHubToken, "\r\n") {
 		return errors.New("模型或凭据字段格式无效")
+	}
+	if c.ReasoningEffort != "" && !validReasoningEfforts[c.ReasoningEffort] {
+		return errors.New("推理模式须为 minimal、low、medium、high、xhigh、max 或 ultra")
 	}
 	if c.ModelURL != "" {
 		if err := (CodexSDKRunner{BaseURL: c.ModelURL, Model: "validate-url"}).Validate(); err != nil && !strings.Contains(err.Error(), "模型名称") {
@@ -77,5 +88,5 @@ func (c ServerConfig) ValidateRun() error {
 }
 
 func (c ServerConfig) Public() map[string]any {
-	return map[string]any{"enabled": c.Enabled, "auto_run": c.AutoRun, "publish": c.Publish, "repository": c.Repository, "model_url": c.ModelURL, "model": c.Model, "interval_minutes": c.IntervalMinutes, "window_hours": c.WindowHours, "min_count": c.MinCount, "max_per_run": c.MaxPerRun, "min_confidence": c.MinConfidence, "has_api_key": c.APIKey != "", "has_github_token": c.GitHubToken != "", "base_branch": RepairBaseBranch}
+	return map[string]any{"enabled": c.Enabled, "auto_run": c.AutoRun, "publish": c.Publish, "repository": c.Repository, "model_url": c.ModelURL, "model": c.Model, "reasoning_effort": c.ReasoningEffort, "interval_minutes": c.IntervalMinutes, "window_hours": c.WindowHours, "min_count": c.MinCount, "max_per_run": c.MaxPerRun, "min_confidence": c.MinConfidence, "has_api_key": c.APIKey != "", "has_github_token": c.GitHubToken != "", "base_branch": RepairBaseBranch}
 }

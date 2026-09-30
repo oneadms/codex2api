@@ -344,7 +344,7 @@ func (m *Manager) managedRun(ctx context.Context, cfg ServerConfig) (RunResult, 
 	if sdkRoot == "" {
 		sdkRoot = "/opt/codex2api/codex-sdk"
 	}
-	w := Worker{Config: c, Exec: ex, Codex: CodexSDKRunner{SDKRoot: sdkRoot, BaseURL: cfg.ModelURL, APIKey: cfg.APIKey, Model: cfg.Model}}
+	w := Worker{Config: c, Exec: ex, Codex: CodexSDKRunner{SDKRoot: sdkRoot, BaseURL: cfg.ModelURL, APIKey: cfg.APIKey, Model: cfg.Model, ReasoningEffort: cfg.ReasoningEffort}}
 	return w.Run(ctx)
 }
 

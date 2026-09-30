@@ -41,6 +41,7 @@ const codex = new Codex({
 
 const thread = codex.startThread({
   model: input.model,
+  modelReasoningEffort: input.reasoningEffort || undefined,
   workingDirectory: input.workingDirectory,
   // Docker 容器内 bwrap 无法创建命名空间，改用无沙箱模式；
   // 工作区是隔离的临时 checkout，Go 侧会校验 diff 后才应用。

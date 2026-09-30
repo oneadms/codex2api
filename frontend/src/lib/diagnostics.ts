@@ -5,6 +5,7 @@ export interface DiagnosticSettings {
   repository: string
   model_url: string
   model: string
+  reasoning_effort: string
   interval_minutes: number
   window_hours: number
   min_count: number
