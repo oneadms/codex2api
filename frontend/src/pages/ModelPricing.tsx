@@ -53,6 +53,7 @@ type Row = {
   model: string
   channel?: string
   source: string
+  pricing_matched?: boolean
   pricing: ModelPricingOverride
   canonical_model?: string
   is_alias?: boolean
@@ -60,17 +61,18 @@ type Row = {
   media_unit?: MediaBillingUnit
 }
 type SourceFilter = 'all' | 'custom' | 'synced' | 'default' | 'unsaved'
-type ChannelFilter = 'all' | 'codex' | 'grok' | 'antigravity' | 'claude'
-const CHANNEL_ORDER: Array<Exclude<ChannelFilter, 'all'>> = ['codex', 'grok', 'antigravity', 'claude']
+type ChannelFilter = 'all' | 'codex' | 'grok' | 'antigravity' | 'claude' | 'traecn'
+const CHANNEL_ORDER: Array<Exclude<ChannelFilter, 'all'>> = ['codex', 'grok', 'antigravity', 'claude', 'traecn']
 const CHANNEL_LABEL: Record<Exclude<ChannelFilter, 'all'>, string> = {
   codex: 'Codex',
   grok: 'Grok',
   antigravity: 'Antigravity',
   claude: 'Claude',
+  traecn: 'TRAECN',
 }
 function rowChannel(r: Row): Exclude<ChannelFilter, 'all'> {
   const c = (r.channel || '').toLowerCase()
-  if (c === 'grok' || c === 'antigravity' || c === 'claude') return c
+  if (c === 'grok' || c === 'antigravity' || c === 'claude' || c === 'traecn') return c
   return 'codex'
 }
 // 已见过的模型集(localStorage):用于给新出现的模型打"新"标。首次加载会播种、不标新。
@@ -299,9 +301,9 @@ function formatPreviewRate(rate: PricingPreviewRate) {
   return `$${formatPriceDisplay(rate.input)} / $${formatPriceDisplay(rate.cached)} / $${formatPriceDisplay(rate.output)}`
 }
 
-function BillingRulePreview({ pricing }: { pricing: ModelPricingOverride }) {
+function BillingRulePreview({ pricing, allowServiceTiers = true }: { pricing: ModelPricingOverride; allowServiceTiers?: boolean }) {
   const { t } = useTranslation()
-  const preview = buildModelPricingPreview(pricing)
+  const preview = buildModelPricingPreview(pricing, allowServiceTiers)
   const rates = [
     { key: 'standard', label: 'settings.pricing.standardRate', rate: preview.standard },
     ...(preview.image ? [{ key: 'image', label: 'settings.pricing.imageRate', rate: preview.image }] : []),
@@ -611,7 +613,7 @@ function PricingModelRow({ row: r, draft, expanded, advancedOpen, busy, isNew, h
   const perImage = imageModel && draft.user_billing_mode === 'per_image'
   const primaryFields = imageModel ? [...PRIMARY_FIELDS.filter(field => !field.key.startsWith('cache_write')), ...(isImage25Model(pricingModel) ? IMAGE_FIELDS : [])] : PRIMARY_FIELDS
   const supportsLongContextPricing = pricingModel !== 'gpt-6-astra' && !imageModel
-  const advancedFields = imageModel ? [] : supportsLongContextPricing ? ADVANCED_FIELDS : ADVANCED_FIELDS.filter(field => !field.key.includes('_long'))
+  const advancedFields = imageModel ? [] : rowChannel(r) === 'traecn' ? ADVANCED_FIELDS.filter(field => !field.key.includes('priority')) : supportsLongContextPricing ? ADVANCED_FIELDS : ADVANCED_FIELDS.filter(field => !field.key.includes('_long'))
   const hasLongContextPricing = supportsLongContextPricing && (normalizePrice(draft.long_context_threshold_tokens) > 0 || normalizePrice(draft.input_long) > 0 || normalizePrice(draft.cached_input_long) > 0 || normalizePrice(draft.output_long) > 0)
   const advancedGroups = [
     { id: 'priority', label: 'settings.pricing.groupPriority', fields: advancedFields.filter(field => !field.key.includes('_long')) },
@@ -632,6 +634,7 @@ function PricingModelRow({ row: r, draft, expanded, advancedOpen, busy, isNew, h
             <span className="pricing-model-meta">
               <span className={cn('pricing-source-badge', source.className)}><i className={source.dot} />{t(source.labelKey)}</span>
               {r.is_alias && r.canonical_model && <span className="pricing-alias" title={t('settings.pricing.aliasOf', { model: r.canonical_model })}><Link2 size={11} aria-hidden="true" />{r.canonical_model}</span>}
+              {r.pricing_matched === false && <span className="text-xs text-amber-600 dark:text-amber-400" title={t('settings.pricing.unmatchedPriceHint')}>{t('settings.pricing.unmatchedPrice')}</span>}
               {dirty && <span className="pricing-dirty-label"><span />{t('settings.pricing.unsaved')}</span>}
             </span>
           </span>
@@ -652,6 +655,13 @@ function PricingModelRow({ row: r, draft, expanded, advancedOpen, busy, isNew, h
         {expanded && (
           <div className="pricing-editor">
             <div className="pricing-editor-heading"><span><SlidersHorizontal size={15} aria-hidden="true" />{t('settings.pricing.editPrices')}</span><span>{t('settings.pricing.editHint')}</span><span className="pricing-unit">{t('settings.pricing.unitHint')}</span></div>
+            {draft.context_tiers && draft.context_tiers.length > 1 && <div className="rounded-lg border border-border p-3 text-xs">
+              <p className="mb-2 text-muted-foreground">{t('settings.pricing.syncedContextBandsHint', { count: draft.context_tiers.length + 1 })}</p>
+              <table className="w-full text-left tabular-nums"><thead><tr><th>Tokens</th><th>{t('settings.pricing.input')}</th><th>{t('settings.pricing.cached')}</th><th>{t('settings.pricing.output')}</th></tr></thead><tbody>
+                <tr><td>&lt; {draft.context_tiers[0].threshold_tokens.toLocaleString()}</td><td>${formatPriceDisplay(inputVal)}</td><td>${formatPriceDisplay(normalizePrice(draft.cached_input))}</td><td>${formatPriceDisplay(outputVal)}</td></tr>
+                {draft.context_tiers.map(tier => <tr key={tier.threshold_tokens}><td>≥ {tier.threshold_tokens.toLocaleString()}</td><td>${formatPriceDisplay(tier.input)}</td><td>${formatPriceDisplay(tier.cached_input)}</td><td>${formatPriceDisplay(tier.output)}</td></tr>)}
+              </tbody></table>
+            </div>}
             {mediaUnit && <MediaPricingEditor unit={mediaUnit} draft={draft} saved={r.pricing} busy={busy} onFieldChange={onFieldChange} onRevertField={onRevertField} />}
             {!mediaUnit && imageModel && (
               <fieldset className="pricing-image-billing" disabled={busy} aria-label={t('settings.pricing.imageBilling.title')}>
@@ -678,7 +688,7 @@ function PricingModelRow({ row: r, draft, expanded, advancedOpen, busy, isNew, h
                   </div>
                 )}
               </fieldset>
-              <BillingRulePreview pricing={draft} />
+              <BillingRulePreview pricing={dirty ? { ...draft, context_tiers: undefined } : draft} allowServiceTiers={rowChannel(r) !== 'traecn'} />
             </div>}
             <div className="pricing-editor-footer">
               <div className="pricing-editor-notes">{r.is_alias && r.canonical_model ? <span><Link2 size={13} aria-hidden="true" />{t('settings.pricing.aliasOf', { model: r.canonical_model })}</span> : <span><Check size={13} aria-hidden="true" />{t(source.labelKey)}</span>}{multiplier && <span>{t('settings.pricing.outputRatio', { ratio: multiplier })}</span>}</div>
@@ -899,7 +909,7 @@ export default function ModelPricing() {
 
   // 各 provider(渠道)模型数量:仅当存在多于一个渠道时才显示渠道过滤条。
   const channelCounts = useMemo(() => {
-    const m: Record<string, number> = { codex: 0, grok: 0, antigravity: 0, claude: 0 }
+    const m: Record<string, number> = { codex: 0, grok: 0, antigravity: 0, claude: 0, traecn: 0 }
     for (const r of rows) m[rowChannel(r)] += 1
     return m
   }, [rows])

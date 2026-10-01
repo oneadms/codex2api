@@ -4945,29 +4945,11 @@ func (h *Handler) SyncAccountUpstreamModels(c *gin.Context) {
 		// account allowlist, then publish the effective intersection immediately.
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
 		defer cancel()
-		models, fetchErr := proxy.FetchTraeCNModelsWithStore(ctx, h.store, account, h.store.ResolveProxyForAccount(account))
-		if fetchErr != nil {
-			writeError(c, http.StatusBadGateway, fmt.Sprintf("拉取 TRAECN 上游模型目录失败: %s", fetchErr.Error()))
+		models, effective, syncedAt, err := h.syncTraeCNAccountModels(ctx, account)
+		if err != nil {
+			writeError(c, http.StatusBadGateway, "同步 TRAECN 上游模型目录失败: "+err.Error())
 			return
 		}
-		allowlist := account.TraeCNConfiguredModelAllowlist()
-		// Always calculate against the freshly fetched catalog. Using the
-		// account's previous effective projection here could retain stale models
-		// when an upstream removes a config, and could race a concurrent refresh.
-		effective := intersectTraeCNModelIDs(models, allowlist)
-		syncedAt := time.Now().UTC()
-		updates := map[string]interface{}{
-			auth.TraeCNUpstreamModelsCredentialKey:    models,
-			auth.TraeCNModelAllowlistCredentialKey:    allowlist,
-			auth.TraeCNModelAllowlistSetCredentialKey: true,
-			auth.TraeCNModelsSyncedAtCredentialKey:    syncedAt.Format(time.RFC3339Nano),
-			"models":                                  effective,
-		}
-		if err := h.db.UpdateCredentials(ctx, id, updates); err != nil {
-			writeInternalError(c, err)
-			return
-		}
-		h.store.ApplyTraeCNUpstreamModelsWithAllowlist(id, models, syncedAt, allowlist)
 		h.db.InsertAccountEventAsync(id, "updated", "traecn_models_sync")
 		c.JSON(http.StatusOK, gin.H{"models": models, "effective_models": effective, "synced_at": syncedAt})
 		return

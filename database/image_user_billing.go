@@ -20,6 +20,19 @@ func SupportsImageBilling(model string) bool {
 }
 
 func ValidateModelUserBilling(model string, o ModelPricingOverride) error {
+	lastThreshold := 0
+	for _, tier := range o.ContextTiers {
+		if tier.ThresholdTokens <= lastThreshold {
+			return fmt.Errorf("context price thresholds must be positive and increasing")
+		}
+		lastThreshold = tier.ThresholdTokens
+		for _, value := range []float64{tier.Input, tier.Output, tier.CachedInput, tier.CacheWrite5m} {
+			if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+				return fmt.Errorf("context prices must be finite and non-negative")
+			}
+		}
+	}
+
 	switch o.UserBillingMode {
 	case "", UserBillingModeToken, UserBillingModePerImage, UserBillingModePerVideo, UserBillingModePerSecond:
 	default:

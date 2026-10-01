@@ -203,3 +203,57 @@ func TestParseModelPricingPayloadModelsDevIncludesXAI(t *testing.T) {
 		t.Fatalf("openai entries must survive alongside xai: %+v", ov5)
 	}
 }
+
+func TestModelsDevTraeCNPricesAndContextBands(t *testing.T) {
+	t.Cleanup(func() { database.SetModelPricingOverrides(nil) })
+	prices, err := parseModelPricingPayload([]byte(`{
+ "openai":{"models":{"gpt-5.4":{"cost":{"input":2.5,"output":15}}}},
+ "zhipuai":{"models":{"glm-5.3":{"cost":{"input":1.4,"output":4.4,"cache_read":0.26}}}},
+ "deepseek":{"models":{"deepseek-v4-pro":{"cost":{"input":0.435,"output":0.87,"cache_read":0.003625}}}},
+ "moonshotai-cn":{"models":{"kimi-k3":{"cost":{"input":3,"output":15,"cache_read":0.3}}}},
+ "minimax-cn":{"models":{"MiniMax-M3":{"cost":{"input":0.3,"output":1.2,"cache_read":0.06,"tiers":[{"input":0.6,"output":2.4,"cache_read":0.12,"tier":{"type":"context","size":512000}}]}}}},
+ "alibaba-cn":{"models":{"qwen3.8-max":{"cost":{"input":1.77744,"output":5.33231,"cache_read":0.22218,"cache_write":2.22179}}}},
+ "volcengine":{"models":{
+ "doubao-seed-2-1-pro-260628":{"cost":{"input":0.8906,"output":4.45301}},
+ "doubao-seed-1-6-251015":{"cost":{"input":0.11875,"output":1.18747,"cache_read":0.02375,"tiers":[{"input":0.17812,"output":2.37494,"cache_read":0.02375,"tier":{"type":"context","size":32000}},{"input":0.35624,"output":3.56241,"cache_read":0.02375,"tier":{"type":"context","size":128000}}]}}}},
+ "reseller":{"models":{"glm-5.3":{"cost":{"input":99,"output":99}}}}
+ }`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, model := range []string{"glm-5.3", "deepseek-v4-pro", "deepseek-v4-pro-official", "kimi-k3", "minimax-m3", "qwen3.8-max", "doubao-seed-2.1-pro"} {
+		if _, ok := prices[model]; !ok {
+			t.Fatalf("missing source price for %s", model)
+		}
+	}
+	if prices["glm-5.3"].Input != 1.4 {
+		t.Fatal("reseller price replaced first-party price")
+	}
+	if prices["qwen3.8-max"].CacheWrite5m != 2.22179 {
+		t.Fatal("cache-write price missing")
+	}
+	database.SetModelPricingOverrides(prices)
+	for _, tc := range []struct {
+		input int
+		rate  float64
+	}{{31999, 0.11875}, {32000, 0.17812}, {127999, 0.17812}, {128000, 0.35624}} {
+		result := database.CalculateCostBreakdown(tc.input, 100, 10, "doubao-seed-1-6-251015", "")
+		if result.InputPricePerMToken != tc.rate {
+			t.Fatalf("input=%d rate=%v, want %v", tc.input, result.InputPricePerMToken, tc.rate)
+		}
+	}
+	if got := database.CalculateCostBreakdown(300000, 100, 0, "MiniMax-M3", ""); got.LongContext {
+		t.Fatal("MiniMax applied long pricing before its 512K threshold")
+	}
+	if got := database.CalculateCostBreakdown(512000, 100, 0, "MiniMax-M3", ""); !got.LongContext || got.InputPricePerMToken != 0.6 {
+		t.Fatalf("MiniMax long price=%+v", got)
+	}
+	blob, err := database.MarshalModelPricingOverridesJSON(prices)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := database.ParseModelPricingOverridesJSON(blob)
+	if err != nil || len(restored["doubao-seed-1-6-251015"].ContextTiers) != 2 {
+		t.Fatalf("context bands lost on persistence: %v", err)
+	}
+}

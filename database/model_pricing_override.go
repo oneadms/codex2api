@@ -14,14 +14,24 @@ const (
 	ModelPricingSourceSynced = "synced"
 )
 
+// ModelPricingContextTier retains every context price band from models.dev.
+type ModelPricingContextTier struct {
+	ThresholdTokens int     `json:"threshold_tokens"`
+	Input           float64 `json:"input"`
+	Output          float64 `json:"output"`
+	CachedInput     float64 `json:"cached_input"`
+	CacheWrite5m    float64 `json:"cache_write_5m,omitempty"`
+}
+
 // ModelPricingOverride 是单个模型的定价覆盖（设置存储与同步 URL 载荷共用同一形态）。
 // Token 价格单位：USD / 1M tokens。Token 字段为 0 时回退代码默认价。
 // ImageUnitPrice 则为用户单位价（按张/按次/按秒模式下的 USD / 计费单位），这些模式要求显式正单价；
 // MediaUnitCost 是 Grok Imagine 媒体模型的上游单位成本（USD / 张 或 USD / 秒）。
 // 优先级：custom > synced > 代码默认。
 type ModelPricingOverride struct {
-	UserBillingMode string  `json:"user_billing_mode,omitempty"`
-	ImageUnitPrice  float64 `json:"image_unit_price,omitempty"` // USD per billed unit (image / video / second) in unit billing modes; upstream cost stays independent.
+	ContextTiers    []ModelPricingContextTier `json:"context_tiers,omitempty"`
+	UserBillingMode string                    `json:"user_billing_mode,omitempty"`
+	ImageUnitPrice  float64                   `json:"image_unit_price,omitempty"` // USD per billed unit (image / video / second) in unit billing modes; upstream cost stays independent.
 	// MediaUnitCost 是 Grok Imagine 媒体模型的上游单位成本(USD/张 或 USD/秒)。
 	MediaUnitCost    float64 `json:"media_unit_cost,omitempty"`
 	ImageInput       float64 `json:"image_input,omitempty"`
@@ -66,6 +76,7 @@ func NormalizeModelPricingOverride(model string, o ModelPricingOverride) ModelPr
 	if discoveredGPTPricingKey(model) != "" || CanonicalBillingModelKey(model) != "gpt-6-astra" {
 		return o
 	}
+	o.ContextTiers = nil
 	o.InputLong = 0
 	o.CachedInputLong = 0
 	o.OutputLong = 0
@@ -78,7 +89,7 @@ func NormalizeModelPricingOverride(model string, o ModelPricingOverride) ModelPr
 
 // IsEmpty 判断覆盖是否不含任何价格（全 0）。
 func (o ModelPricingOverride) IsEmpty() bool {
-	return o.UserBillingMode == "" && o.ImageUnitPrice == 0 && o.MediaUnitCost == 0 && o.ImageInput == 0 && o.CachedImageInput == 0 && o.Input == 0 && o.CachedInput == 0 && o.CacheWrite5m == 0 && o.CacheWrite1h == 0 && o.Output == 0 &&
+	return len(o.ContextTiers) == 0 && o.UserBillingMode == "" && o.ImageUnitPrice == 0 && o.MediaUnitCost == 0 && o.ImageInput == 0 && o.CachedImageInput == 0 && o.Input == 0 && o.CachedInput == 0 && o.CacheWrite5m == 0 && o.CacheWrite1h == 0 && o.Output == 0 &&
 		o.InputPriority == 0 && o.CachedInputPriority == 0 && o.OutputPriority == 0 &&
 		o.InputLong == 0 && o.CachedInputLong == 0 && o.OutputLong == 0 &&
 		o.InputLongPriority == 0 && o.CachedInputLongPriority == 0 && o.OutputLongPriority == 0 &&
@@ -87,6 +98,12 @@ func (o ModelPricingOverride) IsEmpty() bool {
 
 // applyNonZero 把覆盖里非 0 的价格字段写入 p（就地）。0 字段保持 p 原值（代码默认）。
 func (o ModelPricingOverride) applyNonZero(p *ModelPricing) {
+	if o.Source == ModelPricingSourceCustom {
+		p.ContextTiers = nil
+	}
+	if len(o.ContextTiers) > 0 {
+		p.ContextTiers = append([]ModelPricingContextTier(nil), o.ContextTiers...)
+	}
 	if o.UserBillingMode != "" {
 		p.UserBillingMode = o.UserBillingMode
 	}
@@ -156,6 +173,7 @@ func ModelPricingOverrideFromPricing(p *ModelPricing, source string) ModelPricin
 		return ModelPricingOverride{Source: source}
 	}
 	return ModelPricingOverride{
+		ContextTiers:               append([]ModelPricingContextTier(nil), p.ContextTiers...),
 		UserBillingMode:            p.UserBillingMode,
 		ImageUnitPrice:             p.ImageUnitPrice,
 		MediaUnitCost:              p.MediaUnitCost,
@@ -254,6 +272,7 @@ func SetModelPricingOverrides(m map[string]ModelPricingOverride) {
 		if key == "" || v.IsEmpty() {
 			continue
 		}
+		v.ContextTiers = append([]ModelPricingContextTier(nil), v.ContextTiers...)
 		norm[key] = v
 	}
 	pricingOverrides.Store(norm)

@@ -305,6 +305,18 @@ func (h *Handler) AddTraeCNAccounts(c *gin.Context) {
 			}
 		}
 	}
+	modelSyncIDs := make([]int64, 0, len(createdIDs))
+	for _, item := range items {
+		if item.OK {
+			modelSyncIDs = append(modelSyncIDs, item.ID)
+		}
+	}
+	warnings := h.syncImportedTraeCNModels(ctx, modelSyncIDs)
+	for index := range items {
+		if warning := warnings[items[index].ID]; warning != "" {
+			items[index].Warning = strings.Trim(strings.Join([]string{items[index].Warning, warning}, "；"), "；")
+		}
+	}
 	success, failed := 0, 0
 	for _, item := range items {
 		if item.Stored {
@@ -318,6 +330,61 @@ func (h *Handler) AddTraeCNAccounts(c *gin.Context) {
 		"total":   len(items), "success": success, "failed": failed, "items": items,
 		"group_ids": groupIDs, "host": host,
 	})
+}
+
+// syncTraeCNAccountModels is shared by account creation and manual refresh.
+func (h *Handler) syncTraeCNAccountModels(ctx context.Context, account *auth.Account) ([]string, []string, time.Time, error) {
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	models, err := proxy.FetchTraeCNModelsWithStore(ctx, h.store, account, h.store.ResolveProxyForAccount(account))
+	if err != nil {
+		return nil, nil, time.Time{}, err
+	}
+	allowlist := account.TraeCNConfiguredModelAllowlist()
+	effective := intersectTraeCNModelIDs(models, allowlist)
+	syncedAt := time.Now().UTC()
+	if err := h.db.UpdateCredentials(ctx, account.ID(), map[string]interface{}{
+		auth.TraeCNUpstreamModelsCredentialKey:    models,
+		auth.TraeCNModelAllowlistCredentialKey:    allowlist,
+		auth.TraeCNModelAllowlistSetCredentialKey: true,
+		auth.TraeCNModelsSyncedAtCredentialKey:    syncedAt.Format(time.RFC3339Nano),
+		"models":                                  effective,
+	}); err != nil {
+		return nil, nil, time.Time{}, err
+	}
+	h.store.ApplyTraeCNUpstreamModelsWithAllowlist(account.ID(), models, syncedAt, allowlist)
+	return models, effective, syncedAt, nil
+}
+
+// syncImportedTraeCNModels bounds provider requests across a batch and preserves
+// saved credentials if the catalog is temporarily unavailable.
+func (h *Handler) syncImportedTraeCNModels(ctx context.Context, ids []int64) map[int64]string {
+	warnings := make(map[int64]string)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for _, id := range ids {
+		wg.Add(1)
+		go func(id int64) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			account := h.store.FindByID(id)
+			var err error
+			if account == nil {
+				err = fmt.Errorf("账号未加载到运行时池")
+			} else {
+				_, _, _, err = h.syncTraeCNAccountModels(ctx, account)
+			}
+			if err != nil {
+				mu.Lock()
+				warnings[id] = "账号已保存，但模型目录同步失败，可手动重试: " + err.Error()
+				mu.Unlock()
+			}
+		}(id)
+	}
+	wg.Wait()
+	return warnings
 }
 
 func (h *Handler) RefreshTraeCNAccount(c *gin.Context) {

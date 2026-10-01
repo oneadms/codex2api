@@ -40,6 +40,7 @@ function hasRate(value: PricingPreviewRate | null): value is PricingPreviewRate 
 
 export function buildModelPricingPreview(
   pricing: ModelPricingOverride = {},
+  allowServiceTiers = true,
 ): ModelPricingPreview {
   const standard = rate(pricing.input, pricing.cached_input, pricing.output)
   const threshold = Math.max(
@@ -60,12 +61,21 @@ export function buildModelPricingPreview(
   const priority = hasRate(candidatePriority) ? candidatePriority : null
   const mode = long ? 'tiered' : 'single'
   const image = numberValue(pricing.image_input) > 0 ? rate(pricing.image_input, pricing.cached_image_input, pricing.output) : undefined
-  const baseExpression = image
+  let baseExpression = image
     ? `text_input * ${standard.input} + image_input * ${image.input} + cached_text * ${standard.cached} + cached_image * ${image.cached} + image_output * ${image.output}`
     : long
     ? `len < ${threshold} ? tier("standard", ${rateExpression(standard)}) : tier("long_context", ${rateExpression(long)})`
     : `tier("standard", ${rateExpression(standard)})`
-  const withServiceTiers = priority || long
+  if (!image && pricing.context_tiers && pricing.context_tiers.length > 1) {
+    let previous = standard
+    const branches = pricing.context_tiers.map((tier, index) => {
+      const branch = `len < ${tier.threshold_tokens} ? tier("context_${index}", ${rateExpression(previous)}) : `
+      previous = rate(tier.input, tier.cached_input, tier.output)
+      return branch
+    })
+    baseExpression = branches.join('') + `tier("context_${pricing.context_tiers.length}", ${rateExpression(previous)})`
+  }
+  const withServiceTiers = allowServiceTiers && (priority || long)
     ? `${baseExpression} * (param("service_tier") == "flex" ? 0.5 : 1) * (param("service_tier") == "priority" ? 2 : 1)`
     : baseExpression
 
@@ -76,7 +86,7 @@ export function buildModelPricingPreview(
     standard,
     long,
     priority,
-    flexMultiplier: priority || long ? 0.5 : null,
+    flexMultiplier: allowServiceTiers && (priority || long) ? 0.5 : null,
     expression: withServiceTiers,
   }
 }

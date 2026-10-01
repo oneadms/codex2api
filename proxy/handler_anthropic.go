@@ -675,6 +675,10 @@ func (h *Handler) Messages(c *gin.Context) {
 		}
 		isRelayAccount := account.IsRelayStyle()
 		attemptEffectiveModel := effectiveModel
+		attemptLogEffectiveModel := effectiveModel
+		if account.IsTraeCNAPI() {
+			attemptLogEffectiveModel = traeCNUsageEffectiveModel(account, effectiveModel)
+		}
 		useWebsocket := h.shouldUseWebsocketForHTTP() && !wsHTTPFallback.ForceHTTP() && !isRelayAccount
 		if account.OpenAIResponsesUsesUpstreamWebsocket() && !rawResponsesBodyShouldForceHTTPForImageGeneration(rawBody) {
 			useWebsocket = true
@@ -817,6 +821,7 @@ func (h *Handler) Messages(c *gin.Context) {
 					if mappedBody, mappedModel, ok := h.applyAccountModelMappingToBody(upstreamBody, account); ok {
 						upstreamBody = mappedBody
 						attemptEffectiveModel = mappedModel
+						attemptLogEffectiveModel = mappedModel
 					}
 				}
 				resp, reqErr = executeHTTPWithContinuousRetryKeepalive(upstreamCtx, func() (*http.Response, error) {
@@ -999,7 +1004,7 @@ func (h *Handler) Messages(c *gin.Context) {
 				}
 				h.logUsageForRequest(c, &database.UsageLogInput{
 					AccountID: account.ID(), Endpoint: "/v1/messages", Model: model,
-					EffectiveModel: attemptEffectiveModel, StatusCode: resp.StatusCode,
+					EffectiveModel: attemptLogEffectiveModel, StatusCode: resp.StatusCode,
 					DurationMs: durationMs, InboundEndpoint: "/v1/messages", UpstreamEndpoint: upstreamEndpoint,
 					Stream: isStream, ViaWebsocket: useWebsocket, UpstreamErrorKind: "client_compatibility", ErrorMessage: message,
 				})
@@ -1049,7 +1054,7 @@ func (h *Handler) Messages(c *gin.Context) {
 				AccountID:              account.ID(),
 				Endpoint:               "/v1/messages",
 				Model:                  model,
-				EffectiveModel:         attemptEffectiveModel,
+				EffectiveModel:         attemptLogEffectiveModel,
 				StatusCode:             resp.StatusCode,
 				DurationMs:             durationMs,
 				ReasoningEffort:        reasoningEffort,
@@ -1121,7 +1126,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			Ctx: c.Request.Context(), Account: account, Resp: resp,
 			Inbound: GrokProtocolMessages, IsStream: isStream,
 			Endpoint: "/v1/messages", UpstreamPath: upstreamEndpoint,
-			LogModel: model, EffectiveModel: attemptEffectiveModel,
+			LogModel: model, EffectiveModel: attemptLogEffectiveModel,
 			GateModel: attemptEffectiveModel, ReasoningEffort: reasoningEffort,
 			RawBody: rawBody,
 			Start:   start, Attempt: attempt, Attempts: &grokQualityAttempts,
@@ -1182,7 +1187,7 @@ func (h *Handler) Messages(c *gin.Context) {
 				_ = streamAttempt.Close()
 				retryLog := database.UsageLogInput{
 					AccountID: account.ID(), Endpoint: "/v1/messages", Model: model,
-					EffectiveModel: attemptEffectiveModel, StatusCode: outcome.logStatusCode,
+					EffectiveModel: attemptLogEffectiveModel, StatusCode: outcome.logStatusCode,
 					DurationMs: totalDuration, FirstTokenMs: firstTokenMs, ReasoningEffort: reasoningEffort,
 					InboundEndpoint: "/v1/messages", UpstreamEndpoint: upstreamEndpoint,
 					Stream: isStream, ViaWebsocket: false, AttemptIndex: attempt + 1,
@@ -1239,7 +1244,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			}
 			logInput := &database.UsageLogInput{
 				AccountID: account.ID(), Endpoint: "/v1/messages", Model: model,
-				EffectiveModel: attemptEffectiveModel, StatusCode: outcome.logStatusCode,
+				EffectiveModel: attemptLogEffectiveModel, StatusCode: outcome.logStatusCode,
 				DurationMs: totalDuration, FirstTokenMs: firstTokenMs, ReasoningEffort: reasoningEffort,
 				InboundEndpoint: "/v1/messages", UpstreamEndpoint: upstreamEndpoint,
 				Stream: isStream, ViaWebsocket: false, AttemptIndex: attempt + 1,
@@ -1584,7 +1589,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			_ = streamAttempt.Close()
 			clearNewAPIUpstreamCyberPolicyDecision(c)
 			h.logPromptPolicyRetryUsage(c, database.UsageLogInput{
-				AccountID: account.ID(), Endpoint: "/v1/messages", Model: model, EffectiveModel: attemptEffectiveModel,
+				AccountID: account.ID(), Endpoint: "/v1/messages", Model: model, EffectiveModel: attemptLogEffectiveModel,
 				StatusCode: outcome.logStatusCode, DurationMs: totalDuration, FirstTokenMs: firstTokenMs, ReasoningEffort: reasoningEffort,
 				InboundEndpoint: "/v1/messages", UpstreamEndpoint: upstreamEndpoint, Stream: isStream, ViaWebsocket: useWebsocket,
 				AttemptIndex: attempt + 1, UpstreamErrorKind: outcome.failureKind,
@@ -1683,7 +1688,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			AccountID:              account.ID(),
 			Endpoint:               "/v1/messages",
 			Model:                  model,
-			EffectiveModel:         attemptEffectiveModel,
+			EffectiveModel:         attemptLogEffectiveModel,
 			StatusCode:             logStatusCode,
 			DurationMs:             totalDuration,
 			FirstTokenMs:           firstTokenMs,

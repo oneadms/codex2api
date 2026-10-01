@@ -13,10 +13,8 @@ import (
 	"github.com/codex2api/database"
 )
 
-// DefaultModelPricingSyncURL 是项目维护的定价 JSON（raw GitHub）。部署方可在设置页改成
-// 自己的镜像/私有列表。格式：{ "<model>": {input,cached_input,output,...}, ... }，
-// 见 database.ModelPricingOverride。
-const DefaultModelPricingSyncURL = "https://raw.githubusercontent.com/james-6-23/codex2api/main/pricing.json"
+// DefaultModelPricingSyncURL uses models.dev reference token prices.
+const DefaultModelPricingSyncURL = ModelsDevPricingSyncURL
 
 // ModelsDevPricingSyncURL 是 models.dev 公开定价 API，格式为 provider→models→cost
 // （USD / 1M tokens，含 272K 长上下文分档），同步时自动识别并转换。
@@ -114,10 +112,11 @@ func fetchModelPricingJSON(ctx context.Context, syncURL, proxyURL string) (map[s
 
 // modelsDevCostTier 是 models.dev 单个分档价（顶层与 tiers 元素共用形态）。
 type modelsDevCostTier struct {
-	Input     float64 `json:"input"`
-	Output    float64 `json:"output"`
-	CacheRead float64 `json:"cache_read"`
-	Tier      struct {
+	Input      float64 `json:"input"`
+	Output     float64 `json:"output"`
+	CacheRead  float64 `json:"cache_read"`
+	CacheWrite float64 `json:"cache_write"`
+	Tier       struct {
 		Type string `json:"type"`
 		Size int64  `json:"size"`
 	} `json:"tier"`
@@ -158,10 +157,14 @@ func parseModelPricingPayload(body []byte) (map[string]database.ModelPricingOver
 	return raw, nil
 }
 
-// modelsDevFirstPartyProviders 是取价的第一方 provider，按优先级排列：
-// 网关同时代理 Codex（openai）与 Grok（xai），两家的官方价都要同步进来。
+// modelsDevFirstPartyProviders selects vendor prices, preferring China-region
+// endpoints for models used by TRAECN. Resellers and subscription plans are excluded.
 // 其余 provider 是转售商，同名模型加价不一，取了会串价，故不参与。
-var modelsDevFirstPartyProviders = []string{"openai", "xai"}
+var modelsDevFirstPartyProviders = []string{
+	"openai", "xai", "anthropic", "google",
+	"deepseek", "zhipuai", "moonshotai-cn", "minimax-cn", "alibaba-cn", "volcengine",
+	"zai", "moonshotai", "minimax", "alibaba",
+}
 
 // convertModelsDevPricing 把 models.dev 数据转成覆盖表。只取第一方 provider
 // （其余 provider 的同名模型定价可能不同，避免串价）；键归一为规范定价键。
@@ -205,6 +208,22 @@ func convertModelsDevPricing(providers map[string]modelsDevProvider) map[string]
 			out[key] = ov
 		}
 	}
+	// Trae config names differ from the names published by the model vendors.
+	// Keep aliases independent so administrators can still override each row.
+	for alias, target := range map[string]string{
+		"doubao-seed-2.1-pro":        "doubao-seed-2-1-pro-260628",
+		"doubao-seed-2.1-turbo":      "doubao-seed-2-1-turbo-260628",
+		"deepseek-v4-pro-official":   "deepseek-v4-pro",
+		"deepseek-v4-flash-official": "deepseek-v4-flash",
+		"qwen-3.7-plus":              "qwen3.7-plus",
+	} {
+		if _, exists := out[alias]; exists {
+			continue
+		}
+		if price, exists := out[target]; exists {
+			out[alias] = price
+		}
+	}
 	return out
 }
 
@@ -225,18 +244,29 @@ func mergeModelsDevProviders(providers map[string]modelsDevProvider, names []str
 
 func modelsDevCostToOverride(cost modelsDevCost) database.ModelPricingOverride {
 	ov := database.ModelPricingOverride{
-		Input:       cost.Input,
-		CachedInput: cost.CacheRead,
-		Output:      cost.Output,
+		Input:        cost.Input,
+		CachedInput:  cost.CacheRead,
+		CacheWrite5m: cost.CacheWrite,
+		Output:       cost.Output,
 	}
 	for _, tier := range cost.Tiers {
-		if tier.Tier.Type != "context" {
+		if tier.Tier.Type != "context" || tier.Tier.Size <= 0 {
 			continue
 		}
-		ov.InputLong = tier.Input
-		ov.CachedInputLong = tier.CacheRead
-		ov.OutputLong = tier.Output
-		break
+		ov.ContextTiers = append(ov.ContextTiers, database.ModelPricingContextTier{
+			ThresholdTokens: int(tier.Tier.Size), Input: tier.Input, Output: tier.Output,
+			CachedInput: tier.CacheRead, CacheWrite5m: tier.CacheWrite,
+		})
+	}
+	sort.Slice(ov.ContextTiers, func(i, j int) bool { return ov.ContextTiers[i].ThresholdTokens < ov.ContextTiers[j].ThresholdTokens })
+	if len(ov.ContextTiers) > 0 {
+		first := ov.ContextTiers[0]
+		ov.LongContextThresholdTokens = first.ThresholdTokens
+		ov.InputLong, ov.OutputLong, ov.CachedInputLong = first.Input, first.Output, first.CachedInput
+	}
+	// A single band uses the existing long-context and service-tier rules.
+	if len(ov.ContextTiers) == 1 {
+		ov.ContextTiers = nil
 	}
 	return ov
 }

@@ -731,6 +731,16 @@ func traeCNPublicIDsForConfig(configName string) []string {
 // provider 名字区分大小写（DeepSeek-V4-Pro / Doubao_1_6），而客户端和旧配置里常见
 // 归一化写法（deepseek-v4-pro / doubao-1-6），用宽松匹配找出真名后原样返回；
 // 目录里没有这个名字时返回空串。
+// traeCNUsageEffectiveModel records the provider config used by this attempt,
+// so public aliases never borrow another provider's token prices.
+func traeCNUsageEffectiveModel(account *auth.Account, requestModel string) string {
+	target := auth.TraeCNRequestModel(requestModel)
+	if config := traeCNResolveConfigName(target, account.TraeCNEffectiveModels()); config != "" {
+		return config
+	}
+	return target
+}
+
 func traeCNResolveConfigName(model string, known []string) string {
 	model = strings.TrimSpace(model)
 	if model == "" {

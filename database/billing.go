@@ -5,6 +5,7 @@ import "strings"
 const longContextThreshold = 272000
 
 type ModelPricing struct {
+	ContextTiers    []ModelPricingContextTier
 	UserBillingMode string
 	ImageUnitPrice  float64
 	// MediaUnitCost 是媒体模型的上游单位成本(USD/张 或 USD/秒,见 MediaBillingUnit)。
@@ -434,6 +435,21 @@ func CalculateCostBreakdownWithCacheWrites(inputTokens, outputTokens, cachedToke
 			cacheReadPrice = pricing.LongCacheReadPricePerMTokenPriority
 		} else if pricing.CacheReadPricePerMTokenPriority > 0 {
 			cacheReadPrice = pricing.CacheReadPricePerMTokenPriority
+		}
+	}
+
+	// models.dev may publish more than one long-context band. Select all bands
+	// against the actual input size rather than flattening them to the first.
+	if len(pricing.ContextTiers) > 0 {
+		for _, tier := range pricing.ContextTiers {
+			if inputTokens < tier.ThresholdTokens {
+				break
+			}
+			selected := *pricing
+			selected.CacheWrite5mPricePerMToken = tier.CacheWrite5m
+			pricing = &selected
+			inputPrice, outputPrice, cacheReadPrice = tier.Input, tier.Output, tier.CachedInput
+			longContextApplied = true
 		}
 	}
 

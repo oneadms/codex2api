@@ -746,6 +746,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const [error, setError] = useState<string | null>(null);
   const [total, setTotal] = useState(0);
   const [summary, setSummary] = useState<{
+    total: number;
     normal: number;
     active: number;
     rateLimited: number;
@@ -822,6 +823,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
       setAccounts((response.accounts ?? []).filter((account) => account.traecn_api !== false));
       setTotal(response.total ?? 0);
       setSummary({
+        total: response.summary?.total ?? response.total ?? 0,
         normal: response.summary?.normal ?? 0,
         active: response.summary?.active ?? 0,
         rateLimited: response.summary?.rate_limited ?? 0,
@@ -923,6 +925,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
         enabled: addFormRef.current.enabled,
       });
       showToast(t("traecn.oauthClaimed", { id: result.id }), "success");
+      if (result.warning) showToast(result.warning, "warning");
       resetOAuthSession();
       setShowAdd(false);
       await reload(true);
@@ -1472,7 +1475,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
       />
 
       <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 xl:grid-cols-6">
-        <CompactStat label={t("traecn.statTotal")} value={total} tone="neutral" />
+        <CompactStat label={t("traecn.statTotal")} value={summary?.total ?? total} tone="neutral" />
         <CompactStat label={t("traecn.statNormal")} value={normalCount} tone="success" active={status === "normal"} onClick={() => setStatus(status === "normal" ? "all" : "normal")} />
         <CompactStat
           label={t("traecn.statScheduling")}

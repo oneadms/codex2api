@@ -159,6 +159,8 @@ func TestTraeCNOAuthEndToEndCreatesAccount(t *testing.T) {
 	fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/v1/models", "/v1/models/detail", "/api/ide/v1/batch_get_detail_param":
+			_, _ = w.Write([]byte(`{"data":[{"id":"oauth-account-model"}]}`))
 		case auth.TraeCNOAuthGuidancePath:
 			_, _ = w.Write([]byte(`{"Result":{"LoginHost":"http://` + r.Host + `"}}`))
 		case auth.TraeCNOAuthAuthCodeExchangePth:
@@ -237,7 +239,7 @@ func TestTraeCNOAuthEndToEndCreatesAccount(t *testing.T) {
 	claimRecorder := httptest.NewRecorder()
 	claimContext, _ := gin.CreateTestContext(claimRecorder)
 	claimContext.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/traecn/oauth/claim",
-		strings.NewReader(`{"login_id":"`+start.LoginID+`","name":"oauth-account"}`))
+		strings.NewReader(`{"login_id":"`+start.LoginID+`","name":"oauth-account","host":"`+fixture.URL+`"}`))
 	claimContext.Request.Header.Set("Content-Type", "application/json")
 	handler.ClaimTraeCNOAuthAccount(claimContext)
 	if claimRecorder.Code != http.StatusOK {
@@ -248,6 +250,9 @@ func TestTraeCNOAuthEndToEndCreatesAccount(t *testing.T) {
 	}
 	if err := json.Unmarshal(claimRecorder.Body.Bytes(), &claim); err != nil {
 		t.Fatal(err)
+	}
+	if account := store.FindByID(claim.ID); account == nil || !account.TraeCNSupportsModel("oauth-account-model") {
+		t.Fatalf("OAuth account catalog was not synced: %s", claimRecorder.Body.String())
 	}
 	row, err := db.GetAccountByID(context.Background(), claim.ID)
 	if err != nil {
@@ -268,7 +273,7 @@ func TestTraeCNOAuthEndToEndCreatesAccount(t *testing.T) {
 	claimRecorder = httptest.NewRecorder()
 	claimContext, _ = gin.CreateTestContext(claimRecorder)
 	claimContext.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/traecn/oauth/claim",
-		strings.NewReader(`{"login_id":"`+start.LoginID+`","name":"oauth-account"}`))
+		strings.NewReader(`{"login_id":"`+start.LoginID+`","name":"oauth-account","host":"`+fixture.URL+`"}`))
 	claimContext.Request.Header.Set("Content-Type", "application/json")
 	handler.ClaimTraeCNOAuthAccount(claimContext)
 	if claimRecorder.Code != http.StatusConflict {

@@ -1,6 +1,7 @@
 package database
 
 import (
+	"reflect"
 	"testing"
 )
 
@@ -204,7 +205,7 @@ func TestModelPricingOverride_AstraIgnoresLongContextPrices(t *testing.T) {
 			}
 			for _, model := range []string{"gpt-6-astra", "GPT-6-Astra", "gpt-6-astra-high", "gpt-6-astra(xhigh)"} {
 				projected := ModelPricingOverrideFromPricing(GetModelPricing(model), ModelPricingSourceFor("gpt-6-astra"))
-				if projected != want {
+				if !reflect.DeepEqual(projected, want) {
 					t.Fatalf("%s effective pricing = %+v, want %+v", model, projected, want)
 				}
 				for _, tier := range []string{"", "fast", "priority"} {
@@ -221,7 +222,7 @@ func TestModelPricingOverride_AstraIgnoresLongContextPrices(t *testing.T) {
 			}
 
 			// 相同的覆盖用于其他模型时，长档价和阈值全部继续生效。
-			if got := ModelPricingOverrideFromPricing(GetModelPricing("gpt-5.6-sol"), source); got != override {
+			if got := ModelPricingOverrideFromPricing(GetModelPricing("gpt-5.6-sol"), source); !reflect.DeepEqual(got, override) {
 				t.Fatalf("other model override changed: %+v, want %+v", got, override)
 			}
 			other := CalculateCostBreakdown(300000, 1000, 100000, "gpt-5.6-sol", "fast")

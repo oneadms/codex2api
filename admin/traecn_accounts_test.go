@@ -262,3 +262,65 @@ func containsStringFold(values []string, want string) bool {
 	}
 	return false
 }
+
+func TestAddTraeCNAccountsSyncsCatalog(t *testing.T) {
+	for _, mode := range []string{"rt", "json", "json-failure"} {
+		t.Run(mode, func(t *testing.T) {
+			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == auth.TraeCNExchangePath {
+					_, _ = w.Write([]byte(`{"token":"AT","refreshToken":"rotated-RT","expiresIn":3600,"userId":"user"}`))
+					return
+				}
+				if mode == "json-failure" {
+					http.Error(w, "catalog unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				_, _ = w.Write([]byte(`{"data":[{"id":"account-only-model"}]}`))
+			}))
+			defer provider.Close()
+			db := newTestAdminDB(t)
+			store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 1})
+			t.Cleanup(store.Stop)
+			handler := &Handler{db: db, store: store}
+			payload := map[string]any{"refresh_token": "RT", "host": provider.URL}
+			if mode != "rt" {
+				accounts, _ := json.Marshal([]map[string]any{{"refresh_token": "RT", "access_token": "AT", "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339), "host": provider.URL}})
+				payload = map[string]any{"json": string(accounts)}
+			}
+			body, _ := json.Marshal(payload)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(body)))
+			c.Request.Header.Set("Content-Type", "application/json")
+			if mode == "rt" {
+				handler.AddTraeCNAccounts(c)
+			} else {
+				handler.TraeCNImportJSON(c)
+			}
+			var response struct {
+				Items []traeCNImportItem `json:"items"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil || len(response.Items) != 1 || !response.Items[0].Stored {
+				t.Fatalf("import failed: %s (%v)", recorder.Body.String(), err)
+			}
+			item := response.Items[0]
+			row, err := db.GetAccountByID(context.Background(), item.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "json-failure" {
+				if !strings.Contains(item.Warning, "模型目录同步失败") || row.GetCredential("access_token") != "AT" {
+					t.Fatalf("failed sync lost credentials or warning: %s", recorder.Body.String())
+				}
+				return
+			}
+			if item.Warning != "" || !containsStringFold(row.GetCredentialStringSlice(auth.TraeCNUpstreamModelsCredentialKey), "account-only-model") || row.GetCredential(auth.TraeCNModelsSyncedAtCredentialKey) == "" {
+				t.Fatalf("catalog not persisted: %+v, response=%s", row.Credentials, recorder.Body.String())
+			}
+			if !store.FindByID(item.ID).TraeCNSupportsModel("account-only-model") {
+				t.Fatal("runtime catalog not updated")
+			}
+		})
+	}
+}

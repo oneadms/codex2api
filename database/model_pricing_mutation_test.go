@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -39,7 +40,7 @@ func TestAstraPricingStaysFlatAcrossSettingsLoadAndMutation(t *testing.T) {
 		Source: ModelPricingSourceCustom, Input: 10, CachedInput: 1, Output: 50,
 		InputPriority: 20, CachedInputPriority: 2, OutputPriority: 100,
 	}
-	if loaded["gpt-6-astra"] != want {
+	if !reflect.DeepEqual(loaded["gpt-6-astra"], want) {
 		t.Fatalf("loaded Astra pricing retained legacy tiers: %+v", loaded["gpt-6-astra"])
 	}
 	SetModelPricingOverrides(loaded)
@@ -66,10 +67,10 @@ func TestAstraPricingStaysFlatAcrossSettingsLoadAndMutation(t *testing.T) {
 	if err := json.Unmarshal([]byte(settings.ModelPricingOverrides), &stored); err != nil {
 		t.Fatalf("decode stored pricing: %v", err)
 	}
-	if stored["gpt-6-astra"] != want || updated["gpt-6-astra"] != want {
+	if !reflect.DeepEqual(stored["gpt-6-astra"], want) || !reflect.DeepEqual(updated["gpt-6-astra"], want) {
 		t.Fatalf("Astra tiers survived mutation: stored=%+v returned=%+v", stored["gpt-6-astra"], updated["gpt-6-astra"])
 	}
-	if stored["gpt-5.4"] != incoming["gpt-5.4"] {
+	if !reflect.DeepEqual(stored["gpt-5.4"], incoming["gpt-5.4"]) {
 		t.Fatalf("other model pricing changed: %+v", stored["gpt-5.4"])
 	}
 	SetModelPricingOverrides(nil)

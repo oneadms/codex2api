@@ -1580,6 +1580,7 @@ func (h *Handler) logUsage(input *database.UsageLogInput) {
 	// failure and transport-retry paths cannot accidentally omit it. A retry
 	// that switches accounts naturally resolves the replacement account here.
 	// Non-Grok and unresolved accounts deliberately remain legacy/unscoped (0).
+	h.prepareTraeCNUsageBilling(input)
 	input = database.SnapshotUsageLogBilling(input)
 	h.populateUsageCredentialGeneration(input)
 	// scope 维度预算（issue #439）在日志落库前先吃到这笔消耗，抵掉窗口聚合缓存的滞后。
@@ -1608,6 +1609,19 @@ func (h *Handler) logUsage(input *database.UsageLogInput) {
 	// 过载熔断统计（仅 Codex 渠道，需在渠道固化之后）。
 	h.noteOverloadOutcome(input)
 	_ = h.db.InsertUsageLog(context.Background(), input)
+}
+
+// Trae does not implement OpenAI priority/flex tiers. Preserve the requested
+// tier for auditing while billing its actual standard provider rate.
+func (h *Handler) prepareTraeCNUsageBilling(input *database.UsageLogInput) {
+	if input == nil || h.store == nil {
+		return
+	}
+	account := h.store.FindByID(input.AccountID)
+	if account != nil && account.IsTraeCNAPI() {
+		input.Channel = database.UpstreamChannelTraeCN
+		input.BillingServiceTier = "default"
+	}
 }
 
 func (h *Handler) populateUsageCredentialGeneration(input *database.UsageLogInput) {
@@ -1672,6 +1686,7 @@ func (h *Handler) logUsageForRequest(c *gin.Context, input *database.UsageLogInp
 	populateCompactUsageMetaFromRequest(c, input)
 	populateUltraUsageMetaFromRequest(c, input)
 	markCyberPolicyUsageKind(input)
+	h.prepareTraeCNUsageBilling(input)
 	input = database.SnapshotUsageLogBilling(input)
 	if deferImageUsage(c, h, input) {
 		return
@@ -4307,6 +4322,9 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 		}
 		attemptEffectiveModel := effectiveModel
 		attemptLogEffectiveModel := logEffectiveModel
+		if account.IsTraeCNAPI() {
+			attemptLogEffectiveModel = traeCNUsageEffectiveModel(account, effectiveModel)
+		}
 		// relay/Grok 账号默认走 HTTP，这里排除全局强制 WS，避免日志把它们错标成 via_websocket。
 		// 打开了上游 WebSocket 的 OpenAI Responses 中转账号在体积判断之后单独改回 WS。
 		// Excel Basispoints is HTTP/SSE only. Keep the native transport decision so
@@ -7248,6 +7266,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		isRelayAccount := account.IsRelayStyle()
 		attemptEffectiveModel := effectiveModel
 		attemptLogEffectiveModel := logEffectiveModel
+		if account.IsTraeCNAPI() {
+			attemptLogEffectiveModel = traeCNUsageEffectiveModel(account, effectiveModel)
+		}
 		useWebsocket := h.shouldUseWebsocketForHTTP() && !wsHTTPFallback.ForceHTTP() && !isRelayAccount
 		// 真实生图意图强制走 HTTP：WebSocket 传输大体积图片数据会卡死（issue #220）。
 		// 仅凭注入的 image_generation 工具不触发降级，普通请求继续走 WS（issue #304）。

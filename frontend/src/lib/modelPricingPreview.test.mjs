@@ -59,3 +59,18 @@ test('image pricing preview splits text and image inputs without long-context mu
   assert.match(preview.expression, /cached_image \* 2 \+ image_output \* 30/)
   assert.equal(preview.long, null)
 })
+
+test('imported context bands preserve every threshold in the preview', () => {
+  const preview = buildModelPricingPreview({
+    input: 0.1, cached_input: 0.02, output: 1,
+    input_long: 0.2, cached_input_long: 0.03, output_long: 2,
+    long_context_threshold_tokens: 32000,
+    context_tiers: [
+      { threshold_tokens: 32000, input: 0.2, cached_input: 0.03, output: 2 },
+      { threshold_tokens: 128000, input: 0.4, cached_input: 0.04, output: 4 },
+    ],
+  })
+  assert.match(preview.expression, /len < 32000/)
+  assert.match(preview.expression, /len < 128000/)
+  assert.match(preview.expression, /p \* 0\.4/)
+})

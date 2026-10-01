@@ -244,7 +244,7 @@ export default function PricingSyncPanel({
                   <Sparkles className="size-3.5" />
                   {t('settings.pricing.presetDefault')}
                 </Button>
-                <Button
+                {urls.modelsDev !== urls.default && <Button
                   type="button"
                   variant="outline"
                   size="sm"
@@ -254,7 +254,7 @@ export default function PricingSyncPanel({
                 >
                   <Wand2 className="size-3.5" />
                   models.dev
-                </Button>
+                </Button>}
               </div>
             </div>
 

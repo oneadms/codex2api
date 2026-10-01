@@ -174,8 +174,9 @@ func grokDefaultDisplayModelIDs() []string {
 // modelPricingRow 是定价管理页每个规范模型的一行：当前生效价 + 来源。
 type modelPricingRow struct {
 	Model          string                        `json:"model"`
-	Channel        string                        `json:"channel"` // codex / grok / antigravity / claude —— 供前端按 provider 分组
-	Source         string                        `json:"source"`  // custom / synced / default
+	Channel        string                        `json:"channel"` // codex / grok / antigravity / claude / traecn —— 供前端按 provider 分组
+	PricingMatched *bool                         `json:"pricing_matched,omitempty"`
+	Source         string                        `json:"source"` // custom / synced / default
 	Pricing        database.ModelPricingOverride `json:"pricing"`
 	CanonicalModel string                        `json:"canonical_model,omitempty"`
 	IsAlias        bool                          `json:"is_alias,omitempty"`
@@ -301,19 +302,27 @@ func (h *Handler) ListModelPricing(c *gin.Context) {
 	grokKeys := dedup(append(h.grokBillingModelIDs(), grokDefaultDisplayModelIDs()...))
 	antigravityKeys := dedup(h.antigravityChannelModels())
 	claudeKeys := dedup(h.claudeChannelModels())
+	traeCNKeys := dedup(append(h.traeCNChannelModels(), auth.TraeCNDefaultModelIDs()...))
 
 	// 每个渠道内按新版本在前排序；渠道之间整体拼接,避免版本号交叉穿插。
 	sortModelKeysNewestFirst(keys)
 	sortModelKeysNewestFirst(grokKeys)
 	sortModelKeysNewestFirst(antigravityKeys)
 	sortModelKeysNewestFirst(claudeKeys)
+	sortModelKeysNewestFirst(traeCNKeys)
 
-	rows := make([]modelPricingRow, 0, len(keys)+len(grokKeys)+len(antigravityKeys)+len(claudeKeys))
+	rows := make([]modelPricingRow, 0, len(keys)+len(grokKeys)+len(antigravityKeys)+len(claudeKeys)+len(traeCNKeys))
 	appendRows := func(modelKeys []string, channel string) {
 		for _, key := range modelKeys {
 			canonicalModel := database.PricingAliasTarget(key)
+			var matched *bool
+			if channel == database.UpstreamChannelTraeCN {
+				value := database.ModelPricingSourceFor(key) != "default"
+				matched = &value
+			}
 			rows = append(rows, modelPricingRow{
 				Model:          key,
+				PricingMatched: matched,
 				Channel:        channel,
 				Source:         database.ModelPricingSourceFor(key),
 				Pricing:        database.ModelPricingOverrideFromPricing(database.GetModelPricing(key), database.ModelPricingSourceFor(key)),
@@ -327,6 +336,7 @@ func (h *Handler) ListModelPricing(c *gin.Context) {
 	appendRows(grokKeys, database.UpstreamChannelGrok)
 	appendRows(antigravityKeys, database.UpstreamChannelAntigravity)
 	appendRows(claudeKeys, database.UpstreamChannelClaude)
+	appendRows(traeCNKeys, database.UpstreamChannelTraeCN)
 
 	syncURL := ""
 	if s, err := h.db.GetSystemSettings(ctx); err == nil && s != nil {
@@ -386,6 +396,8 @@ func (h *Handler) UpdateModelPricing(c *gin.Context) {
 			return nil
 		}
 		ov := *req.Pricing
+		// Manual prices replace the imported context bands.
+		ov.ContextTiers = nil
 		ov.Source = database.ModelPricingSourceCustom
 		overrides[key] = ov
 		return nil

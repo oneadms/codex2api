@@ -262,9 +262,10 @@ func (h *Handler) ClaimTraeCNOAuthAccount(c *gin.Context) {
 	if !enabled {
 		_ = h.db.SetAccountEnabled(ctx, id, false)
 	}
-	h.finalizeTraeCNImportedAccounts(ctx, []int64{id}, groupIDs, "oauth_traecn", enabled)
+	warnings := h.finalizeTraeCNImportedAccounts(ctx, []int64{id}, groupIDs, "oauth_traecn", enabled)
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Trae CN 账号已通过 OAuth 添加",
+		"warning": warnings[id],
 		"id":      id,
 		"email":   account.Email,
 		"user_id": account.UserID,
@@ -434,9 +435,9 @@ func (h *Handler) insertTraeCNAccountFromCredentials(ctx context.Context, name, 
 }
 
 // finalizeTraeCNImportedAccounts 统一处理导入后的收尾动作（事件、内存态、分组）。
-func (h *Handler) finalizeTraeCNImportedAccounts(ctx context.Context, ids []int64, groupIDs []int64, source string, enabled bool) {
+func (h *Handler) finalizeTraeCNImportedAccounts(ctx context.Context, ids []int64, groupIDs []int64, source string, enabled bool) map[int64]string {
 	if len(ids) == 0 {
-		return
+		return nil
 	}
 	h.db.BatchInsertAccountEventsAsync(ids, "added", source)
 	for _, id := range ids {
@@ -448,6 +449,7 @@ func (h *Handler) finalizeTraeCNImportedAccounts(ctx context.Context, ids []int6
 		}
 	}
 	_ = h.bindImportedAccountGroups(ctx, ids, groupIDs)
+	return h.syncImportedTraeCNModels(ctx, ids)
 }
 
 func traeCNOAuthHTMLEscape(raw string) string {
@@ -763,7 +765,12 @@ func (h *Handler) TraeCNImportJSON(c *gin.Context) {
 		}
 		results = append(results, result)
 	}
-	h.finalizeTraeCNImportedAccounts(ctx, createdIDs, groupIDs, "json_import_traecn", enabled)
+	warnings := h.finalizeTraeCNImportedAccounts(ctx, createdIDs, groupIDs, "json_import_traecn", enabled)
+	for index := range results {
+		if warning := warnings[results[index].ID]; warning != "" {
+			results[index].Warning = strings.Trim(strings.Join([]string{results[index].Warning, warning}, "；"), "；")
+		}
+	}
 	success := 0
 	for _, item := range results {
 		if item.Stored {

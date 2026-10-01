@@ -1299,6 +1299,7 @@ export interface TraeCNOAuthCompleteResponse extends MessageResponse {
 }
 
 export interface TraeCNOAuthClaimResponse extends MessageResponse {
+  warning?: string
   id: number
   email?: string
   user_id?: string
@@ -3921,6 +3922,7 @@ export interface ChartAggregation {
 }
 
 export interface ModelPricingOverride {
+  context_tiers?: Array<{ threshold_tokens: number; input: number; output: number; cached_input: number; cache_write_5m?: number }>
   user_billing_mode?: UserBillingMode
   image_unit_price?: number
   /** Upstream cost per media unit (USD / image or USD / second) for Grok Imagine models. */
