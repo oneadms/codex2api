@@ -27,9 +27,9 @@ func TestTraeCNModelMappingAllProtocols(t *testing.T) {
 			body   string
 			invoke func(*Handler, *gin.Context)
 		}{
-			{"/v1/responses", `{"input":"read file"}`, (*Handler).Responses},
-			{"/v1/chat/completions", `{"messages":[{"role":"user","content":"read file"}]}`, (*Handler).ChatCompletions},
-			{"/v1/messages", `{"max_tokens":64,"messages":[{"role":"user","content":"read file"}]}`, (*Handler).Messages},
+			{"/v1/responses", `{"max_output_tokens":32,"input":"read file"}`, (*Handler).Responses},
+			{"/v1/chat/completions", `{"max_tokens":64,"max_completion_tokens":32,"messages":[{"role":"user","content":"read file"}]}`, (*Handler).ChatCompletions},
+			{"/v1/messages", `{"max_tokens":32,"messages":[{"role":"user","content":"read file"}]}`, (*Handler).Messages},
 		} {
 			for _, model := range []string{"gpt-5.6-sol", "claude-opus-4-6"} {
 				t.Run(fmt.Sprintf("%s/%s/stream=%t", tc.path, model, stream), func(t *testing.T) {
@@ -41,6 +41,11 @@ func TestTraeCNModelMappingAllProtocols(t *testing.T) {
 						body, _ := io.ReadAll(r.Body)
 						if gjson.GetBytes(body, "model").String() != "Doubao_1_6" {
 							t.Errorf("wrong upstream model: %s", body)
+						}
+						for _, field := range []string{"max_tokens", "max_output_tokens", "max_completion_tokens"} {
+							if gjson.GetBytes(body, field).Exists() {
+								t.Errorf("client output limit %s leaked to Trae CN: %s", field, body)
+							}
 						}
 						w.Header().Set("Content-Type", "text/event-stream")
 						io.WriteString(w, traeCNNativeReadFileOutput+"event: done\ndata: {\"finish_reason\":\"stop\"}\n\n")

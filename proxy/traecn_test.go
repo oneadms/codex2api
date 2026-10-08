@@ -75,7 +75,10 @@ func TestBuildTraeCNRequestBodyPreservesCanonicalSemantics(t *testing.T) {
 	if root.Get("tools.0.function.name").String() != "lookup" || root.Get("tool_choice").String() != "auto" {
 		t.Fatalf("tools were not converted: %s", body)
 	}
-	if root.Get("max_tokens").Int() != 123 || root.Get("reasoning_effort").String() != "high" || root.Get("stop.0").String() != "END" {
+	if root.Get("max_tokens").Exists() {
+		t.Fatalf("client output limit leaked to Trae CN: %s", body)
+	}
+	if root.Get("reasoning_effort").String() != "high" || root.Get("stop.0").String() != "END" {
 		t.Fatalf("generation parameters were not preserved: %s", body)
 	}
 }

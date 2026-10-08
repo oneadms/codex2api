@@ -215,7 +215,7 @@ func (h *Handler) testConnection(c *gin.Context, quality *qualityTestRequest) {
 		claudeFingerprintMode = account.EffectiveClaudeFingerprintMode(h.store.ClaudeFingerprintModeDefault())
 	}
 	if quality == nil && !hasPrompt && !isClaudeAccount {
-		payload = buildConnectionTestPayloadForAccount(h.store, account, testModel)
+		payload = buildConnectionTestPayload(h.store, testModel)
 	}
 
 	// 发送请求
@@ -505,17 +505,6 @@ func buildConnectionTestPayload(store *auth.Store, model string) []byte {
 	// 多行内容按行随机抽取 + 变量展开（issue #320），减少批量账号
 	// 共用同一句测活内容的指纹特征。单行配置行为不变。
 	return buildTestPayloadWithContent(model, auth.RenderTestContent(content))
-}
-
-func buildConnectionTestPayloadForAccount(store *auth.Store, account *auth.Account, model string) []byte {
-	payload := buildConnectionTestPayload(store, model)
-	if account != nil && account.IsTraeCNAPI() {
-		// Keep the provider probe small and match the desktop llm_utils_chat
-		// envelope. Omitting max_tokens is accepted by some concrete models but
-		// has produced inconsistent auto/inline_chat routing failures.
-		payload, _ = sjson.SetBytes(payload, "max_output_tokens", 64)
-	}
-	return payload
 }
 
 // buildClaudeConnectionTestPayload builds the native Anthropic Messages
@@ -1753,7 +1742,7 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 	securityCfg := h.store.ClaudeSecurityConfig()
 	payload := h.buildAccountConnectionTestPayload(testCtx, acc, testModel, securityCfg)
 	if !acc.IsClaudeOAuth() {
-		payload = buildConnectionTestPayloadForAccount(h.store, acc, testModel)
+		payload = buildConnectionTestPayload(h.store, testModel)
 	}
 	start := time.Now()
 
@@ -1910,7 +1899,7 @@ func (h *Handler) runRecycleBinSingleTest(ctx context.Context, acc *auth.Account
 	claudeSecurityCfg := h.store.ClaudeSecurityConfig()
 	payload := h.buildAccountConnectionTestPayload(testCtx, acc, testModel, claudeSecurityCfg)
 	if !acc.IsClaudeOAuth() {
-		payload = buildConnectionTestPayloadForAccount(h.store, acc, testModel)
+		payload = buildConnectionTestPayload(h.store, testModel)
 	}
 
 	var resp *http.Response

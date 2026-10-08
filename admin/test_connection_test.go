@@ -182,16 +182,15 @@ func TestBuildConnectionTestPayloadUsesStoreContent(t *testing.T) {
 	}
 }
 
-func TestBuildConnectionTestPayloadForTraeCNUsesSmallOutputLimit(t *testing.T) {
+func TestBuildConnectionTestPayloadLeavesOutputLimitToUpstream(t *testing.T) {
 	t.Parallel()
-	account := &auth.Account{UpstreamType: auth.UpstreamTraeCN, AccessToken: "trae-at"}
-	payload := buildConnectionTestPayloadForAccount(nil, account, "auto")
-	if got := gjson.GetBytes(payload, "max_output_tokens").Int(); got != 64 {
-		t.Fatalf("max_output_tokens = %d, want 64; payload=%s", got, payload)
-	}
-	ordinary := buildConnectionTestPayloadForAccount(nil, &auth.Account{AccessToken: "codex-at"}, "gpt-5.5")
-	if gjson.GetBytes(ordinary, "max_output_tokens").Exists() {
-		t.Fatalf("Trae-specific output limit leaked to ordinary probe: %s", ordinary)
+	for _, model := range []string{"auto", "gpt-5.5"} {
+		payload := buildConnectionTestPayload(nil, model)
+		for _, field := range []string{"max_tokens", "max_output_tokens", "max_completion_tokens"} {
+			if gjson.GetBytes(payload, field).Exists() {
+				t.Fatalf("probe output limit %s was set for %s: %s", field, model, payload)
+			}
+		}
 	}
 }
 

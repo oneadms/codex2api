@@ -389,13 +389,8 @@ func traeCNRequestBodyPlan(canonical []byte, knownConfigSets ...[]string) ([]byt
 	if effort := strings.TrimSpace(root.Get("reasoning.effort").String()); effort != "" {
 		body["reasoning_effort"] = effort
 	}
-	if maxTokens := root.Get("max_output_tokens"); maxTokens.Exists() {
-		body["max_tokens"] = maxTokens.Value()
-	} else if maxTokens := root.Get("max_completion_tokens"); maxTokens.Exists() {
-		body["max_tokens"] = maxTokens.Value()
-	} else if maxTokens := root.Get("max_tokens"); maxTokens.Exists() {
-		body["max_tokens"] = maxTokens.Value()
-	}
+	// 不转发客户端的 token 上限，使用 Trae CN 上游默认输出额度，
+	// 避免过小的 max_tokens 截断内容或工具调用参数。
 	for _, field := range []string{"temperature", "top_p", "presence_penalty", "frequency_penalty"} {
 		if value := root.Get(field); value.Exists() {
 			body[field] = value.Value()
