@@ -39,9 +39,21 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Activity, Box, Clock, Zap, Sparkles, AlertTriangle, Search, Brain, DatabaseZap, DatabaseBackup, X, Image as ImageIcon, Info, CircleDollarSign, BarChart3, KeyRound, Route, SlidersHorizontal, ShieldAlert, RefreshCw, ChevronDown, RotateCcw, PlugZap, FlaskConical } from 'lucide-react'
+import { createLucideIcon, Activity, Box, Clock, Zap, Sparkles, AlertTriangle, Search, Brain, DatabaseZap, X, Image as ImageIcon, Info, CircleDollarSign, BarChart3, KeyRound, Route, SlidersHorizontal, ShieldAlert, RefreshCw, ChevronDown, RotateCcw, PlugZap, FlaskConical } from 'lucide-react'
+
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
+
+// 缓存写入图标:取 Lucide (ISC) 的 database-plus,与读取用的 DatabaseZap 成对。
+// 锁定的 lucide-react 1.0.1 还没收录它,升级前在这里按同一路径注册。
+const DatabasePlus = createLucideIcon('database-plus', [
+  ['path', { d: 'M19 16v6', key: 'tddt3s' }],
+  ['path', { d: 'M21 12.536V5', key: 'zeza6i' }],
+  ['path', { d: 'M22 19h-6', key: 'vcuq98' }],
+  ['path', { d: 'M3 12A9 3 0 0 0 15.1824 14.8061', key: 'ukc3b1' }],
+  ['path', { d: 'M3 5V19A9 3 0 0 0 13.318 21.968', key: '1lyu4j' }],
+  ['ellipse', { cx: '12', cy: '5', rx: '9', ry: '3', key: 'msslwz' }],
+])
 
 /** Color ramp for reasoning effort: cool/muted → hot/intense. */
 function getReasoningEffortBadgeClassName(effort: string): string {
@@ -67,6 +79,19 @@ function getReasoningEffortBadgeClassName(effort: string): string {
     default:
       return 'border-transparent bg-muted text-muted-foreground'
   }
+}
+
+function usageRequestedModelTitle(
+  log: UsageLog,
+  ultraHint: string,
+  filterHint: string,
+): string {
+  const actual = log.effective_model?.trim()
+  const parts: string[] = []
+  if (log.ultra) parts.push(ultraHint)
+  if (actual && actual !== log.model) parts.push(actual)
+  parts.push(filterHint)
+  return parts.join('\n')
 }
 
 function ReasoningEffortBadge({ effort }: { effort: string }) {
@@ -1039,12 +1064,7 @@ function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
       ? t('usage.userAgentOverridden')
       : t('usage.userAgentPreserved')
 
-  // Turn State 注入/回带观测:有任一值就要把 trace 单元格渲染出来,否则运维看不到注入证据。
-  const injectedTurnState = (log.injected_turn_state ?? '').trim()
-  const upstreamTurnState = (log.upstream_turn_state ?? '').trim()
-  const hasTurnState = Boolean(injectedTurnState || upstreamTurnState)
-
-  if (!hasAudit && !log.request_id && !log.upstream_request_id && !hasTurnState) {
+  if (!hasAudit && !log.request_id && !log.upstream_request_id) {
     return (
       <div className="font-mono text-[11px] text-muted-foreground" title={t('usage.userAgentNotRecorded')}>
         UA: -
@@ -1067,39 +1087,10 @@ function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
   // 客户端与上游 UA 完全一致且未改写:合成一行(C=U),两行会重复同一串字符串白占行高。
   const sameUA = !log.user_agent_overridden && Boolean(clientUserAgent) && clientUserAgent === upstreamUserAgent
 
-  // 单元格里只放一个 TS 小标记,完整值进 tooltip,避免撑宽列。
-  const turnStateChip = hasTurnState ? (
-    <span
-      className="ml-1.5 inline-flex shrink-0 items-center rounded bg-muted px-1 font-sans text-[9px] font-semibold uppercase tracking-wide text-muted-foreground/80"
-      title={[
-        injectedTurnState ? `${t('usage.injectedTurnState')}: ${injectedTurnState}` : '',
-        upstreamTurnState ? `${t('usage.upstreamTurnState')}: ${upstreamTurnState}` : '',
-      ].filter(Boolean).join('\n')}
-    >
-      TS
-    </span>
-  ) : null
-  const idLine = log.request_id || hasTurnState ? (
-    <div className="flex min-w-0 items-center text-muted-foreground" title={log.request_id ? `Request ID: ${log.request_id}` : undefined}>
-      {log.request_id ? <span className="min-w-0 truncate">ID: {log.request_id}</span> : null}
-      {turnStateChip}
+  const idLine = log.request_id ? (
+    <div className="min-w-0 truncate text-muted-foreground" title={`Request ID: ${log.request_id}`}>
+      ID: {log.request_id}
     </div>
-  ) : null
-  const turnStateRows = hasTurnState ? (
-    <>
-      {injectedTurnState ? (
-        <div className="flex items-start gap-2">
-          <div className="min-w-0 flex-1 break-all font-mono">{t('usage.injectedTurnState')}: {injectedTurnState}</div>
-          <button type="button" onClick={() => void navigator.clipboard?.writeText(injectedTurnState)} className="shrink-0 text-xs font-medium text-primary hover:underline">{t('common.copy')}</button>
-        </div>
-      ) : null}
-      {upstreamTurnState ? (
-        <div className="flex items-start gap-2">
-          <div className="min-w-0 flex-1 break-all font-mono">{t('usage.upstreamTurnState')}: {upstreamTurnState}</div>
-          <button type="button" onClick={() => void navigator.clipboard?.writeText(upstreamTurnState)} className="shrink-0 text-xs font-medium text-primary hover:underline">{t('common.copy')}</button>
-        </div>
-      ) : null}
-    </>
   ) : null
 
   const content = sameUA ? (
@@ -1150,7 +1141,6 @@ function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
           {log.request_id ? <div className="break-all font-mono">Request ID: {log.request_id}</div> : null}
           {log.upstream_request_id ? <div className="break-all font-mono">Upstream ID: {log.upstream_request_id}</div> : null}
           {log.upstream_proxy_name ? <div className="break-all">Proxy: {log.upstream_proxy_name}{log.upstream_proxy_id ? ` (#${log.upstream_proxy_id})` : ''}</div> : null}
-          {turnStateRows}
           <div className="font-semibold">{statusLabel}</div>
           {log.via_websocket ? (
             <div className="leading-relaxed text-background/70">{t('usage.userAgentWebSocketHint')}</div>
@@ -1163,34 +1153,6 @@ function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
 
 // New usage rows resolve by immutable incident ID. Only historical rows without
 // an ID fall back to the legacy nearest-timestamp inference endpoint.
-function TurnStateCell({ log }: { log: UsageLog }) {
-  const { t } = useTranslation()
-  const note = log.turn_state_rewrite_note?.trim() || ''
-  const overridden = Boolean(log.turn_state_overridden)
-  if (!note && !overridden) {
-    return null
-  }
-  const label = overridden
-    ? (note || t('usage.turnStateOverridden'))
-    : (note === 'pass' ? t('usage.turnStatePreserved') : (note || t('usage.turnStatePreserved')))
-  return (
-    <div className="mt-1 flex min-w-0 items-center gap-1.5 font-mono text-[11px] leading-relaxed" title={t('usage.turnStateLabel')}>
-      <span className="shrink-0 font-sans font-semibold text-muted-foreground">TS</span>
-      <Badge
-        variant="outline"
-        className={`shrink-0 border-transparent px-1.5 py-0 text-[10px] font-semibold ${
-          overridden
-            ? 'bg-amber-500/12 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300'
-            : 'bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300'
-        }`}
-      >
-        {label}
-      </Badge>
-    </div>
-  )
-}
-
-
 function CyberPolicyDetailButton({ log }: { log: UsageLog }) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
@@ -1368,7 +1330,7 @@ function UsageCacheBadges({ log, align = 'end' }: { log: UsageLog; align?: 'star
       )}
       {tokens.cacheWriteTokens > 0 && (
         <Badge variant="outline" title={writeTitle} aria-label={writeTitle} className={`${usageTableBadgeClass} gap-1 border-transparent bg-amber-500/10 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400`}>
-          <DatabaseBackup className="size-3.5" aria-hidden="true" />
+          <DatabasePlus className="size-3.5" aria-hidden="true" />
           {formatTokens(tokens.cacheWriteTokens, true)}
         </Badge>
       )}
@@ -1743,6 +1705,8 @@ export default function Usage() {
   const [filterFast, setFilterFast] = useState('')
   const [filterUltra, setFilterUltra] = useState('')
   const [filterModelMismatch, setFilterModelMismatch] = useState(false)
+  // 关闭「显示上游模型不一致」后，筛选参数不再带上这项；ref 让筛选回调不用等设置加载完再重建。
+  const showUpstreamModelMismatchRef = useRef(true)
   const [filterType, setFilterType] = useState<UsageTypeFilter>('')
   const [filterErrorKind, setFilterErrorKind] = useState('')
   const [filterRetry, setFilterRetry] = useState<UsageRetryFilter>('')
@@ -1782,7 +1746,7 @@ export default function Usage() {
 
   const loadAPIKeys = useCallback(async () => {
     try {
-      const response = await api.getAPIKeys()
+      const response = await api.getAPIKeys({ view: 'lite' })
       setAPIKeys(response.keys ?? [])
       setAPIKeyLoadFailed(false)
     } catch {
@@ -1805,7 +1769,7 @@ export default function Usage() {
       accountId: filterAccountId || undefined,
       fast: filterFast || undefined,
       ultra: filterUltra || undefined,
-      upstreamModelMismatch: filterModelMismatch ? 'true' : undefined,
+      upstreamModelMismatch: showUpstreamModelMismatchRef.current && filterModelMismatch ? 'true' : undefined,
       stream: filterType === 'stream' ? 'true' : filterType === 'sync' ? 'false' : undefined,
       compact: filterType === 'compact' ? 'true' : undefined,
       hasCompactionHistory: filterType === 'history' ? 'true' : undefined,
@@ -1949,6 +1913,15 @@ export default function Usage() {
 
   const { stats, settings } = data
   const showFullUsageNumbers = settings?.show_full_usage_numbers ?? false
+  const showUpstreamModelMismatch = settings?.show_upstream_model_mismatch !== false
+  showUpstreamModelMismatchRef.current = showUpstreamModelMismatch
+
+  useEffect(() => {
+    if (!showUpstreamModelMismatch && filterModelMismatch) {
+      setFilterModelMismatch(false)
+      setPage(1)
+    }
+  }, [showUpstreamModelMismatch, filterModelMismatch])
   const totalPages = Math.max(1, Math.ceil(logsTotal / pageSize))
   const currentPage = Math.min(page, totalPages)
 
@@ -2021,7 +1994,7 @@ export default function Usage() {
     filterType,
     filterFast,
     filterUltra,
-    filterModelMismatch ? 'true' : '',
+    showUpstreamModelMismatch && filterModelMismatch ? 'true' : '',
     filterErrorKind,
     filterRetry,
     filterTransport,
@@ -2036,7 +2009,7 @@ export default function Usage() {
     || filterType
     || filterFast
     || filterUltra
-    || filterModelMismatch
+    || (showUpstreamModelMismatch && filterModelMismatch)
     || filterErrorKind
     || filterRetry
     || filterTransport,
@@ -2613,20 +2586,22 @@ export default function Usage() {
                     <Sparkles className="size-3.5" />
                     Ultra
                   </button>
-                  <button
-                    type="button"
-                    title={t('usage.filterModelMismatchHint')}
-                    onClick={() => { setFilterModelMismatch(!filterModelMismatch); setPage(1) }}
-                    className={cn(
-                      'inline-flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-2.5 text-[13px] font-medium transition-colors',
-                      filterModelMismatch
-                        ? 'border-orange-500/40 bg-orange-500/12 text-orange-600 dark:bg-orange-500/20 dark:text-orange-300'
-                        : 'border-border bg-background text-muted-foreground hover:bg-muted/50 hover:text-foreground',
-                    )}
-                  >
-                    <AlertTriangle className="size-3.5" />
-                    {t('usage.filterModelMismatch')}
-                  </button>
+                  {showUpstreamModelMismatch ? (
+                    <button
+                      type="button"
+                      title={t('usage.filterModelMismatchHint')}
+                      onClick={() => { setFilterModelMismatch(!filterModelMismatch); setPage(1) }}
+                      className={cn(
+                        'inline-flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-2.5 text-[13px] font-medium transition-colors',
+                        filterModelMismatch
+                          ? 'border-orange-500/40 bg-orange-500/12 text-orange-600 dark:bg-orange-500/20 dark:text-orange-300'
+                          : 'border-border bg-background text-muted-foreground hover:bg-muted/50 hover:text-foreground',
+                      )}
+                    >
+                      <AlertTriangle className="size-3.5" />
+                      {t('usage.filterModelMismatch')}
+                    </button>
+                  ) : null}
                   </div>
                 </div>
               ) : null}
@@ -2638,20 +2613,20 @@ export default function Usage() {
               emptyTitle={t('usage.emptyTitle')}
               emptyDescription={hasActiveFilters ? t('usage.emptyFilteredDesc') : t('usage.emptyDesc')}
             >
-              {/* Mobile log cards */}
+              {/* 手机日志卡片：显式单列避免长 UA / 模型名撑宽隐式 Grid 列。 */}
               <TooltipProvider>
-              <div className="grid gap-3 lg:hidden">
+              <div className="grid grid-cols-1 gap-3 lg:hidden">
                 {logs.map((log: UsageLog) => {
                   const hasDetails = visibleColumns.account || visibleColumns.apiKey || visibleColumns.clientIp || visibleColumns.endpoint || visibleColumns.userAgent
                   const hasMetrics = visibleColumns.token || visibleColumns.cached || visibleColumns.timing || visibleColumns.tokensPerSec || visibleColumns.cost
                   return (
                     <div
                       key={log.id}
-                      className="rounded-xl border border-border bg-background/70 p-3.5 shadow-sm"
+                      className="min-w-0 rounded-xl border border-border bg-background/70 p-3.5 shadow-sm"
                     >
                       {/* flex-wrap + nowrap 时间：徽标再多也只会把时间挤到下一行，不会挤出视口（issue #522） */}
                       <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
                           {visibleColumns.status && (
                             <button
                               type="button"
@@ -2674,10 +2649,14 @@ export default function Usage() {
                           {visibleColumns.model && (
                             <Badge
                               variant="outline"
-                              className={`${usageTableBadgeClass} ${usageClickableFilterClass} ${log.ultra ? 'usage-ultra-model' : ''} ${filterModel === log.model ? 'border-primary/50 text-primary' : ''}`}
+                              className={`${usageTableBadgeClass} ${usageClickableFilterClass} max-w-full whitespace-normal ${log.ultra ? 'usage-ultra-model' : ''} ${filterModel === log.model ? 'border-primary/50 text-primary' : ''}`}
                               role="button"
                               tabIndex={0}
-                              title={`${log.ultra ? `${t('usage.ultraModeHint')} · ` : ''}${t('usage.filterByModelHint', { model: log.model || '-' })}`}
+                              title={usageRequestedModelTitle(
+                                log,
+                                t('usage.ultraModeHint'),
+                                t('usage.filterByModelHint', { model: log.model || '-' }),
+                              )}
                               onClick={() => toggleModelFilter(log.model)}
                               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleModelFilter(log.model) } }}
                             >
@@ -2689,7 +2668,7 @@ export default function Usage() {
                                   title={log.channel === 'grok' ? 'Grok' : log.channel === 'antigravity' ? 'Antigravity' : log.channel === 'traecn' ? 'TRAECN' : log.channel === 'claude' ? 'Claude' : 'Codex'}
                                 />
                               )}
-                              {log.model || '-'}
+                              <span className="min-w-0 break-all text-left">{log.model || '-'}</span>
                             </Badge>
                           )}
                           {log.reasoning_effort ? (
@@ -2711,7 +2690,7 @@ export default function Usage() {
                             hasCompactionHistory={log.has_compaction_history}
                           />
                           <InternalRequestBadge log={log} />
-                          {log.upstream_model_mismatch === true && log.upstream_response_model && (
+                          {showUpstreamModelMismatch && log.upstream_model_mismatch === true && log.upstream_response_model && (
                             <UpstreamResponseModelBadge log={log} sentModel={log.effective_model || log.model} />
                           )}
                         </div>
@@ -2761,14 +2740,14 @@ export default function Usage() {
                           )}
                           {visibleColumns.userAgent && (
                             <div className="border-t border-border/60 pt-2">
-                              <div><UserAgentCell log={log} mobile /><TurnStateCell log={log} /></div>
+                              <UserAgentCell log={log} mobile />
                             </div>
                           )}
                         </div>
                       )}
 
                       {hasMetrics && (
-                        <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+                        <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
                           {visibleColumns.token && (
                             <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
                               <div className="text-[11px] font-semibold text-muted-foreground">{t('usage.tableToken')}</div>
@@ -2910,7 +2889,11 @@ export default function Usage() {
                               className={`${usageTableBadgeClass} ${usageClickableFilterClass} ${log.ultra ? 'usage-ultra-model' : ''} ${filterModel === log.model ? 'border-primary/50 text-primary' : ''}`}
                               role="button"
                               tabIndex={0}
-                              title={`${log.ultra ? `${t('usage.ultraModeHint')} · ` : ''}${t('usage.filterByModelHint', { model: log.model || '-' })}`}
+                              title={usageRequestedModelTitle(
+                                log,
+                                t('usage.ultraModeHint'),
+                                t('usage.filterByModelHint', { model: log.model || '-' }),
+                              )}
                               onClick={() => toggleModelFilter(log.model)}
                               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleModelFilter(log.model) } }}
                             >
@@ -2924,11 +2907,6 @@ export default function Usage() {
                               )}
                               {log.model || '-'}
                             </Badge>
-                            {log.effective_model && log.effective_model !== log.model && (
-                              <Badge variant="outline" className="text-[11px] font-medium border-transparent bg-blue-500/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400">
-                                → {log.effective_model}
-                              </Badge>
-                            )}
                             {log.reasoning_effort ? (
                               <ReasoningEffortBadge effort={log.reasoning_effort} />
                             ) : null}
@@ -2945,7 +2923,7 @@ export default function Usage() {
                                 {formatServiceTierLabel(t, log.billing_service_tier || log.service_tier)}
                               </Badge>
                             )}
-                            {log.upstream_model_mismatch === true && log.upstream_response_model && (
+                            {showUpstreamModelMismatch && log.upstream_model_mismatch === true && log.upstream_response_model && (
                               <UpstreamResponseModelBadge log={log} sentModel={log.effective_model || log.model} />
                             )}
                           </div>
@@ -2977,7 +2955,7 @@ export default function Usage() {
                           </span>
                         </TableCell>}
                         {visibleColumns.userAgent && <TableCell>
-                          <div><UserAgentCell log={log} /><TurnStateCell log={log} /></div>
+                          <UserAgentCell log={log} />
                         </TableCell>}
                         {visibleColumns.endpoint && <TableCell>
                           <div

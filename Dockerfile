@@ -19,7 +19,7 @@ RUN VITE_APP_VERSION=${BUILD_VERSION} npm run build
 # Stage 2: 构建 Go 后端
 # 使用 BUILDPLATFORM 原生运行 + TARGETARCH 交叉编译
 # ============================================================
-FROM --platform=$BUILDPLATFORM golang:1.26.6-alpine AS go-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.9-alpine AS go-builder
 
 ARG TARGETARCH
 ARG BUILD_VERSION=dev
@@ -41,7 +41,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 # This stage follows TARGETPLATFORM. The cross-build stage's Go executable
 # follows BUILDPLATFORM and would not run in an arm64 runtime image.
-FROM golang:1.26.6-alpine AS diagnostic-toolchain
+FROM golang:1.26.9-alpine AS diagnostic-toolchain
 
 # ============================================================
 # Stage 3: 最终运行镜像

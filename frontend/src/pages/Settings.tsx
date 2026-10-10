@@ -2,17 +2,17 @@ import type { ChangeEvent, FocusEvent, ReactNode } from 'react'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { api, resetAdminAuthState, setAdminKey } from '../api'
-import { formatBeijingTime, getTimezone, setTimezone } from '../utils/time'
+import { formatBeijingTime } from '../utils/time'
+import DisplayTimezoneSelect from '../components/DisplayTimezoneSelect'
 import PageHeader from '../components/PageHeader'
+import CodexClientVersionsPanel from '../components/CodexClientVersionsPanel'
 import StateShell from '../components/StateShell'
 import TraeCNModelMapping from '../components/TraeCNModelMapping'
 import TraeCNPreflightPassthrough from '../components/TraeCNPreflightPassthrough'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
-import type { AntigravityOAuthClientSetting, AntigravitySettingsResponse, ChannelTestSettings, CodexUserAgentCatalog, CodexUserAgentPreview, HealthResponse, ModelInfo, SiteBranding, SystemSettings, UpstreamChannel } from '../types'
+import type { AntigravityOAuthClientSetting, AntigravitySettingsResponse, ChannelTestSettings, CodexClientVersionSyncResult, CodexClientVersionTarget, CodexUserAgentCatalog, CodexUserAgentPreview, HealthResponse, ModelInfo, SiteBranding, SystemSettings, UpstreamChannel } from '../types'
 import { ANTIGRAVITY_DEFAULT_MODELS } from '../lib/antigravityModels'
-import { EXCEL_BPS_KNOWN_MODELS, excelBpsModelOptions, formatExcelBpsModels, parseExcelBpsModels } from '../lib/excelBpsModels'
-import ChipInput from '../components/ChipInput'
 import { countPayloadRules, PAYLOAD_RULE_GROUPS } from './PayloadRules'
 import { getErrorMessage } from '../utils/error'
 import { DEFAULT_CLAUDE_MODEL_MAP } from '../lib/modelMapping'
@@ -162,6 +162,20 @@ const CODEX_CLIENT_SYNC_SOURCES = [
   { key: 'vscode', label: 'VS Code' },
 ] as const
 type CodexClientSyncSource = (typeof CODEX_CLIENT_SYNC_SOURCES)[number]['key']
+
+// 设置接口只返回最后一次成功的配对；本次同步失败的目标把状态与错误叠加上去，面板才能显示失败原因。
+function overlayCodexClientSyncFailures(targets: CodexClientVersionTarget[], result: Record<CodexClientSyncSource, CodexClientVersionSyncResult>): CodexClientVersionTarget[] {
+  const failures = new Map<string, CodexClientVersionTarget>()
+  for (const source of CODEX_CLIENT_SYNC_SOURCES) {
+    for (const target of result[source.key].targets ?? []) {
+      if (target.error) failures.set(`${target.client_kind}/${target.target_platform}`, target)
+    }
+  }
+  return targets.map((target) => {
+    const failure = failures.get(`${target.client_kind}/${target.target_platform}`)
+    return failure ? { ...target, status: failure.status, error: failure.error } : target
+  })
+}
 const CODEX_UA_FALLBACK_POOL_MIX: Record<string, number> = { 'codex-desktop': 50, 'codex-vscode': 30, 'codex-tui': 20 }
 const CODEX_UA_STRING_KEYS = ['raw_user_agent', 'client_name', 'client_version', 'os_name', 'os_version', 'arch', 'terminal', 'client_kind', 'app_name', 'app_version', 'mode'] as const
 // 与后端 inferCodexClientKind 同规则:未指定形态的旧配置按客户端名推断。
@@ -987,6 +1001,59 @@ function AntigravityModelRedirectCard() {
             onCheckedChange={(checked) => void save({ redirect_overrides_effort: checked })}
           />
         </div>
+      </div>
+    </SettingsCard>
+  )
+}
+
+// Antigravity 思考内容下发:开启后 OAuth 账号的 Gemini thought 片段作为 reasoning 输出下发。
+function AntigravityThinkingCard() {
+  const { t } = useTranslation()
+  const { showToast } = useToast()
+  const [exposeThoughts, setExposeThoughts] = useState<boolean | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    void api.getAntigravitySettings().then((response) => {
+      if (active) setExposeThoughts(response.expose_thoughts)
+    }).catch((error) => {
+      if (active) showToast(getErrorMessage(error), 'error')
+    })
+    return () => {
+      active = false
+    }
+  }, [showToast])
+
+  const save = useCallback(async (checked: boolean) => {
+    setSaving(true)
+    try {
+      const response = await api.updateAntigravitySettings({ expose_thoughts: checked })
+      setExposeThoughts(response.expose_thoughts)
+      showToast(t('settings.antigravityThinking.saved'), 'success')
+    } catch (error) {
+      showToast(getErrorMessage(error), 'error')
+    } finally {
+      setSaving(false)
+    }
+  }, [showToast, t])
+
+  return (
+    <SettingsCard
+      title={t('settings.antigravityThinking.title')}
+      description={t('settings.antigravityThinking.description')}
+      icon={<Brain className="size-4" />}
+    >
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2.5">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">{t('settings.antigravityThinking.label')}</div>
+          <p className="mt-0.5 text-xs text-muted-foreground">{t('settings.antigravityThinking.hint')}</p>
+        </div>
+        <Switch
+          checked={exposeThoughts ?? false}
+          disabled={exposeThoughts === null || saving}
+          onCheckedChange={(checked) => void save(checked)}
+        />
       </div>
     </SettingsCard>
   )
@@ -2494,6 +2561,7 @@ export default function Settings() {
       codex_images_main_model: cacheNormalized.codex_images_main_model ?? '',
       codex_telemetry_enabled: cacheNormalized.codex_telemetry_enabled ?? false,
       codex_telemetry_timing_debug: cacheNormalized.codex_telemetry_timing_debug ?? false,
+      codex_unified_client_identity_enabled: cacheNormalized.codex_unified_client_identity_enabled ?? false,
       billing_tier_policy: normalizeBillingTierPolicyValue(cacheNormalized.billing_tier_policy),
       first_token_mode: 'loose',
       models_list_read_max_bytes:
@@ -2550,13 +2618,8 @@ export default function Settings() {
     codex_force_websocket: false,
     codex_telemetry_enabled: false,
     codex_telemetry_timing_debug: false,
+    codex_unified_client_identity_enabled: false,
     codex_request_compression: true,
-    codex_basispoints_enabled: false,
-    codex_basispoints_models: '',
-    codex_basispoints_403_auto_pause: true,
-    codex_basispoints_403_probe_interval_minutes: 1,
-    codex_basispoints_429_cooldown_seconds: 5,
-    codex_basispoints_cache_creation_as_input: false,
     codex_ws_weak_network_mode: false,
     codex_ws_keepalive_enabled: false,
     codex_ws_keepalive_interval_sec: 60,
@@ -2568,6 +2631,7 @@ export default function Settings() {
     codex_ws_busy_overflow_enabled: false,
     codex_ws_busy_patience_sec: 2,
     codex_ws_stateless_slots: 8,
+    codex_ws_downstream_keepalive_slots: 8,
     github_token_configured: false,
     github_proxy_url: '',
     codex_overload_pause_enabled: false,
@@ -2666,6 +2730,7 @@ export default function Settings() {
     billing_tier_policy: 'actual',
     models_list_read_max_bytes: DEFAULT_MODELS_LIST_READ_MAX_BYTES,
     show_full_usage_numbers: false,
+    show_upstream_model_mismatch: true,
     public_key_usage_page_enabled: true,
     public_image_studio_page_enabled: true,
     public_account_portal_page_enabled: false,
@@ -2721,6 +2786,7 @@ export default function Settings() {
   const [effectiveCliVersion, setEffectiveCliVersion] = useState('')
   const [syncedAppBuilds, setSyncedAppBuilds] = useState({ desktop_mac: '', desktop_windows: '', vscode: '' })
   const [clientSyncErrors, setClientSyncErrors] = useState<Partial<Record<CodexClientSyncSource, string>>>({})
+  const [codexClientVersions, setCodexClientVersions] = useState<CodexClientVersionTarget[]>([])
   const logoFileInputRef = useRef<HTMLInputElement>(null)
   const backgroundFileInputRef = useRef<HTMLInputElement>(null)
   const persistedBrandingRef = useRef<Partial<SiteBranding> | null>(null)
@@ -2904,12 +2970,6 @@ export default function Settings() {
     } as Partial<SystemSettings>)
   }, [autoSaveSettingsPatch])
 
-  // BPS model chips save on every change, in the canonical stored form.
-  // autoSaveSettingsPatch applies the optimistic value and its rollback.
-  const saveExcelBpsModels = useCallback((models: string[]) => {
-    autoSaveStringField('codex_basispoints_models', formatExcelBpsModels(models))
-  }, [autoSaveStringField])
-
   // ===== Antigravity OAuth client 配置(草稿态 + 显式保存;secret 不回显,留空 = 沿用已保存值) =====
   const [agOAuthDraft, setAgOAuthDraft] = useState<{ rows: AntigravityOAuthClientSetting[]; activeKey: string } | null>(null)
   const [agOAuthSaving, setAgOAuthSaving] = useState(false)
@@ -3021,6 +3081,7 @@ export default function Settings() {
       desktop_windows: settings.codex_synced_desktop_windows_build ?? '',
       vscode: settings.codex_synced_vscode_build ?? '',
     })
+    setCodexClientVersions(settings.codex_client_versions ?? [])
     setModelList(modelsResp.models ?? [])
     setTraeCNModelList(modelsResp.traecn_models ?? [])
     setModelItems(modelsResp.items ?? [])
@@ -3210,6 +3271,12 @@ export default function Settings() {
         if (error) errors[source.key] = error
       }
       setClientSyncErrors(errors)
+      try {
+        const settings = await api.getSettings()
+        setCodexClientVersions(overlayCodexClientSyncFailures(settings.codex_client_versions ?? [], result))
+      } catch {
+        // 同步本身已成功；面板沿用旧数据，下次加载设置时刷新。
+      }
       const failed = Object.keys(errors).length > 0
       showToast(failed ? t('settings.clientVersionSyncPartial') : t('settings.clientVersionSyncSuccess'), failed ? 'error' : 'success')
     } catch (error) {
@@ -3378,6 +3445,7 @@ export default function Settings() {
         })
         .catch((err: unknown) => {
           if (cancelled) return
+          setCodexUAPreview(null)
           setCodexUAPreviewError(err instanceof Error ? err.message : String(err))
         })
     }, 250)
@@ -3385,7 +3453,7 @@ export default function Settings() {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [settingsForm.codex_user_agent_config, settingsForm.client_compat_mode, settingsForm.codex_min_cli_version])
+  }, [settingsForm.codex_user_agent_config, settingsForm.client_compat_mode, settingsForm.codex_min_cli_version, codexClientVersions])
   const codexUAMode: 'single' | 'pool' = codexUserAgentConfig.mode === 'pool' ? 'pool' : 'single'
   const codexUAKind: CodexUAKind = CODEX_UA_KINDS.includes(codexUserAgentConfig.client_kind as CodexUAKind)
     ? (codexUserAgentConfig.client_kind as CodexUAKind)
@@ -3485,26 +3553,13 @@ export default function Settings() {
   const codexUAEffectiveAppName = (codexUserAgentConfig.app_name ?? '').trim() || codexUAKindSpec?.default_app_name || (codexUserAgentConfig.client_name ?? '').trim() || DEFAULT_CODEX_UA_CONFIG.client_name
   const codexUAAppNamePresetValue = codexUAAppNameOptions.some((option) => option.value === codexUAEffectiveAppName && option.value !== 'custom') ? codexUAEffectiveAppName : 'custom'
   const codexUAShowAppNamePreset = codexUAKind !== 'custom' && !codexUAAppFollowsCLI && (codexUAKindSpec?.app_names?.length ?? 0) > 1
-  const codexUAClientVersionPlaceholder = (() => {
-    const pairs = codexUAKindSpec?.version_pairs ?? []
-    if ((codexUAKind === 'codex-desktop' || codexUAKind === 'codex-vscode') && syncedCliVersion) {
-      return effectiveCliVersion
-    }
-    if (pairs.length > 0) {
-      return pairs.reduce((best, pair) => (pair.weight > best.weight ? pair : best), pairs[0]).cli_version
-    }
-    return settingsForm.codex_synced_cli_version || DEFAULT_CODEX_UA_CONFIG.client_version
-  })()
-  const codexUAAppVersionPlaceholder = (() => {
-    if (codexUAAppFollowsCLI) return t('settings.codexUAFollowsClient')
-    if (codexUAKind === 'codex-vscode') return syncedAppBuilds.vscode || t('settings.codexUAAutoPaired')
-    if (codexUAKind === 'codex-desktop') {
-      const synced = codexUAEffectivePlatform.os_name === 'Windows' ? syncedAppBuilds.desktop_windows
-        : codexUAEffectivePlatform.os_name === 'Mac OS' ? syncedAppBuilds.desktop_mac : ''
-      return synced || t('settings.codexUAAutoPaired')
-    }
-    return t('settings.codexUAAutoPaired')
-  })()
+  // 默认版本取后端预览，与出站使用相同的配对选择器。
+  const codexUAClientVersionPlaceholder = codexUAPreviewError
+    ? t('settings.codexClientVersions.unavailable')
+    : codexUAPreview?.persona?.version || t('settings.codexUAPreviewLoading')
+  const codexUAAppVersionPlaceholder = codexUAPreviewError
+    ? t('settings.codexClientVersions.unavailable')
+    : codexUAPreview?.persona?.app_version || t('settings.codexUAAutoPaired')
   const codexUAPoolMixValue = (kind: CodexUAKind) => {
     const weight = codexUserAgentConfig.pool_mix?.[kind]
     return weight === undefined ? '' : String(weight)
@@ -4213,11 +4268,26 @@ export default function Settings() {
                       />
                     </SettingField>
                     <SettingField
+                      label={t('settings.codexWSDownstreamKeepaliveSlots')}
+                      description={t('settings.codexWSDownstreamKeepaliveSlotsDesc')}
+                    >
+                      <DraftNumberInput
+                        min={0}
+                        max={32}
+                        value={settingsForm.codex_ws_downstream_keepalive_slots}
+                        emptyValue={8}
+                        onValueChange={(value) => setSettingsForm(f => ({ ...f, codex_ws_downstream_keepalive_slots: value }))}
+                        onValueCommit={(value) => {
+                          void autoSaveSettingsPatch({ codex_ws_downstream_keepalive_slots: value })
+                        }}
+                      />
+                    </SettingField>
+                    <SettingField
                       label={t('settings.codexWSStatelessSlots')}
                       description={t('settings.codexWSStatelessSlotsDesc')}
                     >
                       <DraftNumberInput
-                        min={1}
+                        min={0}
                         max={32}
                         value={settingsForm.codex_ws_stateless_slots}
                         emptyValue={8}
@@ -4227,101 +4297,6 @@ export default function Settings() {
                             codex_ws_stateless_slots: value,
                           })
                         }}
-                      />
-                    </SettingField>
-                  </div>
-                </div>
-              </SettingsCard>
-
-              <SettingsCard title={t('settings.codexBasispoints')} description={t('settings.codexBasispointsDesc')} icon={<Layers className="size-4" />}>
-                <div className="space-y-4">
-                  <div className={SETTINGS_SWITCH_ROW}>
-                    <SettingField label={t('settings.codexBasispointsEnabled')} description={t('settings.codexBasispointsEnabledDesc')} layout="switch">
-                      <Switch
-                        checked={settingsForm.codex_basispoints_enabled}
-                        onCheckedChange={(checked) => autoSaveBooleanField('codex_basispoints_enabled', checked)}
-                      />
-                    </SettingField>
-                  </div>
-                  <div className={SETTINGS_FIELD_GRID}>
-                    <SettingField label={t('settings.codexBasispointsModels')} description={t('settings.codexBasispointsModelsDesc')}>
-                      <div className="space-y-2">
-                        <ChipInput
-                          value={parseExcelBpsModels(settingsForm.codex_basispoints_models)}
-                          options={excelBpsModelOptions(modelList)}
-                          placeholder={t('settings.codexBasispointsModelsPlaceholder')}
-                          onChange={(models) => saveExcelBpsModels(models)}
-                        />
-                        <div className="flex flex-wrap gap-2">
-                          <Button type="button" variant="outline" size="sm" onClick={() => saveExcelBpsModels([...EXCEL_BPS_KNOWN_MODELS])}>
-                            {t('settings.codexBasispointsModelsFillKnown')}
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            disabled={!settingsForm.codex_basispoints_models}
-                            onClick={() => saveExcelBpsModels([])}
-                          >
-                            {t('settings.codexBasispointsModelsClear')}
-                          </Button>
-                        </div>
-                      </div>
-                    </SettingField>
-                  </div>
-                  <div className={SETTINGS_SWITCH_ROW}>
-                    <SettingField label={t('settings.codexBasispoints403AutoPause')} description={t('settings.codexBasispoints403AutoPauseDesc')} layout="switch">
-                      <Switch
-                        checked={settingsForm.codex_basispoints_403_auto_pause}
-                        onCheckedChange={(checked) => autoSaveBooleanField('codex_basispoints_403_auto_pause', checked)}
-                      />
-                    </SettingField>
-                  </div>
-                  <div className={SETTINGS_FIELD_GRID}>
-                    <SettingField
-                      label={t('settings.codexBasispoints403ProbeInterval')}
-                      description={t('settings.codexBasispoints403ProbeIntervalDesc')}
-                      className={cn(!settingsForm.codex_basispoints_403_auto_pause && 'opacity-60')}
-                    >
-                      <div className="relative">
-                        <DraftNumberInput
-                          min={1}
-                          max={10080}
-                          className="pr-14 tabular-nums"
-                          disabled={!settingsForm.codex_basispoints_403_auto_pause}
-                          value={settingsForm.codex_basispoints_403_probe_interval_minutes}
-                          onValueChange={(value) => setSettingsForm(f => ({ ...f, codex_basispoints_403_probe_interval_minutes: value }))}
-                          onValueCommit={(value) => {
-                            if (!settingsForm.codex_basispoints_403_auto_pause) return
-                            void autoSaveSettingsPatch({ codex_basispoints_403_probe_interval_minutes: value })
-                          }}
-                        />
-                        <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted-foreground">
-                          {t('settings.codexBasispoints403ProbeIntervalUnit')}
-                        </span>
-                      </div>
-                    </SettingField>
-                    <SettingField label={t('settings.codexBasispoints429Cooldown')} description={t('settings.codexBasispoints429CooldownDesc')}>
-                      <div className="relative">
-                        <DraftNumberInput
-                          min={1}
-                          max={600}
-                          className="pr-14 tabular-nums"
-                          value={settingsForm.codex_basispoints_429_cooldown_seconds}
-                          onValueChange={(value) => setSettingsForm(f => ({ ...f, codex_basispoints_429_cooldown_seconds: value }))}
-                          onValueCommit={(value) => void autoSaveSettingsPatch({ codex_basispoints_429_cooldown_seconds: value })}
-                        />
-                        <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted-foreground">
-                          {t('settings.codexBasispoints429CooldownUnit')}
-                        </span>
-                      </div>
-                    </SettingField>
-                  </div>
-                  <div className={SETTINGS_SWITCH_ROW}>
-                    <SettingField label={t('settings.codexBasispointsCacheCreationAsInput')} description={t('settings.codexBasispointsCacheCreationAsInputDesc')} layout="switch">
-                      <Switch
-                        checked={settingsForm.codex_basispoints_cache_creation_as_input}
-                        onCheckedChange={(checked) => autoSaveBooleanField('codex_basispoints_cache_creation_as_input', checked)}
                       />
                     </SettingField>
                   </div>
@@ -4670,6 +4645,9 @@ export default function Settings() {
                       </Button>
                     </div>
                   </div>
+                  <div className="rounded-lg border border-border/60 p-3">
+                    <CodexClientVersionsPanel targets={codexClientVersions} />
+                  </div>
                   <div className={SETTINGS_FIELD_GRID}>
                     <SettingField label={t('settings.clientCompatMode')} description={t('settings.clientCompatModeDesc')}>
                       <SegmentedPillGroup
@@ -4813,6 +4791,8 @@ export default function Settings() {
                         <dd className="break-all">{codexUAPreview.persona.originator}</dd>
                         <dt className="text-foreground/70">Version</dt>
                         <dd className="break-all">{codexUAPreview.persona.version}</dd>
+                        <dt className="text-foreground/70">{t('settings.codexClientVersions.source')}</dt>
+                        <dd>{t(`settings.codexClientVersions.sources.${codexUAPreview.persona.source ?? 'builtin_observed'}`, { defaultValue: codexUAPreview.persona.source ?? 'builtin_observed' })}</dd>
                       </dl>
                     ) : (
                       <ul className="space-y-1 font-mono text-[11px] leading-5 text-muted-foreground sm:text-xs">
@@ -4950,6 +4930,24 @@ export default function Settings() {
                       </div>
                     </>
                   )}
+                </div>
+                <div className="mt-4 border-t border-border/60 pt-4">
+                  <SettingField
+                    label={t('settings.codexUnifiedClientIdentity')}
+                    description={t('settings.codexUnifiedClientIdentityDesc')}
+                    layout="row"
+                  >
+                    <Switch
+                      aria-label={t('settings.codexUnifiedClientIdentity')}
+                      checked={settingsForm.codex_unified_client_identity_enabled}
+                      onCheckedChange={(checked) => autoSaveBooleanField('codex_unified_client_identity_enabled', checked)}
+                    />
+                  </SettingField>
+                  {settingsForm.codex_unified_client_identity_enabled && settingsForm.client_compat_mode !== 'force' ? (
+                    <p className="mt-2 text-[11px] leading-relaxed text-amber-600 dark:text-amber-400 sm:text-xs">
+                      {t('settings.codexUnifiedClientIdentityCompatHint')}
+                    </p>
+                  ) : null}
                 </div>
               </SettingsCard>
               </SettingsSection>
@@ -5175,6 +5173,7 @@ export default function Settings() {
               <SettingsSection id="settings-antigravity" title={t('settings.nav.antigravity')} description={t('settings.nav.antigravityDesc')} icon={<ChannelLogo channel="antigravity" size={16} />}>
               <ChannelConnectivityTestCard channel="antigravity" />
               <AntigravityModelRedirectCard />
+              <AntigravityThinkingCard />
               <SettingsCard
                 title={t('settings.antigravityOAuth.title')}
                 description={t('settings.antigravityOAuth.description')}
@@ -5506,38 +5505,7 @@ export default function Settings() {
                         />
                       </SettingField>
                       <SettingField label={t('settings.timezone')} description={t('settings.timezoneDesc')}>
-                        <Select
-                          value={getTimezone()}
-                          onValueChange={(value) => {
-                            setTimezone(value)
-                            window.location.reload()
-                          }}
-                          options={[
-                            { label: t('settings.timezoneAuto'), value: Intl.DateTimeFormat().resolvedOptions().timeZone },
-                            { label: '(UTC) UTC', value: 'UTC' },
-                            { label: '(GMT+08:00) Asia/Shanghai', value: 'Asia/Shanghai' },
-                            { label: '(GMT+09:00) Asia/Tokyo', value: 'Asia/Tokyo' },
-                            { label: '(GMT+09:00) Asia/Seoul', value: 'Asia/Seoul' },
-                            { label: '(GMT+08:00) Asia/Singapore', value: 'Asia/Singapore' },
-                            { label: '(GMT+08:00) Asia/Hong_Kong', value: 'Asia/Hong_Kong' },
-                            { label: '(GMT+08:00) Asia/Taipei', value: 'Asia/Taipei' },
-                            { label: '(GMT+07:00) Asia/Bangkok', value: 'Asia/Bangkok' },
-                            { label: '(GMT+04:00) Asia/Dubai', value: 'Asia/Dubai' },
-                            { label: '(GMT+05:30) Asia/Kolkata', value: 'Asia/Kolkata' },
-                            { label: '(GMT+01:00) Europe/London', value: 'Europe/London' },
-                            { label: '(GMT+02:00) Europe/Paris', value: 'Europe/Paris' },
-                            { label: '(GMT+02:00) Europe/Berlin', value: 'Europe/Berlin' },
-                            { label: '(GMT+03:00) Europe/Moscow', value: 'Europe/Moscow' },
-                            { label: '(GMT+02:00) Europe/Amsterdam', value: 'Europe/Amsterdam' },
-                            { label: '(GMT+02:00) Europe/Rome', value: 'Europe/Rome' },
-                            { label: '(GMT-04:00) America/New_York', value: 'America/New_York' },
-                            { label: '(GMT-07:00) America/Los_Angeles', value: 'America/Los_Angeles' },
-                            { label: '(GMT-05:00) America/Chicago', value: 'America/Chicago' },
-                            { label: '(GMT-03:00) America/Sao_Paulo', value: 'America/Sao_Paulo' },
-                            { label: '(GMT+10:00) Australia/Sydney', value: 'Australia/Sydney' },
-                            { label: '(GMT+12:00) Pacific/Auckland', value: 'Pacific/Auckland' },
-                          ]}
-                        />
+                        <DisplayTimezoneSelect />
                       </SettingField>
                     </div>
                     <SettingField label={t('settings.siteLogo')} description={t('settings.siteLogoDesc')}>
@@ -5576,6 +5544,12 @@ export default function Settings() {
                         <Switch
                           checked={settingsForm.show_full_usage_numbers}
                           onCheckedChange={(checked) => autoSaveBooleanField('show_full_usage_numbers', checked)}
+                        />
+                      </SettingField>
+                      <SettingField label={t('settings.showUpstreamModelMismatch')} description={t('settings.showUpstreamModelMismatchDesc')} layout="switch">
+                        <Switch
+                          checked={settingsForm.show_upstream_model_mismatch}
+                          onCheckedChange={(checked) => autoSaveBooleanField('show_upstream_model_mismatch', checked)}
                         />
                       </SettingField>
                     </div>

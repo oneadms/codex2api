@@ -47,7 +47,6 @@ import Pagination from "../components/Pagination";
 import StateShell from "../components/StateShell";
 import StatusBadge from "../components/StatusBadge";
 import DaybreakBadge from "../components/DaybreakBadge";
-import { ExcelBpsStatus } from "../components/ExcelBpsBadge";
 import { useDataLoader, type LoadOptions } from "../hooks/useDataLoader";
 import {
   useConfirmDialog,
@@ -879,6 +878,16 @@ function isOAuthAccount(account: AccountRow | null): boolean {
   return account?.account_type === "oauth";
 }
 
+// 跳转链接图标只给 API Key 类账号（有 api-base 可回退）；OAuth 账号不显示，
+// 除非已配置过自定义链接（否则失去打开/清除入口）。
+function showsAccountHrefLink(account: AccountRow): boolean {
+  return Boolean(
+    account.openai_responses_api ||
+      account.grok_api ||
+      account.account_href?.trim(),
+  );
+}
+
 function parseOAuthCallbackParams(rawUrl: string): { code: string; state: string } {
   const raw = rawUrl.trim();
   try {
@@ -1130,6 +1139,7 @@ interface AccountRowActions {
   // 直接打开用量弹窗的官方统计 tab（成本列的官方胶囊）。
   openOfficialUsage: (account: AccountRow) => void;
   openTesting: (account: AccountRow) => void;
+  openDetector: (account: AccountRow) => void;
   refresh: (account: AccountRow) => void;
   generateAuthJson: (account: AccountRow) => void;
   toggleEnabled: (account: AccountRow) => void;
@@ -1313,23 +1323,25 @@ const AccountTableRow = memo(function AccountTableRow({
                                         ? formatAccountName(account)
                                         : formatAccountListEmail(account)}
                                     </button>
-                                    <button
-                                      type="button"
-                                      className="mt-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground/60 transition-colors hover:bg-muted hover:text-primary"
-                                      title={t("accounts.hrefClickHint")}
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        // 点击 = 跳转（account_href → base_url
-                                        // 回退）；Alt/Option+点击 = 打开配置弹窗。
-                                        if (event.altKey) {
-                                          actions.openHrefEditor(account);
-                                        } else {
-                                          actions.openHref(account);
-                                        }
-                                      }}
-                                    >
-                                      <Link2 className="size-3" />
-                                    </button>
+                                    {showsAccountHrefLink(account) && (
+                                      <button
+                                        type="button"
+                                        className="mt-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground/60 transition-colors hover:bg-muted hover:text-primary"
+                                        title={t("accounts.hrefClickHint")}
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          // 点击 = 跳转（account_href → base_url
+                                          // 回退）；Alt/Option+点击 = 打开配置弹窗。
+                                          if (event.altKey) {
+                                            actions.openHrefEditor(account);
+                                          } else {
+                                            actions.openHref(account);
+                                          }
+                                        }}
+                                      >
+                                        <Link2 className="size-3" />
+                                      </button>
+                                    )}
                                   </div>
                                   {account.effective_workspace_id && (
                                     <span
@@ -1561,7 +1573,6 @@ const AccountTableRow = memo(function AccountTableRow({
                                         <AccountStatusCountdown account={account} />
                                       )}
                                       <AccountConcurrencyBadge account={account} />
-                                      <ExcelBpsStatus account={account} />
                                     </div>
                                     <AccountHealthBar
                                       buckets={healthBuckets}
@@ -1684,6 +1695,7 @@ const AccountTableRow = memo(function AccountTableRow({
                                     includeTest={false}
                                     includeDelete={false}
                                     onTest={() => actions.openTesting(account)}
+                                    onDetect={() => actions.openDetector(account)}
                                     onChannelMonitor={() =>
                                       actions.openChannelMonitor(account)
                                     }
@@ -1778,6 +1790,7 @@ const AccountCardItem = memo(function AccountCardItem({
       onOpenOfficialUsage={() => actions.openOfficialUsage(account)}
       onChannelMonitor={() => actions.openChannelMonitor(account)}
       onTest={() => actions.openTesting(account)}
+      onDetect={() => actions.openDetector(account)}
       onRefresh={() => actions.refresh(account)}
       onGenerateAuthJson={() => actions.generateAuthJson(account)}
       onToggleEnabled={() => actions.toggleEnabled(account)}
@@ -1888,7 +1901,7 @@ export default function Accounts() {
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
   const accountPageAbortRef = useRef<AbortController | null>(null);
   const [planFilter, setPlanFilter] = useState<
-    "all" | "pro" | "prolite" | "plus" | "team" | "k12" | "free"
+    "all" | "pro" | "promax" | "prolite" | "plus" | "team" | "k12" | "free"
   >("all");
   // 订阅状态筛选：按服务端算好的业务/同步状态过滤（到期临近、已过期、待确认等）。
   const [subscriptionFilter, setSubscriptionFilter] = useState<SubscriptionFilter>("all");
@@ -1976,6 +1989,7 @@ export default function Accounts() {
   const [cleaningRateLimited, setCleaningRateLimited] = useState(false);
   const [cleaningError, setCleaningError] = useState(false);
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null);
+  const [detectorAccount, setDetectorAccount] = useState<AccountRow | null>(null);
   const [quickConfigAccount, setQuickConfigAccount] = useState<AccountRow | null>(null);
   const [channelMonitorAccount, setChannelMonitorAccount] = useState<AccountRow | null>(null);
   const [usageAccount, setUsageAccount] = useState<AccountRow | null>(null);
@@ -1997,6 +2011,8 @@ export default function Accounts() {
   );
   const [concurrencyInput, setConcurrencyInput] = useState("");
   const [skipWarmTier, setSkipWarmTier] = useState(false);
+  const [keepConcurrencyOnDegrade, setKeepConcurrencyOnDegrade] =
+    useState(false);
   const [editAutoPause5hThresholdInput, setEditAutoPause5hThresholdInput] =
     useState("");
   const [editAutoPause7dThresholdInput, setEditAutoPause7dThresholdInput] =
@@ -2281,6 +2297,9 @@ export default function Accounts() {
     useState(false);
   const [batchBaseConcurrencyInput, setBatchBaseConcurrencyInput] =
     useState("");
+  const [batchUpdateKeepConcurrency, setBatchUpdateKeepConcurrency] =
+    useState(false);
+  const [batchKeepConcurrency, setBatchKeepConcurrency] = useState(false);
   const [batchUpdateSchedulerPriority, setBatchUpdateSchedulerPriority] =
     useState(false);
   const [batchSchedulerPriorityInput, setBatchSchedulerPriorityInput] =
@@ -2886,7 +2905,7 @@ export default function Accounts() {
   useEffect(() => {
     if (providerView !== "codex") return;
     let cancelled = false;
-    void api.getAPIKeys()
+    void api.getAPIKeys({ view: 'lite' })
       .then((response) => { if (!cancelled) setAPIKeys(response.keys ?? []); })
       .catch(() => undefined);
     void api.listAccountGroups()
@@ -5297,6 +5316,8 @@ export default function Accounts() {
     setBatchScoreBiasInput("");
     setBatchUpdateBaseConcurrency(false);
     setBatchBaseConcurrencyInput("");
+    setBatchUpdateKeepConcurrency(false);
+    setBatchKeepConcurrency(false);
     setBatchUpdateSchedulerPriority(false);
     setBatchSchedulerPriorityInput("");
     setBatchUpdateCodexFingerprintMode(false);
@@ -5317,6 +5338,8 @@ export default function Accounts() {
     setBatchScoreBiasInput("");
     setBatchUpdateBaseConcurrency(false);
     setBatchBaseConcurrencyInput("");
+    setBatchUpdateKeepConcurrency(false);
+    setBatchKeepConcurrency(false);
     setBatchUpdateSchedulerPriority(false);
     setBatchSchedulerPriorityInput("");
     setBatchUpdateCodexFingerprintMode(false);
@@ -5369,6 +5392,12 @@ export default function Accounts() {
   const openTestingAccount = (account: AccountRow) => {
     void loadAccountDetail(account)
       .then(setTestingAccount)
+      .catch((error) => showToast(getErrorMessage(error), "error"));
+  };
+
+  const openDetectorAccount = (account: AccountRow) => {
+    void loadAccountDetail(account)
+      .then(setDetectorAccount)
       .catch((error) => showToast(getErrorMessage(error), "error"));
   };
 
@@ -5558,6 +5587,7 @@ export default function Accounts() {
     batchUpdateGroups ||
     batchUpdateScoreBias ||
     batchUpdateBaseConcurrency ||
+    batchUpdateKeepConcurrency ||
     batchUpdateSchedulerPriority ||
     batchUpdateCodexFingerprintMode ||
     batchUpdateTimezone;
@@ -5586,6 +5616,8 @@ export default function Accounts() {
           scoreBias: batchScoreBiasValue,
           updateBaseConcurrency: batchUpdateBaseConcurrency,
           baseConcurrency: batchBaseConcurrencyValue,
+          updateKeepConcurrency: batchUpdateKeepConcurrency,
+          keepConcurrency: batchKeepConcurrency,
           updateSchedulerPriority: batchUpdateSchedulerPriority,
           schedulerPriority: schedulerPriorityInputToValue(
             batchSchedulerPriorityInput,
@@ -5813,6 +5845,7 @@ export default function Accounts() {
         : String(account.base_concurrency_override),
     );
     setSkipWarmTier(account.skip_warm_tier ?? false);
+    setKeepConcurrencyOnDegrade(account.keep_concurrency_on_degrade ?? false);
     setEditAutoPause5hThresholdInput(
       formatQuotaAutoPausePercentInput(account.auto_pause_5h_threshold),
     );
@@ -5894,6 +5927,7 @@ export default function Accounts() {
     setConcurrencyMode("default");
     setConcurrencyInput("");
     setSkipWarmTier(false);
+    setKeepConcurrencyOnDegrade(false);
     setEditAutoPause5hThresholdInput("");
     setEditAutoPause7dThresholdInput("");
     setEditAutoPause5hDisabled(false);
@@ -6004,6 +6038,7 @@ export default function Accounts() {
         healthTier,
         editingAccount,
         baseConcurrency,
+        keepConcurrencyOnDegrade,
       ),
       appliedBias,
       baseConcurrency,
@@ -6015,6 +6050,7 @@ export default function Accounts() {
     concurrencyMode,
     parsedBaseConcurrency,
     skipWarmTier,
+    keepConcurrencyOnDegrade,
   ]);
 
   const handleSaveScheduler = async () => {
@@ -6043,6 +6079,7 @@ export default function Accounts() {
         base_concurrency_override:
           concurrencyMode === "custom" ? parsedBaseConcurrency : null,
         skip_warm_tier: skipWarmTier,
+        keep_concurrency_on_degrade: keepConcurrencyOnDegrade,
         allowed_api_key_ids: allowedAPIKeySelection,
         proxy_url: editProxyUrl.trim() || null,
         tags: editTags,
@@ -6272,6 +6309,7 @@ export default function Accounts() {
       setUsageAccount(account);
     },
     openTesting: openTestingAccount,
+    openDetector: openDetectorAccount,
     refresh: (account) => void handleRefresh(account),
     generateAuthJson: (account) => void handleGenerateAuthJSON(account),
     toggleEnabled: (account) => void handleToggleEnabled(account),
@@ -6296,6 +6334,7 @@ export default function Accounts() {
       openUsage: (a) => rowActionsImplRef.current?.openUsage(a),
       openOfficialUsage: (a) => rowActionsImplRef.current?.openOfficialUsage(a),
       openTesting: (a) => rowActionsImplRef.current?.openTesting(a),
+      openDetector: (a) => rowActionsImplRef.current?.openDetector(a),
       refresh: (a) => rowActionsImplRef.current?.refresh(a),
       generateAuthJson: (a) => rowActionsImplRef.current?.generateAuthJson(a),
       toggleEnabled: (a) => rowActionsImplRef.current?.toggleEnabled(a),
@@ -6990,7 +7029,7 @@ export default function Accounts() {
               </div>
               <div className="flex max-w-full shrink-0 items-center gap-0.5 overflow-x-auto rounded-lg border border-border bg-muted/30 p-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
                 {(
-                  ["all", "pro", "prolite", "plus", "team", "k12", "free"] as const
+                  ["all", "pro", "promax", "prolite", "plus", "team", "k12", "free"] as const
                 ).map((key) => (
                   <button
                     key={key}
@@ -7008,7 +7047,9 @@ export default function Accounts() {
                       ? t("accounts.filterAll")
                       : key === "prolite"
                         ? "ProLite"
-                        : key === "k12"
+                        : key === "promax"
+                          ? "ProMax"
+                          : key === "k12"
                           ? "K12"
                           : key.charAt(0).toUpperCase() + key.slice(1)}
                   </button>
@@ -7405,7 +7446,9 @@ export default function Accounts() {
                   >
                     {planFilter === "prolite"
                       ? "ProLite"
-                      : planFilter === "k12"
+                      : planFilter === "promax"
+                        ? "ProMax"
+                        : planFilter === "k12"
                         ? "K12"
                         : planFilter.charAt(0).toUpperCase() + planFilter.slice(1)}
                     <X className="size-3" />
@@ -9272,6 +9315,20 @@ export default function Accounts() {
             />
           )}
 
+          {detectorAccount && (
+            <TestConnectionModal
+              mode="detector"
+              account={detectorAccount}
+              onSettled={() => undefined}
+              onClose={() => {
+                forceUsageReloadRef.current.add(detectorAccount.id);
+                usageReloadAttemptsRef.current.delete(detectorAccount.id);
+                setDetectorAccount(null);
+                void reloadSilently();
+              }}
+            />
+          )}
+
           {usageAccount && (
             <AccountUsageModal
               account={usageAccount}
@@ -10087,6 +10144,35 @@ export default function Accounts() {
                           </div>
                         </div>
 
+                        {/* 降级不降并发 (issue #772) */}
+                        <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors">
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2 font-semibold text-foreground text-sm">
+                                <Gauge className="size-4 text-sky-500" />
+                                <span>{t("accounts.schedulerKeepConcurrencyLabel")}</span>
+                              </div>
+                              <p className="text-xs text-muted-foreground leading-relaxed">
+                                {t("accounts.schedulerKeepConcurrencyHint")}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-label={t("accounts.schedulerKeepConcurrencyLabel")}
+                              aria-checked={keepConcurrencyOnDegrade}
+                              onClick={() =>
+                                setKeepConcurrencyOnDegrade((current) => !current)
+                              }
+                              className={`relative inline-flex h-5.5 w-10 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-2 ${keepConcurrencyOnDegrade ? "bg-primary" : "bg-muted"}`}
+                            >
+                              <span
+                                className={`pointer-events-none block size-4.5 rounded-full bg-white shadow-xs transition-transform ${keepConcurrencyOnDegrade ? "translate-x-4.5" : "translate-x-0"}`}
+                              />
+                            </button>
+                          </div>
+                        </div>
+
                         {/* 请求次数限流 */}
                         <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors">
                           <div className="flex items-center gap-2 font-semibold text-foreground text-sm">
@@ -10893,6 +10979,35 @@ export default function Accounts() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="text-sm font-semibold text-foreground">
+                          {t("accounts.schedulerKeepConcurrencyLabel")}
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {t("accounts.schedulerKeepConcurrencyHint")}
+                        </div>
+                      </div>
+                      <Switch
+                        checked={batchUpdateKeepConcurrency}
+                        onCheckedChange={setBatchUpdateKeepConcurrency}
+                        aria-label={`${t("accounts.batchMetaTitle")}: ${t("accounts.schedulerKeepConcurrencyLabel")}`}
+                      />
+                    </div>
+                    <div className="mt-3 flex items-center justify-between gap-3 rounded-lg bg-muted/40 px-3 py-2">
+                      <span className="text-xs text-muted-foreground">
+                        {t("accounts.schedulerKeepConcurrencyLabel")}
+                      </span>
+                      <Switch
+                        checked={batchKeepConcurrency}
+                        onCheckedChange={setBatchKeepConcurrency}
+                        disabled={!batchUpdateKeepConcurrency}
+                        aria-label={t("accounts.schedulerKeepConcurrencyLabel")}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-border p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-foreground">
                           {t("accounts.schedulerPriorityTitle")}
                         </div>
                         <div className="mt-1 text-xs text-muted-foreground">
@@ -11670,6 +11785,7 @@ function RecycleBinView({
   const [planFilter, setPlanFilter] = useState<
     | "all"
     | "pro"
+    | "promax"
     | "prolite"
     | "plus"
     | "team"
@@ -12166,6 +12282,7 @@ function RecycleBinView({
                   [
                     "all",
                     "pro",
+                    "promax",
                     "prolite",
                     "plus",
                     "team",
@@ -12190,7 +12307,9 @@ function RecycleBinView({
                         ? t("accounts.recycleBinPlanUnknown")
                         : key === "prolite"
                           ? "ProLite"
-                          : key === "k12"
+                          : key === "promax"
+                            ? "ProMax"
+                            : key === "k12"
                             ? "K12"
                             : key === "api"
                               ? "API"
@@ -13078,13 +13197,22 @@ function SchedulerPriorityBadge({ account }: { account: AccountRow }) {
   );
 }
 
-// OpenAI reports the $100 Pro tier as "prolite" — functionally a Pro plan with
-// a smaller usage cap. Keep behavioral comparisons (usage windows, plan filter,
+// OpenAI reports the $100 Pro tier as "prolite" and the top Pro tier as
+// "promax" — functionally Pro plans with a different usage cap. Keep behavioral comparisons (usage windows, plan filter,
 // scheduler bias) aligned with the Go side by folding it into "pro".
 function normalizePlanType(planType?: string): string {
   const raw = (planType || "").toLowerCase().trim();
   if (raw === "prolite" || raw === "pro_lite" || raw === "pro-lite")
     return "pro";
+  if (raw === "promax" || raw === "pro_max" || raw === "pro-max")
+    return "pro";
+  if (
+    raw === "ent26" ||
+    raw === "enterprise_cbp_usage_based" ||
+    raw === "enterprise_cbp_automation"
+  )
+    return "enterprise";
+  if (raw === "edu_plus" || raw === "edu_pro") return "edu";
   return raw;
 }
 
@@ -13421,7 +13549,15 @@ function formatPlanLabel(planType?: string): string {
   const lower = raw.toLowerCase();
   if (lower === "prolite" || lower === "pro_lite" || lower === "pro-lite")
     return "ProLite";
+  if (lower === "promax" || lower === "pro_max" || lower === "pro-max")
+    return "ProMax";
   if (lower === "self_serve_business_prolite") return "team5x";
+  if (lower === "self_serve_business_usage_based") return "Business";
+  if (lower === "ent26" || lower === "enterprise_cbp_usage_based")
+    return "Enterprise";
+  if (lower === "enterprise_cbp_automation") return "Enterprise (Automation)";
+  if (lower === "edu_plus") return "Edu Plus";
+  if (lower === "edu_pro") return "Edu Pro";
   return raw;
 }
 
@@ -13456,6 +13592,8 @@ function PlanBadge({
     pro: "bg-violet-100 text-violet-700 ring-violet-500/30 dark:bg-violet-500/20 dark:text-violet-300 dark:ring-violet-400/30",
     prolite:
       "bg-purple-50 text-purple-600 ring-purple-400/25 dark:bg-purple-500/15 dark:text-purple-300 dark:ring-purple-400/25",
+    promax:
+      "bg-fuchsia-100 text-fuchsia-700 ring-fuchsia-500/35 dark:bg-fuchsia-500/20 dark:text-fuchsia-300 dark:ring-fuchsia-400/35",
     plus: "bg-blue-100 text-blue-700 ring-blue-500/30 dark:bg-blue-500/20 dark:text-blue-300 dark:ring-blue-400/30",
     team: "bg-amber-100 text-amber-700 ring-amber-500/30 dark:bg-amber-500/20 dark:text-amber-300 dark:ring-amber-400/30",
     k12: "bg-emerald-100 text-emerald-700 ring-emerald-500/30 dark:bg-emerald-500/20 dark:text-emerald-300 dark:ring-emerald-400/30",
@@ -13466,7 +13604,9 @@ function PlanBadge({
   const key =
     normalized === "pro" && label === "ProLite"
       ? "prolite"
-      : label === "team5x"
+      : normalized === "pro" && label === "ProMax"
+        ? "promax"
+        : label === "team5x"
         ? "team"
         : normalized;
   const cls =
@@ -13574,7 +13714,14 @@ function computePreviewDynamicConcurrency(
   healthTier: string | undefined,
   account: AccountRow,
   baseConcurrency: number,
+  keepConcurrencyOnDegrade: boolean,
 ): number {
+  if (
+    keepConcurrencyOnDegrade &&
+    (healthTier === "warm" || healthTier === "risky")
+  ) {
+    return baseConcurrency;
+  }
   switch (healthTier) {
     case "healthy":
       return baseConcurrency;
@@ -13637,6 +13784,7 @@ function AccountRowActionsMenu({
   includeTest = true,
   includeDelete = true,
   onTest,
+  onDetect,
   onChannelMonitor,
   onRefresh,
   onGenerateAuthJson,
@@ -13654,6 +13802,7 @@ function AccountRowActionsMenu({
   includeTest?: boolean;
   includeDelete?: boolean;
   onTest: () => void;
+  onDetect?: () => void;
   onChannelMonitor?: () => void;
   onRefresh: () => void;
   onGenerateAuthJson: () => void;
@@ -13682,6 +13831,17 @@ function AccountRowActionsMenu({
             label: t("accounts.testConnection"),
             icon: <Zap className="size-3.5" />,
             onSelect: onTest,
+          },
+        ]
+      : []),
+    // 与测连弹窗内的入口一致:Grok / Antigravity 不支持 ModelTrace 指纹检测。
+    ...(onDetect && !account.grok_api && !account.antigravity_api
+      ? [
+          {
+            key: "model-detector",
+            label: t("accounts.detectorOpen"),
+            icon: <ShieldCheck className="size-3.5" />,
+            onSelect: onDetect,
           },
         ]
       : []),
@@ -13981,6 +14141,7 @@ function AccountMobileCard({
   onEditProxy,
   onUsage,
   onTest,
+  onDetect,
   onRefresh,
   onGenerateAuthJson,
   onToggleEnabled,
@@ -14017,6 +14178,7 @@ function AccountMobileCard({
   onEditProxy: () => void;
   onUsage: () => void;
   onTest: () => void;
+  onDetect?: () => void;
   onRefresh: () => void;
   onGenerateAuthJson: () => void;
   onToggleEnabled: () => void;
@@ -14095,22 +14257,24 @@ function AccountMobileCard({
               >
                 {displayName}
               </button>
-              <button
-                type="button"
-                className="inline-flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground/60 transition-colors hover:bg-muted hover:text-primary"
-                title={t("accounts.hrefClickHint")}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  // 与表格行同口径：点击跳转，Alt/Option+点击配置。
-                  if (event.altKey) {
-                    onOpenHrefEditor();
-                  } else {
-                    onOpenHref();
-                  }
-                }}
-              >
-                <Link2 className="size-3" />
-              </button>
+              {showsAccountHrefLink(account) && (
+                <button
+                  type="button"
+                  className="inline-flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground/60 transition-colors hover:bg-muted hover:text-primary"
+                  title={t("accounts.hrefClickHint")}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    // 与表格行同口径：点击跳转，Alt/Option+点击配置。
+                    if (event.altKey) {
+                      onOpenHrefEditor();
+                    } else {
+                      onOpenHref();
+                    }
+                  }}
+                >
+                  <Link2 className="size-3" />
+                </button>
+              )}
             </div>
             {chatgptAccountId && (
               <div
@@ -14185,9 +14349,9 @@ function AccountMobileCard({
                     <AccountStatusCountdown account={account} />
                   )}
                   <AccountConcurrencyBadge account={account} />
-                  <ExcelBpsStatus account={account} variant="card" />
                 </>
               )}
+              <DaybreakBadge models={account.daybreak_models} />
               {isFullCard && resetCredits > 0 && (
                 <button
                   type="button"
@@ -14199,7 +14363,6 @@ function AccountMobileCard({
                   {resetCredits}
                 </button>
               )}
-              <DaybreakBadge models={account.daybreak_models} />
               {isFullCard && creditBalance !== null && (
                 <button
                   type="button"
@@ -14424,6 +14587,7 @@ function AccountMobileCard({
           refreshing={refreshing}
           authJsonExporting={authJsonExporting}
           onTest={onTest}
+          onDetect={onDetect}
           onChannelMonitor={onChannelMonitor}
           onRefresh={onRefresh}
           onGenerateAuthJson={onGenerateAuthJson}

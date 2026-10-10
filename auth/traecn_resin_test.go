@@ -52,7 +52,7 @@ func TestTraeCNRefreshRoutesExchangeTokenThroughResin(t *testing.T) {
 		decoratedAccount = accountID
 		return resin.URL + "/resin/exchange"
 	}
-	store := &Store{maxConcurrency: 1}
+	store := (&Store{}).withMaxConcurrency(1)
 	account := &Account{
 		DBID:         92001,
 		UpstreamType: UpstreamTraeCN,
@@ -115,7 +115,7 @@ func TestTraeCNRefreshWithoutResinUsesDirectExchangeTokenRoute(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	store := &Store{maxConcurrency: 1}
+	store := (&Store{}).withMaxConcurrency(1)
 	account := &Account{
 		DBID:         92002,
 		UpstreamType: UpstreamTraeCN,

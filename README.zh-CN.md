@@ -31,6 +31,20 @@
 
 ---
 
+## 赞助商
+
+<p align="center">
+  <a href="https://www.ipwo.net/?ref=githubcodex2api"><img src="assets/ipwo-banner.webp" alt="IPWO 住宅代理" width="100%"></a>
+</p>
+
+<p align="center">
+  <b><a href="https://www.ipwo.net/?ref=githubcodex2api">IPWO</a></b> 提供覆盖 195+ 地区的住宅代理 IP 资源，支持动态、静态及不限量住宅代理方案。<br>
+  可用于区域化访问测试、网页数据采集和跨境业务等场景，支持 HTTP / HTTPS / SOCKS5 协议。<br>
+  支持免费测试，九折优惠码：<code>0203</code>
+</p>
+
+---
+
 ## 在线 Demo
 
 - Demo 地址：[https://codex2api-latest-vu8j.onrender.com](https://codex2api-latest-vu8j.onrender.com)
@@ -69,13 +83,11 @@
 
 ---
 
-
-
 ## 目录
 
+- [赞助商](#赞助商)
 - [在线 Demo](#在线-demo)
 - [界面预览](#界面预览)
-- [赞助商](#赞助商)
 - [快速部署](#快速部署)
   - [一键交互部署 (推荐)](#一键交互部署-推荐)
 - [完整文档](#完整文档)
@@ -590,6 +602,7 @@ codex2api/
 - `docker-compose.yml` 拉取 GHCR 镜像用于部署；`docker-compose.local.yml` 用 `build: .` 做本地构建
 - 前端基路径固定为 `/admin/`，本地开发和生产部署一致
 - 本地手动构建 Go 二进制前需先执行 `frontend/` 的 `npm run build`
+- 手动构建时，用 `VITE_APP_VERSION` 和 Go 的 `-ldflags '-X github.com/codex2api/internal/version.Version=...'` 传入同一版本号，并先构建前端。管理台对正式版本优先显示运行中的后端版本；前后端版本不一致时，版本弹窗会显示前端构建版本并提示重新构建。该提示不会替换已嵌入的旧前端资源，需重新构建前端再编译 Go 才能更新它们。
 - `.env` 只负责端口、数据库、Redis 等物理层配置；业务参数在管理台数据库里维护
 - API Key 以数据库为准，在管理台中配置
 

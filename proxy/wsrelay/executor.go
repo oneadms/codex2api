@@ -161,7 +161,10 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	// 准备请求头
 	// 跨账号回声守卫在握手头装配末尾剥离已知来自其他账号的 turn state。
 	affinityKey := proxy.CodexTurnStateAffinityKeyFromContext(ctx)
-	headers := e.prepareWebsocketHeaders(ctx, accessToken, account, accountIDStr, headerSessionID, apiKey, deviceCfg, ginHeaders, wsBody, affinityKey)
+	headers, err := e.prepareWebsocketHeadersChecked(ctx, accessToken, account, accountIDStr, headerSessionID, apiKey, deviceCfg, ginHeaders, wsBody, affinityKey)
+	if err != nil {
+		return nil, err
+	}
 	proxy.ApplyCodexTurnStateInjectionHeader(ctx, headers)
 	// 握手头在复用连接上不会重发；每轮必须把最终状态同步到 response.create。
 	if state := headers.Get("X-Codex-Turn-State"); state != "" {
@@ -200,13 +203,21 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	// Cookie 只在握手时发送。换 Cookie 后必须换连接，帧内更新 turn state 无法替代握手。
 	cookieKey := websocketCookieKey(headers.Get("Cookie"), proxy.CodexTicketSessionForRequest(ctx))
 	poolSessionID = withWebsocketCookieKey(poolSessionID, cookieKey)
+	ctx = withConnectionCapacityKind(ctx, ginHeaders, wsBody)
 	var wc *WsConnection
 	var pr *PendingRequest
 	var err2 error
 	acquireStart := time.Now()
-	if prevRespID := strings.TrimSpace(gjson.GetBytes(wsBody, "previous_response_id").String()); prevRespID != "" && !freshConnection {
-		if pwc, ppr, slotKey := e.manager.AcquirePreferredConnectionForURL(prevRespID, account.ID(), apiKey, wsURL, cookieKey); pwc != nil {
-			wc, pr, poolSessionID = pwc, ppr, slotKey
+	if prevRespID := strings.TrimSpace(gjson.GetBytes(wsBody, "previous_response_id").String()); prevRespID != "" {
+		if freshConnection {
+			return nil, &proxy.ResponsesContinuationLostError{Reason: "fresh_connection_required"}
+		}
+		wc, pr, poolSessionID, err2 = e.acquireContinuation(ctx, websocketContinuation{
+			responseID: prevRespID, accountID: account.ID(), apiKey: apiKey, identity: websocketClientIdentity(headers), cookieKey: &cookieKey,
+			model: gjson.GetBytes(wsBody, "model").String(), url: wsURL, proxyURL: effectiveProxyURL(account, proxyOverride),
+		})
+		if err2 != nil {
+			return nil, err2
 		}
 	}
 	baseKey := strings.TrimSpace(poolRouteKey)
@@ -220,7 +231,9 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	// comments above are unchanged.
 	baseKey = reusablePoolBaseKeyWithModel(baseKey, gjson.GetBytes(wsBody, "model").String())
 	baseKey = withWebsocketCookieKey(baseKey, cookieKey)
+	baseKey = websocketClientPoolKey(baseKey, headers)
 	if wc == nil {
+		poolSessionID = websocketClientPoolKey(poolSessionID, headers)
 		// A pooled handshake must belong to the same mapped conversation/thread.
 		poolSessionID = proxy.ScopeCodexFingerprintTransportKey(poolSessionID, account, ginHeaders)
 		baseKey = proxy.ScopeCodexFingerprintTransportKey(baseKey, account, ginHeaders)
@@ -252,18 +265,21 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 			e.manager.DiscardConnection(wc)
 		}
 		wc.session.RemovePendingRequest(pr.RequestID)
+		e.manager.releaseUnusedChatCapacity(wc)
 		return nil, err
 	}
 	sendErr := e.sendRequest(wc, wsBody, pr.RequestID)
+	if sendErr != nil && gjson.GetBytes(wsBody, "previous_response_id").String() != "" {
+		wc.session.RemovePendingRequest(pr.RequestID)
+		e.manager.DiscardConnection(wc)
+		return nil, &proxy.ResponsesContinuationLostError{Reason: "original_connection_send_failed"}
+	}
 	for retries := 0; shouldRetryWebsocketSendError(sendErr) && retries < 2; retries++ {
 		wc.session.RemovePendingRequest(pr.RequestID)
 		e.manager.DiscardConnection(wc)
 
-		// 短暂退避，避免瞬间重连风暴
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(time.Duration(retries+1) * 200 * time.Millisecond):
+		if err := waitWebsocketSendRetry(ctx, retries); err != nil {
+			return nil, err
 		}
 
 		reacquireStart := time.Now()
@@ -292,8 +308,9 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		sessionID:       poolSessionID,
 		manager:         e.manager,
 		apiKey:          apiKey,
-		freshConnection: freshConnection,
+		model:           gjson.GetBytes(wsBody, "model").String(),
 		readErrChan:     make(chan error, 1),
+		freshConnection: freshConnection,
 	}, nil
 }
 
@@ -365,9 +382,9 @@ func reusablePoolBaseKeyWithModel(baseKey, model string) string {
 	return baseKey + "|m:" + model
 }
 
-// prepareWebsocketHeaders 准备 WebSocket 请求头。
+// prepareWebsocketHeadersChecked 准备 WebSocket 请求头；客户端身份解析失败时返回错误，不组装残缺握手头。
 // affinityKey 用于 turn-state 跨账号回声守卫；空串时守卫为空操作。
-func (e *Executor) prepareWebsocketHeaders(ctx context.Context, accessToken string, account *auth.Account, accountID, sessionID, apiKey string, deviceCfg *proxy.DeviceProfileConfig, ginHeaders http.Header, wsBody []byte, affinityKey string) http.Header {
+func (e *Executor) prepareWebsocketHeadersChecked(ctx context.Context, accessToken string, account *auth.Account, accountID, sessionID, apiKey string, deviceCfg *proxy.DeviceProfileConfig, ginHeaders http.Header, wsBody []byte, affinityKey string) (http.Header, error) {
 	headers := http.Header{}
 
 	// 认证头
@@ -376,20 +393,21 @@ func (e *Executor) prepareWebsocketHeaders(ctx context.Context, accessToken stri
 	// Beta header 启用 WebSocket 响应 API
 	headers.Set("OpenAI-Beta", responsesWebsocketBetaHeader)
 
-	usedGeneratedHeaders := false
+	if account == nil {
+		account = &auth.Account{AccountID: accountID}
+	}
+	identity, err := proxy.ResolveCodexOutboundClientIdentity(proxy.CodexClientIdentityInput{Account: account, APIKey: apiKey, DeviceConfig: deviceCfg, Headers: ginHeaders})
+	if err != nil {
+		return nil, err
+	}
+	usedGeneratedHeaders := identity.Generated
 	if shouldSendWebsocketUserAgent() {
-		if account == nil {
-			account = &auth.Account{AccountID: accountID}
-		}
-		var userAgent, version string
-		userAgent, version, usedGeneratedHeaders = proxy.ResolveCodexOutboundClientHeadersWithDecision(account, apiKey, deviceCfg, ginHeaders)
-		headers.Set("User-Agent", userAgent)
-		if version != "" {
-			headers.Set("Version", version)
+		headers.Set("User-Agent", identity.UserAgent)
+		if identity.Version != "" {
+			headers.Set("Version", identity.Version)
 		}
 	} else {
-		// Keep an explicit empty header entry so net/http Request.Write suppresses
-		// its implicit Go-http-client/1.1 fallback during the WS handshake.
+		// 显式空值抑制 Go 默认 UA；版本检查仍在组装前执行。
 		headers["User-Agent"] = []string{""}
 	}
 	if betaFeatures := strings.TrimSpace(ginHeaders.Get("X-Codex-Beta-Features")); betaFeatures != "" {
@@ -404,7 +422,7 @@ func (e *Executor) prepareWebsocketHeaders(ctx context.Context, accessToken stri
 	// Originator：与 HTTP 路径同规则——生成 UA 时跟随生成的客户端前缀，
 	// 透传官方客户端时沿用下游值。
 	if usedGeneratedHeaders {
-		headers.Set("Originator", proxy.CodexOriginatorForGeneratedUserAgent(headers.Get("User-Agent")))
+		headers.Set("Originator", proxy.CodexOriginatorForGeneratedUserAgent(identity.UserAgent))
 	} else if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" && proxy.IsCodexOfficialClientByHeaders("", originator) {
 		headers.Set("Originator", originator)
 	} else {
@@ -449,7 +467,7 @@ func (e *Executor) prepareWebsocketHeaders(ctx context.Context, accessToken stri
 	// 握手头逐连接冻结：复用连接沿用建连时的 hint，语义为拨号期软亲和。
 	proxy.ApplyCodexRoutingHint(headers, account, wsBody)
 
-	return headers
+	return headers, nil
 }
 
 // sendRequest 发送 WebSocket 请求
@@ -467,6 +485,7 @@ func (e *Executor) sendRequest(wc *WsConnection, body []byte, requestID string) 
 
 // WsResponse WebSocket 响应包装器
 type WsResponse struct {
+	model       string
 	conn        *WsConnection
 	pendingReq  *PendingRequest
 	sessionID   string
@@ -549,7 +568,9 @@ func (r *WsResponse) handleMessage(payload []byte, callback func(data []byte) bo
 			r.markConnBroken()
 		}
 		// 把错误内容作为 SSE 数据写给下游，让客户端看到完整错误 JSON。
-		callback(errEvent)
+		if !callback(errEvent) {
+			r.markConnBroken()
+		}
 		// 错误即终止：结束流(等价于 response.failed)。
 		return io.EOF
 	}
@@ -557,29 +578,29 @@ func (r *WsResponse) handleMessage(payload []byte, callback func(data []byte) bo
 	// 标准化完成事件类型
 	payload = normalizeCompletionEvent(payload)
 
+	// 终态先记录绑定与完成状态，再交给下游。
+	eventType := gjson.GetBytes(payload, "type").String()
+	terminal := isReadLeaseTerminal(payload)
+	if eventType == "response.completed" || eventType == "response.incomplete" {
+		r.bindCompletedResponse(gjson.GetBytes(payload, "response.id").String())
+	}
+	if terminal {
+		// 下游读到终态即可取消请求；提前标记，避免取消回调误销毁已完成连接。
+		r.markStreamCompleted()
+	}
 	// 调用回调
 	if !callback(payload) {
 		// 下游写入失败(broken pipe / 客户端断开)：响应流在非终止边界被截断，
 		// 上游仍会在这条连接上继续推送本响应的剩余帧。连接必须销毁，
 		// 归还池中复用会把残留帧串给下一个请求(issue #308)。
-		r.markConnBroken()
+		if !terminal {
+			r.markConnBroken()
+		}
 		return io.EOF
 	}
 
 	// 检查是否是终止事件
-	eventType := gjson.GetBytes(payload, "type").String()
-	if eventType == "response.completed" || eventType == "response.failed" {
-		// 续链亲和：记录本响应由哪条连接产出，后续带 previous_response_id 的
-		// 请求可回到原连接（上游无服务端存储时上下文只存活在连接内）。
-		if eventType == "response.completed" && r.manager != nil && r.conn != nil {
-			if respID := gjson.GetBytes(payload, "response.id").String(); respID != "" {
-				accountID := int64(0)
-				if r.conn.session != nil {
-					accountID = r.conn.session.AccountID
-				}
-				r.manager.BindResponseConn(respID, r.conn, r.sessionID, accountID, r.apiKey)
-			}
-		}
+	if terminal {
 		return io.EOF
 	}
 
@@ -668,6 +689,9 @@ func (r *WsResponse) markConnBroken() {
 	r.mu.Lock()
 	r.connBroken = true
 	r.mu.Unlock()
+	if r.manager != nil && r.conn != nil {
+		r.manager.DiscardConnection(r.conn)
+	}
 }
 
 // markStreamCompleted 标记读流已消费到明确的终止边界（幂等，受 mu 保护）。
@@ -703,7 +727,11 @@ func (r *WsResponse) Close() error {
 		if !r.connBroken && r.streamCompleted && !r.shouldDiscardOneShotConn() {
 			r.manager.ReleaseConnection(r.conn)
 		} else {
-			r.manager.DiscardConnection(r.conn)
+			reason := closeUnconsumed
+			if !r.connBroken && r.streamCompleted {
+				reason = closeOneShotComplete
+			}
+			r.manager.discardConnectionFor(r.conn, reason)
 		}
 	}
 
@@ -714,16 +742,13 @@ func (r *WsResponse) Close() error {
 // 这类连接的池键每请求唯一，归还池后不可能再被按键复用，只会占用账号连接名额
 // 直到空闲超时；唯一的保留价值是 response_id 续链亲和（上游无服务端存储时，
 // previous_response_id 的上下文只存活在产出响应的那条连接里），因此有存活绑定时
-// 仍归还池。CODEX_WS_STATELESS_ONESHOT 模式显式承诺用完即毁，无条件销毁。
+// 仍归还池；一次性模式只禁止通用槽位复用，不应破坏已经产生的续链。
 func (r *WsResponse) shouldDiscardOneShotConn() bool {
 	if r.freshConnection {
 		return true
 	}
 	if r.conn == nil || r.conn.session == nil || !proxy.IsStatelessWebsocketSessionID(r.conn.session.ID) {
 		return false
-	}
-	if statelessOneShotEnabled() {
-		return true
 	}
 	return r.manager == nil || !r.manager.hasLiveResponseBinding(r.conn)
 }

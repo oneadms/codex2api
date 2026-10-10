@@ -23,51 +23,11 @@ export interface QuickConfigAccountSource {
   base_concurrency_override?: number | null;
   scheduler_priority?: number | null;
   skip_warm_tier?: boolean;
+  keep_concurrency_on_degrade?: boolean;
   proxy_url?: string | null;
   custom_headers?: Record<string, string> | null;
   tags?: string[] | null;
   group_ids?: number[] | null;
-  openai_excel_bps?: boolean;
-  openai_excel_bps_opt_out?: boolean;
-  openai_responses_api?: boolean;
-  grok_api?: boolean;
-  claude_api?: boolean;
-  antigravity_api?: boolean;
-  agent_identity?: boolean;
-}
-
-/** Account-level Excel Basispoints mode: follow the global default, force on, or exclude. */
-export type ExcelBpsMode = "inherit" | "on" | "off";
-
-export function excelBpsModeFromAccount(account: {
-  openai_excel_bps?: boolean;
-  openai_excel_bps_opt_out?: boolean;
-}): ExcelBpsMode {
-  if (account.openai_excel_bps) return "on";
-  if (account.openai_excel_bps_opt_out) return "off";
-  return "inherit";
-}
-
-/** Maps a mode to the two persisted flags; an explicit opt-in always clears the opt-out. */
-export function excelBpsFlagsForMode(mode: ExcelBpsMode): {
-  openai_excel_bps: boolean;
-  openai_excel_bps_opt_out: boolean;
-} {
-  return {
-    openai_excel_bps: mode === "on",
-    openai_excel_bps_opt_out: mode === "off",
-  };
-}
-
-/** Only ordinary Codex OAuth accounts can use Basispoints. */
-export function accountSupportsExcelBps(account: QuickConfigAccountSource): boolean {
-  return !(
-    account.openai_responses_api ||
-    account.grok_api ||
-    account.claude_api ||
-    account.antigravity_api ||
-    account.agent_identity
-  );
 }
 
 export interface QuickConfigFormState {
@@ -80,13 +40,11 @@ export interface QuickConfigFormState {
   concurrencyInput: string;
   schedulerPriorityInput: string;
   skipWarmTier: boolean;
+  keepConcurrencyOnDegrade: boolean;
   proxyUrl: string;
   customHeadersText: string;
   tags: string[];
   groupIds: number[];
-  /** Null when the account type cannot use Basispoints. */
-  excelBpsMode: ExcelBpsMode | null;
-  initialExcelBpsMode: ExcelBpsMode | null;
 }
 
 export function accountHasQuickConfigDetails(
@@ -151,12 +109,7 @@ export function formatCustomHeadersText(
 export function formStateFromAccount(
   account: QuickConfigAccountSource,
 ): QuickConfigFormState {
-  const excelBpsMode = accountSupportsExcelBps(account)
-    ? excelBpsModeFromAccount(account)
-    : null;
   return {
-    excelBpsMode,
-    initialExcelBpsMode: excelBpsMode,
     accountId: account.id,
     upstreamRequestIdHeader: account.upstream_request_id_header ?? "",
     fingerprintMode: normalizeCodexFingerprintMode(account.codex_fingerprint_mode),
@@ -172,6 +125,7 @@ export function formStateFromAccount(
     schedulerPriorityInput:
       account.scheduler_priority != null ? String(account.scheduler_priority) : "",
     skipWarmTier: account.skip_warm_tier ?? false,
+    keepConcurrencyOnDegrade: account.keep_concurrency_on_degrade ?? false,
     proxyUrl: account.proxy_url ?? "",
     customHeadersText: formatCustomHeadersText(account.custom_headers),
     tags: account.tags ?? [],
@@ -241,21 +195,15 @@ export function buildQuickConfigSavePayload(
     parsedSchedulerPriority = value;
   }
 
-  // Leave the Basispoints flags untouched unless the administrator changed them.
-  const excelBpsPatch =
-    form.excelBpsMode != null && form.excelBpsMode !== form.initialExcelBpsMode
-      ? excelBpsFlagsForMode(form.excelBpsMode)
-      : {};
-
   return {
     ok: true,
     payload: {
-      ...excelBpsPatch,
       score_bias_override: form.scoreMode === "custom" ? parsedScoreBias : null,
       base_concurrency_override:
         form.concurrencyMode === "custom" ? parsedBaseConcurrency : null,
       scheduler_priority: parsedSchedulerPriority,
       skip_warm_tier: form.skipWarmTier,
+      keep_concurrency_on_degrade: form.keepConcurrencyOnDegrade,
       proxy_url: form.proxyUrl.trim() || null,
       custom_headers: parsedHeaders.value,
       upstream_request_id_header: form.upstreamRequestIdHeader.trim(),

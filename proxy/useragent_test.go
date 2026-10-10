@@ -50,7 +50,7 @@ func TestCodexUserAgentConfigBuildsOfficialCLIShape(t *testing.T) {
 	}
 }
 
-func TestCodexUserAgentConfigRaisesStructuredVersionToFloor(t *testing.T) {
+func TestCodexUserAgentConfigManualVersionOverridesFloor(t *testing.T) {
 	raw := `{"client_name":"codex-tui","client_version":"0.142.0","os_name":"Linux","os_version":"Unknown","arch":"x86_64","terminal":"xterm-256color"}`
 	normalized, err := NormalizeCodexUserAgentConfigJSON(raw)
 	if err != nil {
@@ -60,15 +60,15 @@ func TestCodexUserAgentConfigRaisesStructuredVersionToFloor(t *testing.T) {
 	if !ok {
 		t.Fatal("codexUserAgentFromConfig() ok = false")
 	}
-	if version != "0.150.0" {
-		t.Fatalf("version = %q, want 0.150.0", version)
+	if version != "0.142.0" {
+		t.Fatalf("version = %q, want 0.142.0", version)
 	}
-	if !strings.Contains(userAgent, "codex-tui/0.150.0 ") || !strings.Contains(userAgent, "(codex-tui; 0.150.0)") {
+	if !strings.Contains(userAgent, "codex-tui/0.142.0 ") || !strings.Contains(userAgent, "(codex-tui; 0.142.0)") {
 		t.Fatalf("User-Agent = %q, want version floor applied in both markers", userAgent)
 	}
 }
 
-func TestCodexUserAgentConfigRaisesPrereleaseVersionToStableFloor(t *testing.T) {
+func TestCodexUserAgentConfigManualPrereleaseOverridesStableFloor(t *testing.T) {
 	raw := `{"client_name":"codex-tui","client_version":"0.142.0-alpha.10","os_name":"Linux","os_version":"Unknown","arch":"x86_64","terminal":"xterm-256color"}`
 	normalized, err := NormalizeCodexUserAgentConfigJSON(raw)
 	if err != nil {
@@ -78,10 +78,10 @@ func TestCodexUserAgentConfigRaisesPrereleaseVersionToStableFloor(t *testing.T) 
 	if !ok {
 		t.Fatal("codexUserAgentFromConfig() ok = false")
 	}
-	if version != "0.142.0" {
-		t.Fatalf("version = %q, want 0.142.0", version)
+	if version != "0.142.0-alpha.10" {
+		t.Fatalf("version = %q, want 0.142.0-alpha.10", version)
 	}
-	if !strings.Contains(userAgent, "codex-tui/0.142.0 ") || !strings.Contains(userAgent, "(codex-tui; 0.142.0)") {
+	if !strings.Contains(userAgent, "codex-tui/0.142.0-alpha.10 ") || !strings.Contains(userAgent, "(codex-tui; 0.142.0-alpha.10)") {
 		t.Fatalf("User-Agent = %q, want stable version floor applied in both markers", userAgent)
 	}
 }
@@ -283,7 +283,7 @@ func TestIsCodexStrictOfficialClientByHeaders(t *testing.T) {
 func TestCodexUserAgentConfigAllowsSpacedClientName(t *testing.T) {
 	// issue #653：ChatGPT 桌面端的 originator 是 "Codex Desktop"，客户端名必须允许空格；
 	// 首尾空白与内部连续空白折叠成单个空格。手填的名字会推断为桌面端形态，
-	// 末尾标记按目录把 CLI 0.153.3 配到桌面端构建号 26.901.41123，与真实桌面端一致。
+	// 末尾标记按目录把 CLI 0.153.3 配到桌面端构建号 26.901.51231，与真实桌面端一致。
 	raw := `{"client_name":"  Codex \t  Desktop ","client_version":"0.153.3","os_name":"Windows","os_version":"10.0.26100","arch":"x86_64","terminal":"unknown"}`
 	normalized, err := NormalizeCodexUserAgentConfigJSON(raw)
 	if err != nil {
@@ -296,7 +296,7 @@ func TestCodexUserAgentConfigAllowsSpacedClientName(t *testing.T) {
 	if !ok {
 		t.Fatal("codexUserAgentFromConfig() ok = false")
 	}
-	wantUA := "Codex Desktop/0.153.3 (Windows 10.0.26100; x86_64) unknown (Codex Desktop; 26.901.41123)"
+	wantUA := "Codex Desktop/0.153.3 (Windows 10.0.26100; x86_64) unknown (Codex Desktop; 26.901.51231)"
 	if userAgent != wantUA {
 		t.Fatalf("User-Agent = %q, want %q", userAgent, wantUA)
 	}
@@ -337,7 +337,7 @@ func TestCodexOriginatorForGeneratedUserAgent(t *testing.T) {
 		userAgent string
 		want      string
 	}{
-		{"Codex Desktop/0.153.3 (Windows 10.0.26100; x86_64) unknown (Codex Desktop; 26.901.41123)", "Codex Desktop"},
+		{"Codex Desktop/0.153.3 (Windows 10.0.26100; x86_64) unknown (Codex Desktop; 26.901.51231)", "Codex Desktop"},
 		{"Codex Desktop/0.153.3 (Mac OS 26.4.0; arm64) dumb (codex_exec; 0.153.3)", "Codex Desktop"},
 		{"codex-tui/0.153.3 (Mac OS 15.5.0; arm64) xterm-256color (codex-tui; 0.153.3)", "codex-tui"},
 		{"codex_cli_rs/0.150.0 (Mac OS 15.5.0; arm64) Apple_Terminal/464", "codex_cli_rs"},
@@ -354,4 +354,10 @@ func TestCodexOriginatorForGeneratedUserAgent(t *testing.T) {
 			t.Errorf("CodexOriginatorForGeneratedUserAgent(%q) = %q, want %q", tc.userAgent, got, tc.want)
 		}
 	}
+}
+
+// codexUserAgentFromConfig 是测试辅助：忽略版本不可用错误，只断言生成结果。
+func codexUserAgentFromConfig(raw string, accountID int64, versionFloor string) (string, string, bool) {
+	ua, version, ok, _ := codexUserAgentFromConfigChecked(raw, accountID, versionFloor)
+	return ua, version, ok
 }

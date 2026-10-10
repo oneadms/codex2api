@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -86,8 +87,19 @@ func TestCodexTicketCookieWebsocketReuse(t *testing.T) {
 				}
 				body := []byte(fmt.Sprintf(`{"model":"gpt-5.5","input":"%d","previous_response_id":%q}`, i, previousID))
 				response, err := proxy.ExecuteRequest(ctx, account, body, session, "", "cookie-key", nil, nil, true)
+				if route == "previous_response_id" && i == 2 {
+					var lost *proxy.ResponsesContinuationLostError
+					if !errors.As(err, &lost) || lost.Reason != "original_connection_unavailable" {
+						t.Fatalf("rotated cookie must reject old continuation, got %v", err)
+					}
+					if len(frames) != 0 {
+						t.Fatal("rotated cookie sent a frame using the old response ID")
+					}
+					body = []byte(fmt.Sprintf(`{"model":"gpt-5.5","input":"%d"}`, i))
+					response, err = proxy.ExecuteRequest(ctx, account, body, session, "", "cookie-key", nil, nil, true)
+				}
 				if err != nil {
-					t.Fatal(err)
+					t.Fatalf("turn %d: %v", i, err)
 				}
 				_, readErr := io.Copy(io.Discard, response.Body)
 				_ = response.Body.Close()
@@ -105,8 +117,9 @@ func TestCodexTicketCookieWebsocketReuse(t *testing.T) {
 				case <-ctx.Done():
 					t.Fatal("upstream did not receive the frame")
 				}
-				if i > 0 && (actualConnection == previousConnection) != (i == 1) {
-					t.Fatal("same cookies should reuse connections; rotated cookies must reconnect")
+				expectReuse := i == 1 && route != "stateless"
+				if i > 0 && (actualConnection == previousConnection) != expectReuse {
+					t.Fatalf("turn %d: connection reuse = %t, want %t", i, actualConnection == previousConnection, expectReuse)
 				}
 				if strings.Contains(actualConnection.PoolKey, cookie) {
 					t.Fatal("connection pool keys must not contain raw cookies")

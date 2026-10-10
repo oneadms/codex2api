@@ -423,7 +423,7 @@ func TestRefreshTraeCNAccountRejectsDirectWithEmptyProxyPool(t *testing.T) {
 
 func TestRefreshTraeCNAccountKeepsConcurrentCooldown(t *testing.T) {
 	t.Parallel()
-	store := &Store{maxConcurrency: 1}
+	store := (&Store{}).withMaxConcurrency(1)
 	account := &Account{
 		DBID: 10, UpstreamType: UpstreamTraeCN, AccessToken: "old-at", RefreshToken: "old-rt",
 		Status: StatusReady, HealthTier: HealthTierHealthy,
@@ -527,7 +527,7 @@ func TestConcurrentForcedTraeCNRefreshCoalesces(t *testing.T) {
 		_, _ = w.Write([]byte(`{"token":"new-at","refreshToken":"new-rt","expiresIn":3600}`))
 	}))
 	defer server.Close()
-	store := &Store{maxConcurrency: 1}
+	store := (&Store{}).withMaxConcurrency(1)
 	account := &Account{DBID: 11, UpstreamType: UpstreamTraeCN, AccessToken: "old-at", RefreshToken: "old-rt", TraeCNHost: server.URL}
 
 	// Hold the refresh mutex so both callers observe the same old credential

@@ -32,6 +32,20 @@ Run it as a full **PostgreSQL + Redis** production stack or as a single-containe
 
 ---
 
+## Sponsors
+
+<p align="center">
+  <a href="https://www.ipwo.net/?ref=githubcodex2api"><img src="assets/ipwo-banner.webp" alt="IPWO 住宅代理" width="100%"></a>
+</p>
+
+<p align="center">
+  <b><a href="https://www.ipwo.net/?ref=githubcodex2api">IPWO</a></b> 提供覆盖 195+ 地区的住宅代理 IP 资源，支持动态、静态及不限量住宅代理方案。<br>
+  可用于区域化访问测试、网页数据采集和跨境业务等场景，支持 HTTP / HTTPS / SOCKS5 协议。<br>
+  支持免费测试，九折优惠码：<code>0203</code>
+</p>
+
+---
+
 ## Live Demo
 
 - Demo URL: [https://codex2api-latest-vu8j.onrender.com](https://codex2api-latest-vu8j.onrender.com)
@@ -70,12 +84,11 @@ Run it as a full **PostgreSQL + Redis** production stack or as a single-containe
 
 ---
 
-
 ## Contents
 
+- [Sponsors](#sponsors)
 - [Live Demo](#live-demo)
 - [Screenshots](#screenshots)
-- [Sponsors](#sponsors)
 - [Quick Start](#quick-start)
 - [Documentation](#documentation)
 - [Upgrade and Local Development](#upgrade-and-local-development)
@@ -539,6 +552,7 @@ codex2api/
 - `docker-compose.yml` pulls the GHCR image for deployment. `docker-compose.local.yml` uses `build: .` for local source builds.
 - The frontend base path is fixed at `/admin/` for both local development and production.
 - Before manually building the Go binary, run `npm run build` in `frontend/`.
+- For manual builds, pass the same version through `VITE_APP_VERSION` and Go's `-ldflags '-X github.com/codex2api/internal/version.Version=...'`, building the frontend first. For release builds, the dashboard uses the running backend version and shows the frontend build version with a rebuild hint when they differ. This hint does not replace embedded frontend assets; rebuild the frontend and then compile Go to update them.
 - `.env` controls physical runtime settings such as port, database, and Redis. Business settings are stored in the database and managed from the admin dashboard.
 - API keys are stored in the database and configured through the admin dashboard.
 

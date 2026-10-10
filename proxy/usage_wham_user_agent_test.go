@@ -84,8 +84,8 @@ func TestWhamRequestsUseResponsesUserAgentAfterSettingsReload(t *testing.T) {
 			wantUA: "codex-tui/0.142.0 (Linux Unknown; x86_64) tmux/3.5a (codex-tui; 0.142.0)",
 		},
 		{
-			name: "structured_auto_floor", mode: ClientCompatModeAuto, config: structuredConfig,
-			wantUA: "codex-tui/0.160.0 (Linux Unknown; x86_64) tmux/3.5a (codex-tui; 0.160.0)",
+			name: "structured_auto_manual_version", mode: ClientCompatModeAuto, config: structuredConfig,
+			wantUA: "codex-tui/0.142.0 (Linux Unknown; x86_64) tmux/3.5a (codex-tui; 0.142.0)",
 		},
 		{
 			name: "account_override", mode: ClientCompatModeForce, config: `{"raw_user_agent":"` + rawUA + `"}`,
@@ -96,10 +96,11 @@ func TestWhamRequestsUseResponsesUserAgentAfterSettingsReload(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ApplyRuntimeSettingsFromSystem(&database.SystemSettings{
-				ClientCompatMode:      tc.mode,
-				CodexMinCLIVersion:    "0.160.0",
-				CodexSyncedCLIVersion: "0.153.4",
-				CodexUserAgentConfig:  tc.config,
+				CodexUnifiedClientIdentityEnabled: true,
+				ClientCompatMode:                  tc.mode,
+				CodexMinCLIVersion:                "0.160.0",
+				CodexSyncedCLIVersion:             "0.153.4",
+				CodexUserAgentConfig:              tc.config,
 			})
 			account := &auth.Account{
 				DBID: 964502, AccountID: "ua-account", AccessToken: "test-access-token",
@@ -112,7 +113,9 @@ func TestWhamRequestsUseResponsesUserAgentAfterSettingsReload(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			applyCodexRequestHeaders(req, account, account.AccessToken, "", "", nil, http.Header{"User-Agent": {"curl/8.7.1"}})
+			if err := applyCodexRequestHeaders(req, account, account.AccessToken, "", "", nil, http.Header{"User-Agent": {"curl/8.7.1"}}); err != nil {
+				t.Fatal(err)
+			}
 			resp, err := server.Client().Do(req)
 			if err != nil {
 				t.Fatal(err)
