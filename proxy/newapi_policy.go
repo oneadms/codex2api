@@ -561,6 +561,14 @@ func (h *Handler) requiresNewAPISignedIdentity(c *gin.Context) bool {
 // the downstream handler.  Authentication failures never enter prompt-policy
 // strike, ban, risk, or session state.
 func (h *Handler) enforceRequiredNewAPIIdentityAtIngress(c *gin.Context) bool {
+	// Model discovery has no prompt; API key authentication still applies.
+	if c != nil && c.Request != nil && c.Request.URL != nil && c.Request.Method == http.MethodGet {
+		switch c.Request.URL.Path {
+		case "/v1/models", "/models", "/backend-api/codex/models":
+			return false
+		}
+	}
+
 	if !h.requiresNewAPISignedIdentity(c) {
 		return false
 	}

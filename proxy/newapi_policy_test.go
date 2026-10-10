@@ -1148,7 +1148,7 @@ func TestAuthMiddlewareEnforcesBoundIdentityAndRestoresV1Body(t *testing.T) {
 	missing.Header.Set("Authorization", "Bearer "+apiKey)
 	missingRecorder := httptest.NewRecorder()
 	router.ServeHTTP(missingRecorder, missing)
-	if missingRecorder.Code != http.StatusUnauthorized || !strings.Contains(missingRecorder.Body.String(), "newapi_signed_identity_required") {
+	if missingRecorder.Code != http.StatusNoContent {
 		t.Fatalf("unsigned V1 GET = %d %s", missingRecorder.Code, missingRecorder.Body.String())
 	}
 	assertNoPromptPolicyPenaltyHeaders(t, missingRecorder.Header())
