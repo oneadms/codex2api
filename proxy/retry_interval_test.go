@@ -163,6 +163,43 @@ func TestRetryableUpstreamStatuses(t *testing.T) {
 	}
 }
 
+// TestTraeCNGatewayStatusesNeedContinuousPolicy 记录 TRAE 链路 502/504 的真实处置口径：
+// 上游网关返回 502 时，legacy 分类器不重试，只有在设置里开启 http_5xx 持续重试策略
+// 才会在本次请求内换号。这里把"没有策略就不重试"钉死，避免以后有人误以为 502 会自动换号。
+func TestTraeCNGatewayStatusesNeedContinuousPolicy(t *testing.T) {
+	disabled := database.ContinuousRetryPolicy{Enabled: false, Categories: []string{database.ContinuousRetryCategoryHTTP5xx}}
+	enabled := database.ContinuousRetryPolicy{Enabled: true, Categories: []string{database.ContinuousRetryCategoryHTTP5xx}}
+	for _, status := range []int{http.StatusBadGateway, http.StatusGatewayTimeout} {
+		generalRetries, rateLimitRetries := 0, 0
+		if shouldRetryHTTPStatus(status, []byte("502 Bad Gateway"), &generalRetries, &rateLimitRetries, 10, 5, disabled) {
+			t.Fatalf("status %d must not retry while the continuous policy is disabled", status)
+		}
+		generalRetries = 0
+		if !shouldRetryHTTPStatus(status, []byte("502 Bad Gateway"), &generalRetries, &rateLimitRetries, 10, 5, enabled) {
+			t.Fatalf("status %d must retry once the http_5xx continuous policy is enabled", status)
+		}
+	}
+}
+
+// TestUpstreamErrorConsoleBodyKeepsShortGatewayText 保护上游 5xx 的现场可读性：
+// 网关返回的短纯文本错误体（如 "502 Bad Gateway"）必须进日志，HTML 错误页仍然折叠。
+func TestUpstreamErrorConsoleBodyKeepsShortGatewayText(t *testing.T) {
+	got := upstreamErrorConsoleBody([]byte("502 Bad Gateway\n"))
+	if !strings.Contains(got, "502 Bad Gateway") {
+		t.Fatalf("short gateway body should stay readable, got %q", got)
+	}
+	if !strings.Contains(got, "16 bytes") {
+		t.Fatalf("short gateway body should report its byte length, got %q", got)
+	}
+	html := upstreamErrorConsoleBody([]byte("<html><head><title>502 Bad Gateway</title></head><body>" + strings.Repeat("x", 200) + "</body></html>"))
+	if !strings.Contains(html, "omitted") {
+		t.Fatalf("html error page should stay collapsed, got %q", html)
+	}
+	if got := upstreamErrorConsoleBody([]byte(`{"error":{"message":"boom"}}`)); !strings.Contains(got, "boom") {
+		t.Fatalf("json body should pass through, got %q", got)
+	}
+}
+
 func TestRetryBudgetAvailable(t *testing.T) {
 	cases := []struct {
 		used, limit int

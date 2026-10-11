@@ -1853,23 +1853,27 @@ type traeCNKeepaliveWriter struct {
 	mu     sync.Mutex
 	target io.Writer
 	stop   chan struct{}
+	done   chan struct{}
 	once   sync.Once
 }
 
 func startTraeCNKeepalive(target io.Writer) *traeCNKeepaliveWriter {
-	writer := &traeCNKeepaliveWriter{target: target, stop: make(chan struct{})}
+	writer := &traeCNKeepaliveWriter{target: target, stop: make(chan struct{}), done: make(chan struct{})}
 	if target == nil {
+		close(writer.done)
 		return writer
 	}
 	interval := traeCNKeepaliveInterval
 	if raw := strings.TrimSpace(os.Getenv("TRAECN_KEEPALIVE_SECONDS")); raw != "" {
 		if seconds, err := strconv.Atoi(raw); err == nil && seconds <= 0 {
+			close(writer.done)
 			return writer
 		} else if err == nil {
 			interval = time.Duration(seconds) * time.Second
 		}
 	}
 	go func() {
+		defer close(writer.done)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -1903,6 +1907,7 @@ func (w *traeCNKeepaliveWriter) Close() error {
 		return nil
 	}
 	w.once.Do(func() { close(w.stop) })
+	<-w.done
 	return nil
 }
 
@@ -1915,13 +1920,18 @@ func traeCNCanonicalStreamForTools(source io.ReadCloser, model string, bridges t
 func traeCNCanonicalStreamWithPreflight(source io.ReadCloser, model string, bridges traeCNBridges, contracts traeCNContracts, preflightPassthrough bool, diagnostics ...*traeCNDiagnostic) io.ReadCloser {
 	reader, writer := io.Pipe()
 	go func() {
-		defer writer.Close()
 		defer source.Close()
 		// 保活写入器包住 pipe writer：长思考期间持续发 SSE 注释，避免反代按空闲
 		// 超时掐断连接（客户端会显示"正在重新连接 N/5"并整轮重试）。
 		pipeWriter := writer
 		keepalive := startTraeCNKeepalive(pipeWriter)
-		defer keepalive.Close()
+		defer func() {
+			// Close the pipe before waiting for the keepalive goroutine. A heartbeat
+			// may be blocked in io.PipeWriter.Write after the downstream disconnects;
+			// closing the pipe releases that write and lets Close finish.
+			_ = writer.Close()
+			_ = keepalive.Close()
+		}()
 		state := newTraeCNCanonicalStateWithBridges(model, bridges, contracts)
 		if len(diagnostics) > 0 {
 			state.diagnostic = diagnostics[0]
@@ -2002,7 +2012,7 @@ func traeCNCanonicalStreamWithPreflight(source io.ReadCloser, model string, brid
 							"response_id": state.responseID, "model": model,
 						})
 					}
-					_ = state.emitFailure(writer, ErrorCodeUpstreamStreamBreak, message)
+					_ = state.emitFailure(keepalive, ErrorCodeUpstreamStreamBreak, message)
 				}
 				return
 			}

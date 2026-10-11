@@ -60,6 +60,41 @@ func TestTraeCNStreamEmitsKeepaliveWhileUpstreamIsSilent(t *testing.T) {
 	}
 }
 
+// TestTraeCNKeepaliveCloseReleasesBlockedHeartbeat 钉住转换器收尾顺序的前提：
+// 下游停读时心跳会阻塞在 pipe 写里，只有先关掉 pipe writer 才能让心跳收尾。
+// 转换器的 defer 必须按"先 writer.Close() 再 keepalive.Close()"执行，否则
+// keepalive.Close() 会一直等一个写不出去的心跳，转换 goroutine 与上游请求都收不了尾。
+func TestTraeCNKeepaliveCloseReleasesBlockedHeartbeat(t *testing.T) {
+	t.Setenv("TRAECN_KEEPALIVE_SECONDS", "1")
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	keepalive := startTraeCNKeepalive(writer)
+
+	// 下游不读：等到心跳真的进入阻塞写（互斥量此时被心跳持有）。
+	time.Sleep(1500 * time.Millisecond)
+
+	closed := make(chan struct{})
+	go func() {
+		_ = keepalive.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("keepalive.Close 在下游停读且 pipe 仍打开时提前返回，说明心跳没有真正写出去")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// 修复点：先关 pipe writer，被阻塞的心跳写立刻返回，Close 才能收尾。
+	if err := writer.Close(); err != nil {
+		t.Fatalf("closing the pipe writer failed: %v", err)
+	}
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("关闭 pipe writer 后 keepalive.Close 仍然阻塞：转换 goroutine 会泄漏")
+	}
+}
+
 func TestTraeCNKeepaliveCanBeDisabled(t *testing.T) {
 	t.Setenv("TRAECN_KEEPALIVE_SECONDS", "0")
 	source, sourceWriter := io.Pipe()

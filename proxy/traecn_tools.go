@@ -366,17 +366,28 @@ func traeCNContinueGuardDisabled() bool {
 // traeCNContinueWorkingHint 在请求带了工具时追加一条反收尾规则。
 //
 // Trae 上游模型习惯把"我接下来要做什么"当最终答复发出来，而 Responses 语义里
-// assistant message 不带后续工具调用就等于本轮结束——表现就是"不设 goal 时任务跑
-// 一会就自己停了"。这里要求它：要么继续调用工具，要么给出带结果的最终答复，
-// 不要只用一句计划/进度说明收尾。没有工具可调用的纯问答请求不注入。
+// assistant message 不带后续工具调用就等于本轮结束——客户端不会报错，只是安静地
+// 停止本轮，用户看到的是"任务没做完就自己断了"（实测：一次会话 23 次 task_started /
+// 21 次 task_complete，正文长度 p50 只有 92 字符，且没有 error 事件）。这里要求它：
+// 要么继续调用工具，要么给出带结果的最终答复，不要只用一句计划/进度说明收尾。
+// 没有工具可调用的纯问答请求不注入，避免模型不肯给结论。
+//
+// 规则同时给中英两版：Trae 后端模型（DeepSeek / GLM 系）对中文指令更敏感，而 Codex
+// 原生历史里混着英文系统提示，双语可以避免只命中其中一半的上下文。
 func traeCNContinueWorkingHint(tools gjson.Result) string {
 	if traeCNContinueGuardDisabled() || !traeCNHasCallableTool(tools) {
 		return ""
 	}
 	return traeContinueWorkingMarker + "\n" +
-		"Do not end the turn with a status note or a plan. Keep calling tools until the work is actually done, " +
-		"and only then give the final answer with the concrete results. " +
-		"Never reply with only \"I will…\", \"Let's…\" or a progress sentence: if the task is unfinished, call the next tool instead of replying."
+		"【本轮必须做完再收尾】任务没有真正完成时，本轮的最后一步必须是一次工具调用；只把计划、" +
+		"进度或\"接下来我会…\"当最后一句就等于直接结束本轮，用户拿不到任何结果。\n" +
+		"- 不允许用\"我先…\"\"接下来…\"\"现在开始…\"\"下一步…\"\"稍等…\"这类进度句结束本轮。\n" +
+		"- 正要写这类句子时，改成立刻调用下一个工具（写文件 / 改文件 / 跑命令 / 跑测试）。\n" +
+		"- 只有真正交付了带具体结果的最终答复时，才可以不调用工具。\n" +
+		"Do not end the turn with a status note, a plan or a progress sentence. Keep calling tools until the work " +
+		"is actually done, and only then give the final answer with the concrete results. " +
+		"If the task is unfinished, end this turn with a tool call instead of replying: never reply with only " +
+		"\"I will…\", \"Let's…\", \"Next I will…\" or \"Now let me…\"."
 }
 
 // traeCNMessagesContain 判断系统指令里是否已经包含某段文本（避免重复注入）。

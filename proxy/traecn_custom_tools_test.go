@@ -307,6 +307,11 @@ func TestTraeCNInjectsContinueWorkingGuardWhenToolsAreAvailable(t *testing.T) {
 	if !strings.Contains(system, traeContinueWorkingMarker) || !strings.Contains(system, "Do not end the turn with a status note") {
 		t.Fatalf("反收尾规则未注入: %s", system)
 	}
+	// 中文指令必须同时在：Trae 后端模型（DeepSeek / GLM 系）对中文措辞更敏感，
+	// 只有英文时模型仍可能用"现在开始写 XXX"这类进度句收尾，客户端于是安静停止本轮。
+	if !strings.Contains(system, "本轮的最后一步必须是一次工具调用") || !strings.Contains(system, "进度句") {
+		t.Fatalf("反收尾规则缺少中文约束（模型会用中文进度句收尾）: %s", system)
+	}
 	if !strings.Contains(system, "You are Codex.") {
 		t.Fatalf("原有 instructions 被覆盖: %s", system)
 	}

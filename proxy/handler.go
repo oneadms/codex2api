@@ -37,9 +37,26 @@ import (
 
 const consoleUpstreamErrorLogMaxBytes = 4 * 1024
 
+// consoleShortNonJSONBodyMaxBytes 是非 JSON 上游正文仍按原样记录的字节上限：
+// 网关的短错误文本落在几十字节量级，超过此长度基本是 HTML 错误页，仍然折叠。
+const consoleShortNonJSONBodyMaxBytes = 512
+
+// upstreamErrorConsoleBody 把上游错误体转成一行可读日志。
+//
+// 非 JSON 的错误体过去一律折叠成"[non-JSON upstream body omitted; N bytes]"，
+// 但上游网关（Trae / NewAPI / Cloudflare 系）的 5xx 常常就是十几到几十字节的纯文本
+// （"502 Bad Gateway"、"rate limit exceeded" 之类），折叠后现场只剩状态码，无法分辨
+// "上游网关挂了"和"账号被限"。短正文按脱敏后的原样记录，长正文（HTML 错误页）仍然折叠。
 func upstreamErrorConsoleBody(body []byte) string {
 	if len(bytes.TrimSpace(body)) > 0 && !gjson.ValidBytes(body) {
-		return fmt.Sprintf("[non-JSON upstream body omitted; %d bytes]", len(body))
+		trimmed := security.SafeTruncate(security.SanitizeLog(strings.Join(strings.Fields(string(body)), " ")), consoleShortNonJSONBodyMaxBytes)
+		if trimmed == "" || strings.Contains(trimmed, "<html") || strings.Contains(trimmed, "<!DOCTYPE") {
+			return fmt.Sprintf("[non-JSON upstream body omitted; %d bytes]", len(body))
+		}
+		if len(bytes.TrimSpace(body)) > consoleShortNonJSONBodyMaxBytes {
+			return fmt.Sprintf("[non-JSON upstream body; %d bytes] %s ... [truncated]", len(body), trimmed)
+		}
+		return fmt.Sprintf("[non-JSON upstream body; %d bytes] %s", len(body), trimmed)
 	}
 	truncated := false
 	if len(body) > consoleUpstreamErrorLogMaxBytes {
@@ -3518,6 +3535,10 @@ func responsesIncompleteFinishReason(eventType, reason string) string {
 // 非请求内容问题，换到号池里其他健康账号即可继续（issue #396）。
 // 402 同理：deactivated_workspace（team 空间被封）等计费维度拒绝是纯账号侧
 // 问题，applyCooldownForModel 已把该账号标错隔离，换号重试即可成功。
+//
+// 502/504 有意不在这里：上游网关的 502/504 归"持续重试策略"显式选择
+// （b29697bb "preserve legacy 502 and 504 behavior"），策略关闭时不重试。
+// TRAE 链路上游返回 502 时要换号，需要在设置里开启 http_5xx 持续重试。
 func isRetryableStatus(code int) bool {
 	return code == http.StatusServiceUnavailable ||
 		code == http.StatusUnauthorized ||
