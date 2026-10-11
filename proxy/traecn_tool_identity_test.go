@@ -40,8 +40,10 @@ func TestTraeCNNamespaceToolRoundTrip(t *testing.T) {
 			t.Fatalf("missing callable tool %q: %s", name, body)
 		}
 	}
-	if gjson.GetBytes(body, "tool_choice.function.name").String() != "device__read" {
-		t.Fatalf("tool choice lost namespace: %s", body)
+	// Trae 的 tool_choice 是字符串字段：带 namespace 的强制选择同样不能发对象上去，
+	// 只能降级成 required（详见 traeCNToolChoiceToChat 与实测的 4001）。
+	if got := gjson.GetBytes(body, "tool_choice"); got.Type != gjson.String || got.String() != "required" {
+		t.Fatalf("tool choice must be downgraded to the string required, got %s", got.Raw)
 	}
 	var history []string
 	for _, message := range gjson.GetBytes(body, "messages").Array() {
