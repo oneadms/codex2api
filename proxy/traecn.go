@@ -21,6 +21,7 @@ import (
 	"github.com/codex2api/security"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // traeResultText returns a textual provider value without serializing null.
@@ -994,6 +995,94 @@ type traeCNCanonicalState struct {
 	// （metadata / progress_notice / queue_* 等）作为真实事件立即转发下游，
 	// 而不是丢弃。默认关闭（见 auth.TraeCNPreflightSSEPassthroughEnabled）。
 	preflightPassthrough bool
+	// redriver 让转换器在"模型用计划句收尾"时用同一账号把上游再驱动一次；
+	// 详见 traeCNContinuationNudge 与 shouldRedriveTraeCNTurn。
+	redriver traeCNUpstreamRedriver
+	// maxRedrives 是本条响应内允许的自动续跑次数（TRAECN_AUTO_CONTINUE_MAX，默认 2）。
+	maxRedrives int
+	redrives    int
+	// pendingRedrive 置位后由读取循环换源继续，而不是收尾。
+	pendingRedrive bool
+	redriveText    string
+	// segmentStart 记录当前上游分段在 text 里的起点：自动续跑后只按本段正文判定，
+	// 避免把上一段已经被判定过的计划句再判一次。
+	segmentStart int
+}
+
+// traeCNUpstreamRedriver 用同一个账号/请求体把上游再驱动一次。priorText 是本段
+// 已经产出的正文，续跑请求会把它作为 assistant 历史回灌给模型。
+type traeCNUpstreamRedriver func(priorText string) (io.ReadCloser, error)
+
+const (
+	// traeCNAutoContinueDefault 是默认的自动续跑上限。0 表示关闭（TRAECN_AUTO_CONTINUE_MAX=0）。
+	traeCNAutoContinueDefault = 2
+	// traeCNRedriveShortTextLimit 以内的正文整段参与判定（约 400 字），更长的只看尾部窗口。
+	// 判定条件从"正文够短"改成"窗口里有动作宣告"，因为长正文里也可能出现
+	// "等待 worker 产出后再决定下一步"这类没做完就停的收尾。
+	traeCNRedriveShortTextLimit = 400
+	// traeCNRedriveTailWindow 是长正文的判定窗口。
+	traeCNRedriveTailWindow = 150
+)
+
+// traeCNContinuationNudge 是自动续跑时追加的最后一条用户消息。用用户口吻说"继续"
+// 是模型最容易正确响应、也最不容易跑偏的形式；同时保留"确实做完就一句话收尾"的出口，
+// 避免任务真的结束时被逼着做多余操作。
+const traeCNContinuationNudge = "继续。如果任务还没做完，立刻调用下一个工具继续执行，不要用计划、" +
+	"进度或\u201c接下来我会…\u201d这类句子收尾；如果确实已经做完，只用一句话确认完成，不要再做额外操作。"
+
+func traeCNAutoContinueLimit() int {
+	raw := strings.TrimSpace(os.Getenv("TRAECN_AUTO_CONTINUE_MAX"))
+	if raw == "" {
+		return traeCNAutoContinueDefault
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		return traeCNAutoContinueDefault
+	}
+	return value
+}
+
+// traeCNNextActionAnnouncement 判断一段正文是不是"报下一个动作"而不是"交付结果"。
+// 这是 Trae 后端模型最典型的提前收尾形态：正文在说自己接下来要做什么。
+//
+// 判定窗口在历史语料（2859 个带工具回合、345 个无工具调用结束）上标定：
+// 整段/尾部窗口 + 明确动作宣告词，命中全部已知的进度句收尾，触发率 0.84%
+// （即每 100 个带工具回合多花不到 1 次上游续跑），代价可忽略。
+func traeCNNextActionAnnouncement(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	// 以问号结尾是模型在等用户回话，属于合法的回合结束，不该被续跑打断。
+	if runes := []rune(trimmed); len(runes) > 0 {
+		if last := runes[len(runes)-1]; last == '?' || last == '？' {
+			return false
+		}
+	}
+	tailRunes := []rune(trimmed)
+	window := trimmed
+	if len(tailRunes) > traeCNRedriveShortTextLimit {
+		window = string(tailRunes[len(tailRunes)-traeCNRedriveTailWindow:])
+	}
+	tail := strings.ToLower(window)
+	// 礼貌收尾不是"没做完"：让用户决定是否继续，续跑只会产生多余动作。
+	for _, closer := range []string{"let me know", "if you need", "if you'd like", "让我知道", "如果你需要", "需要我继续"} {
+		if strings.Contains(tail, closer) {
+			return false
+		}
+	}
+	for _, marker := range []string{
+		"我等", "等一下", "稍等", "接下来", "下面我", "下一步", "马上", "我先", "先看看", "先了解", "先确认",
+		"现在开始", "现在去", "现在写", "现在做", "现在创建", "现在运行", "现在补", "现在检查", "现在实现",
+		"接着", "随后", "然后再", "然后运行", "然后做", "之后再",
+		"let me ", "now i", "now the ", "now let", "i will ", "i'll ", "next, i", "next i", "going to ",
+		"then run", "then verify", "then check", "then write", "then commit", "then test", "then give",
+	} {
+		if strings.Contains(tail, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func newTraeCNCanonicalState(model string) *traeCNCanonicalState {
@@ -1511,6 +1600,114 @@ func (s *traeCNCanonicalState) emitBridgedHostedTool(writer io.Writer, tool *tra
 	return item, nil
 }
 
+// traeCNSegmentText 返回当前上游分段产出的正文（自动续跑后不含上一段）。
+func (s *traeCNCanonicalState) traeCNSegmentText() string {
+	full := s.text.String()
+	if s.segmentStart <= 0 || s.segmentStart > len(full) {
+		return full
+	}
+	return full[s.segmentStart:]
+}
+
+// shouldRedriveTraeCNTurn 判定这一轮是不是"该继续而不是该收尾"。
+//
+// 只在客户端声明了可调用工具、本轮一个工具调用都没有、且正文是"报下一个动作"时才成立；
+// 长度截断/内容过滤（incomplete）保持原语义，不做续跑。
+func (s *traeCNCanonicalState) shouldRedriveTraeCNTurn(finishReason string) bool {
+	if s.redriver == nil || s.maxRedrives <= 0 || s.redrives >= s.maxRedrives {
+		return false
+	}
+	if len(s.contracts) == 0 || len(s.tools) > 0 {
+		return false
+	}
+	// 已完成交付的最终答复长度通常远超阈值，窄判定只挑短的计划/进度句。
+	if traeIncompleteReason(finishReason) != "" {
+		return false
+	}
+	return traeCNNextActionAnnouncement(s.traeCNSegmentText())
+}
+
+// prepareRedrive 置位续跑意图，返回 true 表示调用方（读取循环）应当换用新的上游分段，
+// 而不是结束本轮。重开失败时退回普通收尾，已经产出的内容照常交付。
+func (s *traeCNCanonicalState) prepareRedrive(finishReason string) bool {
+	if !s.shouldRedriveTraeCNTurn(finishReason) {
+		return false
+	}
+	s.pendingRedrive = true
+	s.redriveText = s.traeCNSegmentText()
+	if debugAgentLogEnabled() {
+		debugAgentLog("traecn.go:prepareRedrive", "traecn redrive scheduled", "A", "pre-fix", map[string]any{
+			"rerives": s.redrives, "declared_tools": len(s.contracts), "output_chars": len([]rune(s.traeCNSegmentText())),
+			"text_tail": debugAgentTextTail(s.traeCNSegmentText(), 120), "response_id": s.responseID, "model": s.model,
+		})
+	}
+	log.Printf("[TRAECN] stage=redrive request_id=%q model=%q response_id=%q ordinal=%d declared_tools=%d reason=%q",
+		s.traeCNDiagnosticID(), s.model, s.responseID, s.redrives+1, len(s.contracts),
+		responsesIdentityLogValue(debugAgentTextTail(s.traeCNSegmentText(), 120)))
+	return true
+}
+
+func (s *traeCNCanonicalState) traeCNDiagnosticID() string {
+	if s.diagnostic != nil {
+		return s.diagnostic.id
+	}
+	return ""
+}
+
+// takeRedrive 执行一次续跑，把上游源换成新分段。失败时清掉续跑意图，
+// 让调用方按普通完成收尾。
+func (s *traeCNCanonicalState) takeRedrive() (io.ReadCloser, error) {
+	if !s.pendingRedrive {
+		return nil, fmt.Errorf("no pending Trae CN redrive")
+	}
+	prior := s.redriveText
+	s.pendingRedrive = false
+	next, err := s.redriver(prior)
+	if err != nil {
+		s.redriveText = ""
+		return nil, err
+	}
+	s.redrives++
+	s.redriveText = ""
+	s.segmentStart = s.text.Len()
+	// 新分段自己的 finish_reason 才是本轮的终态依据，上一段的判定不复用。
+	s.finishReason, s.finishReasonSource, s.finishReasonPath, s.finishReasonEvent = "", "", "", ""
+	return next, nil
+}
+
+// traeCNContinuationBody 在续跑请求里回灌模型自己刚说的话，再补一条"继续"提醒。
+// messages 形态与首轮完全一致，因此上游看到的仍然是同一条会话。
+func traeCNContinuationBody(body []byte, priorText string) []byte {
+	root := gjson.ParseBytes(body)
+	if !root.IsObject() {
+		return body
+	}
+	var messages []map[string]any
+	for _, message := range root.Get("messages").Array() {
+		parsed := map[string]any{}
+		if err := json.Unmarshal([]byte(message.Raw), &parsed); err != nil {
+			return body
+		}
+		messages = append(messages, parsed)
+	}
+	if len(messages) == 0 {
+		return body
+	}
+	text := strings.TrimSpace(priorText)
+	if text == "" {
+		text = "（继续）"
+	}
+	messages = append(messages,
+		map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": text}}},
+		map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": traeCNContinuationNudge}}},
+	)
+	updated, err := sjson.SetBytes(body, "messages", messages)
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
 func (s *traeCNCanonicalState) emitCompleted(writer io.Writer, finishReason string) error {
 	if s.terminal {
 		return nil
@@ -1536,6 +1733,14 @@ func (s *traeCNCanonicalState) emitCompleted(writer io.Writer, finishReason stri
 	}
 	if (finishReason == "tool_calls" || finishReason == "function_call") && len(s.tools) == 0 {
 		return s.emitFailure(writer, "missing_tool_calls", "Trae CN ended with a tool-call finish reason but returned no tool calls")
+	}
+	// 提前收尾的确定性兜底：客户端声明了工具、本轮却没吐出任何工具调用，正文又只是
+	// "我接下来要做什么"——按 Responses 语义这就等于本轮结束，客户端不会报错，只会
+	// 安静地停下，用户看到的是"任务没做完就自己断了"。这里先不放终态，用同一账号把
+	// 上游再驱动一次，让本轮真的继续。提示词层面的反收尾规则只能降低概率，这一步才是
+	// 保证"不再静默停"的兜底（可用 TRAECN_AUTO_CONTINUE_MAX=0 关闭）。
+	if s.prepareRedrive(finishReason) {
+		return nil
 	}
 	incompleteReason := traeIncompleteReason(finishReason)
 	status := "completed"
@@ -1918,9 +2123,18 @@ func traeCNCanonicalStreamForTools(source io.ReadCloser, model string, bridges t
 // traeCNCanonicalStreamWithPreflight 允许调用方显式指定前置元数据下发策略，
 // 使转换器与本次请求的出口决策（含连续重试抑制）保持一致。
 func traeCNCanonicalStreamWithPreflight(source io.ReadCloser, model string, bridges traeCNBridges, contracts traeCNContracts, preflightPassthrough bool, diagnostics ...*traeCNDiagnostic) io.ReadCloser {
+	return traeCNCanonicalStreamWithRedrive(source, model, bridges, contracts, preflightPassthrough, nil, diagnostics...)
+}
+
+// traeCNCanonicalStreamWithRedrive 在 traeCNCanonicalStreamWithPreflight 之上接一个
+// "上游再驱动"回调：模型用计划/进度句提前收尾时，转换器不放终态，而是换成新的上游
+// 分段继续转换，整轮对客户端来说就是一次没有中断的生成。
+func traeCNCanonicalStreamWithRedrive(source io.ReadCloser, model string, bridges traeCNBridges, contracts traeCNContracts, preflightPassthrough bool, redriver traeCNUpstreamRedriver, diagnostics ...*traeCNDiagnostic) io.ReadCloser {
 	reader, writer := io.Pipe()
 	go func() {
-		defer source.Close()
+		current := source
+		// 换源后关闭的应当是最后一个上游分段。
+		defer func() { _ = current.Close() }()
 		// 保活写入器包住 pipe writer：长思考期间持续发 SSE 注释，避免反代按空闲
 		// 超时掐断连接（客户端会显示"正在重新连接 N/5"并整轮重试）。
 		pipeWriter := writer
@@ -1937,10 +2151,15 @@ func traeCNCanonicalStreamWithPreflight(source io.ReadCloser, model string, brid
 			state.diagnostic = diagnostics[0]
 		}
 		state.preflightPassthrough = preflightPassthrough
+		state.redriver = redriver
+		state.maxRedrives = 0
+		if redriver != nil {
+			state.maxRedrives = traeCNAutoContinueLimit()
+		}
 		if err := state.emitCreated(keepalive); err != nil {
 			return
 		}
-		br := bufio.NewReader(source)
+		br := bufio.NewReader(current)
 		streamStartedAt := time.Now()
 		var lastUpstreamReadAt time.Time
 		var eventName string
@@ -1988,6 +2207,27 @@ func traeCNCanonicalStreamWithPreflight(source io.ReadCloser, model string, brid
 						data.WriteByte('\n')
 					}
 					data.WriteString(strings.TrimSpace(line))
+				}
+			}
+			if state.pendingRedrive {
+				// 模型用计划句提前收尾：换成新的上游分段继续，而不是放终态。
+				next, redriveErr := state.takeRedrive()
+				if redriveErr != nil {
+					// 换源失败就退回普通收尾：已经拿到的内容照常交付，避免把
+					// "续跑不成功"变成一次新的失败。关掉 redriver 防止再次进入。
+					log.Printf("[TRAECN] stage=redrive_failed response_id=%q err=%v", state.responseID, redriveErr)
+					state.redriver = nil
+					if err := state.emitCompleted(keepalive, ""); err != nil {
+						return
+					}
+				} else {
+					_ = current.Close()
+					current = next
+					br = bufio.NewReader(current)
+					eventName = ""
+					data.Reset()
+					lastUpstreamReadAt = time.Now()
+					continue
 				}
 			}
 			if state.terminal {
@@ -2241,7 +2481,42 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 		return resp, nil
 	}
 	upstreamBody := wrapTraeCNCreditsRemainScanner(wrapTraeCNResumeUpstream(ctx, client, req, resp.Body), account)
-	canonicalStream := diagnostic.reader(traeCNCanonicalStreamWithPreflight(upstreamBody, model, bridges, contracts, traeCNPreflightPassthroughForContext(ctx), diagnostic), "responses.sse")
+	// 续跑复用同一账号、同一端点、同一工具声明与同一个出口（Resin 租约 / 代理），
+	// 只把模型刚说的话作为 assistant 历史回灌，再补一条"继续"提醒。续跑不改变
+	// 计费与上下文归属，因此不需要重新走账号调度。
+	redriver := func(priorText string) (io.ReadCloser, error) {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		continuation := traeCNContinuationBody(body, priorText)
+		nextReq, nextErr := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(continuation))
+		if nextErr != nil {
+			return nil, nextErr
+		}
+		nextReq.Header = auth.TraeCNRequestHeaders(account, accessToken, uuid.NewString())
+		nextReq.Header.Set("Referer", endpoint)
+		for key, value := range customHeaders {
+			if strings.EqualFold(key, "Authorization") || strings.EqualFold(key, "X-Cloudide-Token") {
+				continue
+			}
+			if !strings.ContainsAny(value, "\r\n") {
+				nextReq.Header.Set(key, value)
+			}
+		}
+		if viaResin {
+			nextReq.Header.Set("X-Resin-Account", ResinAccountID(account))
+		}
+		nextResp, nextErr := client.Do(nextReq)
+		if nextErr != nil {
+			return nil, nextErr
+		}
+		if nextResp.StatusCode < 200 || nextResp.StatusCode >= 300 {
+			_ = nextResp.Body.Close()
+			return nil, fmt.Errorf("Trae CN redrive upstream status %d", nextResp.StatusCode)
+		}
+		return wrapTraeCNCreditsRemainScanner(nextResp.Body, account), nil
+	}
+	canonicalStream := diagnostic.reader(traeCNCanonicalStreamWithRedrive(upstreamBody, model, bridges, contracts, traeCNPreflightPassthroughForContext(ctx), redriver, diagnostic), "responses.sse")
 	// Chat and Messages handlers deliberately aggregate canonical SSE for their
 	// non-stream response types. Native Responses non-stream instead expects one
 	// response JSON object, so aggregate only that inbound protocol here.
