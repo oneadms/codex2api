@@ -105,3 +105,48 @@ func TestTraeCNParallelToolHistoryStaysInOneTurn(t *testing.T) {
 		t.Fatalf("parallel calls were split into invalid assistant turns: %s", body)
 	}
 }
+
+// TestTraeCNToolChoiceObjectIsDowngradedToString 覆盖线上实测到的上游 400：
+// Trae 的 LLMUtilsChatRequest.tool_choice 是字符串字段，发对象会被上游拒绝
+// （code 4001 "cannot unmarshal object into Go struct field ... tool_choice"），
+// 整轮请求当场失败。对象形态必须降级成字符串，而不是原样发出去。
+func TestTraeCNToolChoiceObjectIsDowngradedToString(t *testing.T) {
+	cases := []struct {
+		choice string
+		want   string
+	}{
+		{`"auto"`, "auto"},
+		{`"none"`, "none"},
+		{`"required"`, "required"},
+		{`{"type":"function","name":"exec_command","namespace":""}`, "required"},
+		{`{"type":"function","function":{"name":"read_file"}}`, "required"},
+		{`{"type":"custom","name":"apply_patch"}`, "required"},
+		{`{"type":"tool_search"}`, "required"},
+		{`{"type":"allowed_tools","tools":[{"type":"function","name":"x"}]}`, "required"},
+		{`{"type":"auto"}`, "auto"},
+		{`{"type":"none"}`, "none"},
+		{`{"type":"something_new"}`, "required"},
+	}
+	for _, tc := range cases {
+		converted, err := traeCNToolChoiceToChat(gjson.Parse(tc.choice))
+		if err != nil {
+			t.Fatalf("tool_choice %s 转换失败: %v", tc.choice, err)
+		}
+		got, ok := converted.(string)
+		if !ok {
+			t.Fatalf("tool_choice %s 转换结果必须是字符串（Trae 字段是 string），实际 %#v", tc.choice, converted)
+		}
+		if got != tc.want {
+			t.Fatalf("tool_choice %s → %q, want %q", tc.choice, got, tc.want)
+		}
+	}
+
+	// 出站请求体里也必须真的是字符串，否则上游仍然会 400。
+	body, _, _, _, err := traeCNRequestBodyPlan([]byte(`{"model":"deepseek-v3","input":"x","tool_choice":{"type":"function","name":"exec_command"},"tools":[{"type":"function","name":"exec_command","parameters":{"type":"object"}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gjson.GetBytes(body, "tool_choice"); got.Type != gjson.String || got.String() != "required" {
+		t.Fatalf("出站 tool_choice = %s (type %v), want 字符串 required", got.Raw, got.Type)
+	}
+}

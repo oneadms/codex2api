@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 	"unicode/utf8"
 
@@ -37,19 +38,36 @@ func traeCNToolWireName(namespace, name string) string {
 	return fmt.Sprintf("%s__%x", prefix, sum[:8])
 }
 
+// traeCNToolChoiceToChat 把 Responses 的 tool_choice 转成 Trae 能反序列化的形态。
+//
+// Trae 的 LLMUtilsChatRequest.tool_choice 是**字符串**字段：发对象会被上游直接拒绝，
+// 原样返回 4001（"json: cannot unmarshal object into Go struct field
+// LLMUtilsChatRequest.tool_choice of type ..."），整轮请求当场失败。实测上游只接受
+// auto / none / required 三个字符串，而且 required 目前未被强制执行。
+//
+// 因此对象形态（强制调用某个工具）在 Trae 侧无法表达：降级成 required，保留"本轮必须
+// 产生一次工具调用"的意图，而不是把一个能跑的请求换成一个 400。客户端点名的具体工具
+// 由它自己从返回的调用里认领；Trae 不接受按名字强制，硬发只会让这一轮彻底丢掉。
 func traeCNToolChoiceToChat(choice gjson.Result) (any, error) {
-	if !choice.IsObject() {
+	if !choice.Exists() || choice.Type == gjson.Null {
+		return nil, nil
+	}
+	if choice.Type == gjson.String {
 		return responsesToolChoiceToChat(choice)
 	}
-	switch choice.Get("type").String() {
-	case "function", "custom":
-		name := traeCNDeclarationName(choice)
-		namespace := traeFirstText(choice, "namespace", "function.namespace")
-		return map[string]any{"type": "function", "function": map[string]any{"name": traeCNToolWireName(namespace, name)}}, nil
-	case "tool_search":
-		return map[string]any{"type": "function", "function": map[string]any{"name": "tool_search"}}, nil
+	switch strings.TrimSpace(choice.Get("type").String()) {
+	case "auto":
+		return "auto", nil
+	case "none":
+		return "none", nil
+	case "required":
+		return "required", nil
+	case "function", "custom", "tool_search", "allowed_tools":
+		return "required", nil
 	default:
-		return responsesToolChoiceToChat(choice)
+		// 未知形态同样不能发对象上去：记录后按 required 降级，宁可语义放宽也不丢整轮。
+		log.Printf("[TRAECN] unsupported tool_choice shape %q downgraded to required", choice.Raw)
+		return "required", nil
 	}
 }
 
