@@ -163,6 +163,11 @@ func TestCodexTimezoneFirstAddUsesBoundGroupProxyOnce(t *testing.T) {
 			h := newCodexTimezoneTestHandler(t)
 			var calls atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// AT 添加还会检查模型能力，只统计发往 IP 查询网站的请求。
+				if r.URL.Host != "ip-lookup.test" {
+					http.NotFound(w, r)
+					return
+				}
 				calls.Add(1)
 				_, _ = w.Write([]byte(`{"success":true,"ip":"2001:db8::9","timezone":{"id":"Europe/London"}}`))
 			}))
