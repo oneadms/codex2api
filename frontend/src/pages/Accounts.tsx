@@ -2036,6 +2036,7 @@ export default function Accounts() {
     useState<CodexFingerprintMode>("off");
   const [editTimezone, setEditTimezone] = useState("");
   const [editTimezoneCustom, setEditTimezoneCustom] = useState(false);
+  const [editTimezoneBinding, setEditTimezoneBinding] = useState(false);
   // Turn State 强制注入:注入值 + 限定模型(逗号分隔)。仅 Codex 官方账号下发。
   const [editCodexTurnState, setEditCodexTurnState] = useState("");
   const [editCodexTurnStateModels, setEditCodexTurnStateModels] = useState("");
@@ -5919,7 +5920,7 @@ export default function Accounts() {
   };
 
   const closeSchedulerEditor = (force = false) => {
-    if (editSubmitting && !force) return;
+    if ((editSubmitting || editTimezoneBinding) && !force) return;
     setEditingAccount(null);
     setEditTab("scheduler");
     setScoreMode("default");
@@ -6052,6 +6053,28 @@ export default function Accounts() {
     skipWarmTier,
     keepConcurrencyOnDegrade,
   ]);
+
+  const handleBindTimezoneFromIP = async () => {
+    if (!editingAccount || editTimezoneBinding || editSubmitting) return;
+    setEditTimezoneBinding(true);
+    try {
+      const result = await api.bindCodexTimezoneFromIP(editingAccount.id);
+      setEditTimezone(result.timezone);
+      setEditTimezoneCustom(!findClaudeTimezoneOption(result.timezone));
+      setEditingAccount((account) =>
+        account ? { ...account, timezone: result.timezone } : account,
+      );
+      showToast(t("accounts.codexTimezoneBoundFromIP", result));
+      void reloadSilently();
+    } catch (error) {
+      showToast(
+        t("accounts.codexTimezoneBindFailed", { error: getErrorMessage(error) }),
+        "error",
+      );
+    } finally {
+      setEditTimezoneBinding(false);
+    }
+  };
 
   const handleSaveScheduler = async () => {
     if (!editingAccount) return;
@@ -9480,7 +9503,9 @@ export default function Accounts() {
                 <Button
                   variant="outline"
                   onClick={() => closeSchedulerEditor()}
-                  disabled={editSubmitting || editOAuthGenerating}
+                  disabled={
+                    editSubmitting || editTimezoneBinding || editOAuthGenerating
+                  }
                 >
                   {t("common.cancel")}
                 </Button>
@@ -9494,6 +9519,7 @@ export default function Accounts() {
                     disabled={
                       editOAuthGenerating ||
                       editOAuthUpdating ||
+                      editTimezoneBinding ||
                       (editOAuthStep === "exchange" &&
                         !editOAuthCallbackUrl.trim())
                     }
@@ -9511,6 +9537,7 @@ export default function Accounts() {
                     onClick={() => void handleSaveAccountEditor()}
                     disabled={
                       editSubmitting ||
+                      editTimezoneBinding ||
                       (editTab === "scheduler" &&
                         (scoreInputInvalid ||
                           concurrencyInputInvalid ||
@@ -10385,7 +10412,27 @@ export default function Accounts() {
                               custom: editTimezoneCustom,
                               onChange: setEditTimezone,
                               onCustomChange: setEditTimezoneCustom,
+                              disabled: editTimezoneBinding || editSubmitting,
                             })}
+                            <div className="mt-3 flex flex-wrap items-center gap-2">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={editTimezoneBinding || editSubmitting}
+                                onClick={() => void handleBindTimezoneFromIP()}
+                              >
+                                <Globe className="size-3.5" />
+                                {t(
+                                  editTimezoneBinding
+                                    ? "accounts.codexTimezoneBinding"
+                                    : "accounts.codexTimezoneBindFromIP",
+                                )}
+                              </Button>
+                              <span className="text-xs text-muted-foreground">
+                                {t("accounts.codexTimezoneBindFromIPHint")}
+                              </span>
+                            </div>
                           </div>
                         ) : null}
 

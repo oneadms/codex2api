@@ -531,6 +531,11 @@
     }
   },
   "accounts": {
+    "codexTimezoneBindFromIP": "依出口 IP 綁定時區",
+    "codexTimezoneBinding": "正在查詢出口 IP…",
+    "codexTimezoneBindFromIPHint": "使用帳號已儲存的出口設定查詢並立即綁定。首次新增帳號後會自動嘗試一次。",
+    "codexTimezoneBoundFromIP": "出口 IP：{{ip}}，已綁定時區 {{timezone}}",
+    "codexTimezoneBindFailed": "自動綁定時區失敗：{{error}}",
     "providerViewCodex": "Codex",
     "providerViewGrok": "Grok",
     "providerViewAntigravity": "Antigravity",

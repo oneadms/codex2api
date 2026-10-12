@@ -274,8 +274,14 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "账号写入数据库失败: "+err.Error())
 		return
 	}
-	if proxy.IsResinEnabled() && !updated {
-		go proxy.InheritLease(resinTempID, fmt.Sprintf("%d", id))
+	if !updated {
+		h.startDBBackgroundTask(func(context.Context) {
+			// 先继承授权阶段的出口租约，再查询时区，避免绑定到临时分配的 IP。
+			if proxy.IsResinEnabled() {
+				proxy.InheritLease(resinTempID, fmt.Sprintf("%d", id))
+			}
+			h.scheduleCodexTimezoneBindings([]int64{id})
+		})
 	}
 
 	email := ""
@@ -799,8 +805,13 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 		return
 	}
 
-	if proxy.IsResinEnabled() && !updated {
-		go proxy.InheritLease(resinTempID, fmt.Sprintf("%d", id))
+	if !updated {
+		h.startDBBackgroundTask(func(context.Context) {
+			if proxy.IsResinEnabled() {
+				proxy.InheritLease(resinTempID, fmt.Sprintf("%d", id))
+			}
+			h.scheduleCodexTimezoneBindings([]int64{id})
+		})
 	}
 
 	email := ""

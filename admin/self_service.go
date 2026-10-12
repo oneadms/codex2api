@@ -269,6 +269,7 @@ func (h *Handler) upsertSelfServiceAccount(ctx context.Context, name, proxyURL s
 		return 0, err
 	}
 	h.db.InsertAccountEventAsync(id, "added", selfServiceSource)
+	h.scheduleCodexTimezoneBindings([]int64{id})
 	// 公开提交不走 /api/admin/accounts* 失效中间件；不主动丢快照的话，
 	// 账号页 SWR 会继续吐旧列表，待审核面板第一次查询就是 0。
 	h.invalidateAccountSnapshotCaches()

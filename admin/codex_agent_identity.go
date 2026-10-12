@@ -187,6 +187,7 @@ func (h *Handler) ImportCodexAgentIdentity(c *gin.Context) {
 		writeError(c, http.StatusConflict, "该 Agent Identity 账号已存在")
 		return
 	}
+	h.scheduleCodexTimezoneBindings([]int64{id})
 
 	security.SecurityAuditLog("CODEX_AGENT_IDENTITY_ADDED", fmt.Sprintf("account_id=%d email=%s ip=%s", id, fields.Email, c.ClientIP()))
 	c.JSON(http.StatusOK, gin.H{
@@ -426,6 +427,7 @@ func (h *Handler) BatchImportCodexAgentIdentity(c *gin.Context) {
 		item.ID = id
 		items = append(items, item)
 		imported++
+		h.scheduleCodexTimezoneBindings([]int64{id})
 	}
 
 	security.SecurityAuditLog("CODEX_AGENT_IDENTITY_FILE_IMPORTED", fmt.Sprintf("total=%d imported=%d ip=%s", len(req.Files), imported, c.ClientIP()))

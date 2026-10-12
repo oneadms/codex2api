@@ -1229,6 +1229,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/channel-monitors", h.ListChannelMonitors)
 	api.GET("/channel-monitors/billing-rates", h.ListChannelMonitorBillingRates)
 	api.POST("/channel-monitors/:id/probe", h.ProbeChannelMonitorNow)
+	api.POST("/accounts/:id/timezone/bind-from-ip", h.BindCodexTimezoneFromIP)
 	api.DELETE("/accounts/:id", h.DeleteAccount)
 	api.GET("/accounts/health-bars", h.GetAccountHealthBars)
 	api.GET("/accounts/recycle-bin", h.ListRecycleBinAccounts)
@@ -3945,6 +3946,7 @@ func (h *Handler) AddAccount(c *gin.Context) {
 	}
 
 	newAccountIDs := createdIDs.snapshot()
+	h.scheduleCodexTimezoneBindings(newAccountIDs)
 	h.scheduleInviteGuideProbes(ctx, newAccountIDs)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -4036,6 +4038,7 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 		})
 	}
 	newAccountIDs := createdIDs.snapshot()
+	h.scheduleCodexTimezoneBindings(newAccountIDs)
 	h.scheduleInviteGuideProbes(ctx, newAccountIDs)
 
 	sendImportEvent(c, importEvent{
@@ -4240,6 +4243,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 		boundGroups = false
 		msg += "，但分组绑定失败: " + err.Error()
 	}
+	h.scheduleCodexTimezoneBindings(createdIDs.snapshot())
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":      msg,
@@ -4361,6 +4365,7 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 			Warning: "账号已添加，但分组绑定失败: " + err.Error(),
 		})
 	}
+	h.scheduleCodexTimezoneBindings(createdIDs.snapshot())
 	sendImportEvent(c, importEvent{
 		Type: "complete", Current: total, Total: total,
 		Success: successCount, Updated: updatedCount, Duplicate: duplicateCount, Failed: failCount,
@@ -6465,6 +6470,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, set
 	// 邀请资格探测排在 complete 之前入队，但不等待结果：探测走导入闸门的后台
 	// worker，前端拿到 created_ids 后自行轮询方案接口。阻塞在这里会把一次导入
 	// 的响应拖长到几十秒。
+	h.scheduleCodexTimezoneBindings(newAccountIDs)
 	h.scheduleInviteGuideProbes(c.Request.Context(), newAccountIDs)
 
 	sendImportEvent(c, importEvent{
