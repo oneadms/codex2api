@@ -26,7 +26,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const Version = "v1.19.31"
+const Version = "v1.19.27"
 const Endpoint = "http://127.0.0.1:3101"
 
 var managers sync.Map
