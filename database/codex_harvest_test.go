@@ -29,7 +29,8 @@ func TestCodexHarvestPersistence(t *testing.T) {
 			ctx := context.Background()
 			repo := db.HarvestRepository()
 			controls := harvest.NewCodexHarvestService(repo, repo, nil)
-			settings := harvest.CodexHarvestControls{Version: 1, NodeMemoryEnabled: true, Speed: harvest.CodexHarvestSpeedPresets()["burst"]}
+			settings := harvest.CodexHarvestControls{Version: 1, Transport: "websocket", EdgeIP: "1.1.1.1", ReuseSourceAccountID: 42,
+				NodeMemoryEnabled: true, Speed: harvest.CodexHarvestSpeedPresets()["burst"]}
 			if err = controls.SaveControls(ctx, settings); err != nil {
 				t.Fatal(err)
 			}
