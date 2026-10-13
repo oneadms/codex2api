@@ -147,6 +147,11 @@ func TestCodexTicketSettingsRejectsIncompleteEnable(t *testing.T) {
 }
 
 func TestCodexTicketReadyAccountCountsOnlyEligibleCodexAccounts(t *testing.T) {
+	previous := auth.ConfiguredCodexTicketSettings()
+	t.Cleanup(func() { auth.SetConfiguredCodexTicketSettings(previous) })
+	settings := previous
+	settings.TargetLength = 292
+	auth.SetConfiguredCodexTicketSettings(settings)
 	raw := make([]byte, auth.CodexTicketEnvelopeHeaderBytes+auth.CodexTicketBlockBytes*auth.CodexTicketPersonalBlocks)
 	raw[0] = 0x80
 	binary.BigEndian.PutUint64(raw[1:9], uint64(time.Now().Unix()))
@@ -168,6 +173,11 @@ func TestCodexTicketReadyAccountCountsOnlyEligibleCodexAccounts(t *testing.T) {
 	ready, total := handler.codexTicketReadyAccountCounts([]string{"gpt-6-astra"})
 	if ready != 1 || total != 2 {
 		t.Fatalf("ready/total = %d/%d, want 1/2", ready, total)
+	}
+	settings.TargetLength = 780
+	auth.SetConfiguredCodexTicketSettings(settings)
+	if ready, total := handler.codexTicketReadyAccountCounts([]string{"gpt-6-astra"}); ready != 0 || total != 2 {
+		t.Fatalf("旧长度票计入新目标就绪数: %d/%d", ready, total)
 	}
 }
 

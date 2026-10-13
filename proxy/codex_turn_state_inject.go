@@ -93,7 +93,11 @@ func prepareCodexTurnStateInjection(ctx context.Context, account *auth.Account, 
 	upstreamModel := strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())
 	injected := account.CodexTurnStateInjection(clientModel, upstreamModel)
 	if injected == "" {
-		ticket := codexTicketForInjection(account, clientModel, upstreamModel)
+		protocol := "sse"
+		if websocket {
+			protocol = "websocket"
+		}
+		ticket := codexTicketForProtocol(account, protocol, clientModel, upstreamModel)
 		if ticket == nil {
 			return ctx, requestBody, headers
 		}
@@ -131,6 +135,10 @@ func codexTicketInjection(account *auth.Account, models ...string) (string, bool
 }
 
 func codexTicketForInjection(account *auth.Account, models ...string) *auth.CodexTicket {
+	return codexTicketForProtocol(account, "sse", models...)
+}
+
+func codexTicketForProtocol(account *auth.Account, protocol string, models ...string) *auth.CodexTicket {
 	if !account.SupportsCodexTickets() || !auth.CodexTicketGateEnabled() {
 		return nil
 	}
@@ -143,8 +151,8 @@ func codexTicketForInjection(account *auth.Account, models ...string) *auth.Code
 	if len(gated) == 0 {
 		return nil
 	}
-	targetLen := 0 // 合格判定已改为探测回答校验，不再按门票长度拦截
-	return account.CodexTicketWithShared(time.Now(), targetLen, gated...)
+	targetLen := auth.CodexTicketTargetLength(account.GetPlanType())
+	return account.CodexTicketForRequest(time.Now(), targetLen, protocol, gated...)
 }
 
 // CodexTicketGateBlocked 判定本次是否应被 FailClosed 门控拒绝：开关打开、已配置代理
@@ -167,7 +175,7 @@ func CodexTicketGateBlocked(ctx context.Context, account *auth.Account, clientMo
 	if len(gated) == 0 {
 		return "", false
 	}
-	targetLen := 0 // 合格判定已改为探测回答校验，不再按门票长度拦截
+	targetLen := auth.CodexTicketTargetLength(account.GetPlanType())
 	if ctx != nil {
 		if _, prepared := ctx.Value(codexTurnStateInjectionKey{}).(string); prepared {
 			// 门控必须检查本次实际选中的票，不能因共享池刚好换票而放行未注入的请求。

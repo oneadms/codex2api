@@ -8,6 +8,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/internal/harvest"
+	"github.com/codex2api/internal/mihomo"
 )
 
 func (m *CodexHarvestManager) StartManual(ctx context.Context, request harvest.ManualRequest) (harvest.ManualJob, error) {
@@ -15,7 +16,14 @@ func (m *CodexHarvestManager) StartManual(ctx context.Context, request harvest.M
 	if err != nil {
 		return harvest.ManualJob{}, err
 	}
+	if request.CollectLanes > 1 && (auth.ConfiguredCodexTicketSettings().HarvestProxyURL != mihomo.Endpoint || !mihomo.CollectionAvailable()) {
+		return harvest.ManualJob{}, fmt.Errorf("并行采票需要运行中的托管 Mihomo 代理")
+	}
+	if !m.harvestMu.TryLock() {
+		return harvest.ManualJob{}, fmt.Errorf("已有自动或手动采票正在运行，请稍后重试")
+	}
 	if _, busy := m.working.LoadOrStore(account.ID(), true); busy {
+		m.harvestMu.Unlock()
 		return harvest.ManualJob{}, fmt.Errorf("该账号已有采票任务")
 	}
 	job := harvest.ManualJob{ID: NewUpstreamSessionUUID(), Request: request, Running: true, StartedAt: time.Now().UTC()}
@@ -31,6 +39,7 @@ func (m *CodexHarvestManager) StartManual(ctx context.Context, request harvest.M
 		m.jobsMu.Unlock()
 		cancel()
 		m.working.Delete(account.ID())
+		m.harvestMu.Unlock()
 		return harvest.ManualJob{}, fmt.Errorf("手动任务数量已达上限，请稍后重试")
 	}
 	copy := job
@@ -42,10 +51,12 @@ func (m *CodexHarvestManager) StartManual(ctx context.Context, request harvest.M
 		defer stop()
 		defer cancel()
 		defer m.working.Delete(account.ID())
+		defer m.harvestMu.Unlock()
 		m.runManual(jobCtx, account, job)
 	}) {
 		cancel()
 		m.working.Delete(account.ID())
+		m.harvestMu.Unlock()
 		m.jobsMu.Lock()
 		delete(m.jobs, job.ID)
 		delete(m.cancels, job.ID)
@@ -67,6 +78,10 @@ func (m *CodexHarvestManager) runManual(ctx context.Context, account *auth.Accou
 		delete(m.cancels, job.ID)
 	}()
 	r := job.Request
+	if r.CollectLanes > 1 {
+		m.runParallel(ctx, account, job)
+		return
+	}
 	budget := r.MaxAttempts
 	successes := map[string]bool{}
 	tried := map[string]bool{}
@@ -91,7 +106,7 @@ func (m *CodexHarvestManager) runManual(ctx context.Context, account *auth.Accou
 		controls.Speed.ProbeIntervalSeconds = r.ProbeIntervalSeconds
 		model := r.Models[modelIndex%len(r.Models)]
 		modelIndex++
-		if r.StopOnSuccess && successes[model] {
+		if successes[model] {
 			if len(successes) == len(r.Models) {
 				return
 			}
@@ -111,7 +126,7 @@ func (m *CodexHarvestManager) runManual(ctx context.Context, account *auth.Accou
 			failures++
 		}
 		m.jobsMu.Unlock()
-		if r.StopOnSuccess && len(successes) == len(r.Models) {
+		if r.StopOnSuccess && event.Result == "success" {
 			return
 		}
 		if event.Result == "cancelled" || before == budget {

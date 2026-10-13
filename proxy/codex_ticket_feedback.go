@@ -61,9 +61,7 @@ func observeCodexTicketFeedback(account *auth.Account, injected, upstream string
 	if sink == nil {
 		return
 	}
-	// 门票有效性判定已不按长度拦截（采票合格与否看探测回答），但「上游回带的新票
-	// 是否值得采纳」仍用套餐预期长度做形状匹配，避免把半成品噪声收进注入路径。
-	adoptionLen := auth.CodexTicketExpectedLength(auth.CodexTicketExpectedBlocks(account.GetPlanType()))
+	adoptionLen := auth.CodexTicketTargetLength(account.GetPlanType())
 	var binding *auth.CodexTicket
 	if len(selected) > 0 {
 		binding = selected[0]
@@ -72,10 +70,17 @@ func observeCodexTicketFeedback(account *auth.Account, injected, upstream string
 	if binding != nil {
 		model = binding.Model
 	}
+	if binding != nil && binding.Length == 780 && status >= 200 && status < 300 {
+		// 成功响应也可能重签或换路由；这时撤销原票并重新采验。
+		if (upstream == "" || upstream == injected) && cookies.Header == binding.Cookie {
+			return
+		}
+		status = http.StatusForbidden
+	}
 
 	// 规则 1：采纳上游新签发的票。
 	if status >= 200 && status < 300 && upstream != "" && len(upstream) == adoptionLen && cookies.Header != "" {
-		if shape, err := auth.ParseCodexTicketShape(upstream); err == nil && shape.Blocks == auth.CodexTicketExpectedBlocks(account.GetPlanType()) {
+		if shape, err := auth.ParseCodexTicketShape(upstream); err == nil && adoptionLen != 780 {
 			if model != "" {
 				if upstream == injected && binding != nil && cookies.Header == binding.Cookie && cookies.CapturedAt.Equal(binding.CookieCapturedAt) {
 					return
@@ -91,7 +96,7 @@ func observeCodexTicketFeedback(account *auth.Account, injected, upstream string
 	mismatch := status >= 200 && status < 300 && upstream != "" && len(upstream) != adoptionLen
 	if status >= 200 && status < 300 && upstream != "" {
 		shape, err := auth.ParseCodexTicketShape(upstream)
-		mismatch = mismatch || err != nil || shape.Blocks != auth.CodexTicketExpectedBlocks(account.GetPlanType())
+		mismatch = mismatch || err != nil || auth.CodexTicketExpectedLength(shape.Blocks) != adoptionLen
 	}
 	if injected != "" && (status == http.StatusUnauthorized || status == http.StatusForbidden || mismatch) {
 		if model == "" {
@@ -183,6 +188,10 @@ func publishCodexTicket(db *database.DB, store *auth.Store, account *auth.Accoun
 		binding := bindings[0]
 		ticket.HarvestProxyURL, ticket.HarvestSessionID = binding.HarvestProxyURL, binding.HarvestSessionID
 		ticket.HarvestNodeID, ticket.HarvestNodeName, ticket.HarvestPoolID = binding.HarvestNodeID, binding.HarvestNodeName, binding.HarvestPoolID
+		ticket.Transport, ticket.ManagedNode = binding.Transport, binding.ManagedNode
+		ticket.Acquisition, ticket.SourceAccountID = binding.Acquisition, binding.SourceAccountID
+		// 业务响应换票或更换路由后必须重新验收，不能继承旧票的通过标记。
+		ticket.ProbeVerified = binding.ProbeVerified && (binding.State == "" || binding.State == state) && (binding.Cookie == "" || binding.Cookie == ticket.Cookie)
 		if binding.State != "" {
 			// 只允许当前票的反馈续链，迟到的旧响应不能覆盖刚更换的主票。
 			if current := account.CodexTicketWithShared(capturedAt, 0, model); current == nil || current.State != binding.State {

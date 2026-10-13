@@ -16,6 +16,16 @@ func acquireCodexTicketEgress(ctx context.Context) (context.Context, func(), err
 	if ticket == nil || ticket.HarvestNodeID == "" {
 		return ctx, func() {}, nil
 	}
+	if ticket.ManagedNode {
+		proxyURL, release, err := mihomo.PinNode(ctx, ticket.HarvestNodeID, ticket.HarvestPoolID)
+		if err != nil {
+			return ctx, nil, err
+		}
+		copy := *ticket
+		copy.HarvestProxyURL = proxyURL
+		ctx = context.WithValue(ctx, codexTicketInjectionKey{}, &copy)
+		return WithFreshCodexConnection(ctx), release, nil
+	}
 	m := codexHarvester.Load()
 	if m == nil {
 		return ctx, nil, fmt.Errorf("票据的节点管理器不可用")

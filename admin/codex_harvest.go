@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/internal/harvest"
 	"github.com/codex2api/internal/mihomo"
 	"github.com/codex2api/proxy"
@@ -81,7 +82,7 @@ func (h *Handler) GetCodexHarvest(c *gin.Context) {
 		writeError(c, 500, "读取采票范围失败")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"controls": h.codexHarvest.ControlSnapshot(ctx), "scope": scope, "accounts": accounts, "jobs": h.codexHarvest.Jobs()})
+	c.JSON(http.StatusOK, gin.H{"controls": h.codexHarvest.ControlSnapshot(ctx), "scope": scope, "accounts": accounts, "jobs": h.codexHarvest.Jobs(), "parallel_available": mihomo.CollectionAvailable() && auth.ConfiguredCodexTicketSettings().HarvestProxyURL == mihomo.Endpoint})
 }
 
 func (h *Handler) UpdateCodexHarvestControls(c *gin.Context) {

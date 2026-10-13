@@ -42,10 +42,12 @@ func harvestDigest(value any) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// LoadDirectedSidecar accepts only the matching external loopback sidecar.
+// LoadDirectedSidecar 识别托管采票通道或匹配的外部回环代理。
 func LoadDirectedSidecar(dataDir, proxyURL string) (*DirectedSidecar, error) {
-	if _, _, managed := ManagedController(); managed {
-		return nil, errors.New("node learning does not override managed UseOnce")
+	if proxyURL == Endpoint || proxyURL == collectionProxy(0) {
+		if m := managedManager(); m != nil {
+			return &DirectedSidecar{managed: m, ProxyURL: collectionProxy(0), PoolID: managedPoolID(m)}, nil
+		}
 	}
 	if dataDir == "" {
 		dataDir = "."

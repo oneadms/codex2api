@@ -1,14 +1,11 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -16,14 +13,12 @@ import (
 	"github.com/codex2api/database"
 	"github.com/codex2api/internal/harvest"
 	"github.com/codex2api/internal/mihomo"
-	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 // 后台自动打票器：用合成探测请求向 Codex 上游铸造 X-Codex-Turn-State 门票，
 // 按 (账号, 模型) 分别持有，业务请求上由 proxy/codex_turn_state_inject.go 注入。
-// 探测提问当前最新的 Gemini 模型版本号：回答严格大于 2.5 才算合格票据，
-// 2.5 及以下或答不出版本号都判不合格（不再按门票编码长度区分）。
+// 780 票必须完整续接通过，其他票按账号套餐校验形状与时效。
 //
 // 设计要点（与 sub2api 的 openai_codex_ticket.go 同源，但接进 codex2api 既有设施）：
 //
@@ -51,17 +46,12 @@ func codexTicketUpstreamEndpoint() string {
 	return CodexBaseURL + "/responses"
 }
 
-// codexTicketHarvestProbeQuestion 是采票探针的提问。合格判定看回答内容：
-// 只输出当前最新的 Gemini 模型版本号，回答 > 2.5 才算合格（2.5 及以下判不合格）。
-const codexTicketHarvestProbeQuestion = "只输出当前最新的 Gemini 模型版本号，格式 X.Y，不要解释。"
-
-// codexTicketHarvestMinVersion 是合格版本号的下界（开区间）：回答必须大于它。
-const codexTicketHarvestMinVersion = 2.5
+const codexTicketHarvestProbeQuestion = "Reply OK"
 
 // codexTicketHarvestProbeBody 构造一条最小的铸造探测回合。store:false 避免把探测
 // 写进用户历史；stream:true 与业务同构，便于读到 response.completed 终态再落库。
 func codexTicketHarvestProbeBody(model string) []byte {
-	body := []byte(`{"store":false,"stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":""}]}]}`)
+	body := []byte(`{"store":false,"stream":true,"instructions":"Reply with exactly OK. Do not call tools.","parallel_tool_calls":false,"input":[{"role":"user","content":[{"type":"input_text","text":""}]}]}`)
 	body, err := sjson.SetBytes(body, "input.0.content.0.text", codexTicketHarvestProbeQuestion)
 	if err != nil {
 		return body
@@ -71,51 +61,6 @@ func codexTicketHarvestProbeBody(model string) []byte {
 		return body
 	}
 	return updated
-}
-
-// parseCodexHarvestProbeVersion 从模型回答中提取 X.Y 形式的版本号。容忍
-// 「3.0」「Gemini 3.0」这类回答；提取不到时报错。
-func parseCodexHarvestProbeVersion(text string) (float64, error) {
-	text = strings.TrimSpace(text)
-	start := -1
-	for i := 0; i < len(text); i++ {
-		if text[i] >= '0' && text[i] <= '9' {
-			start = i
-			break
-		}
-	}
-	if start < 0 {
-		return 0, fmt.Errorf("回答中没有版本号")
-	}
-	end := start
-	dot := false
-	for end < len(text) {
-		c := text[end]
-		if c >= '0' && c <= '9' {
-			end++
-			continue
-		}
-		if c == '.' && !dot {
-			dot = true
-			end++
-			continue
-		}
-		break
-	}
-	value, err := strconv.ParseFloat(strings.TrimSuffix(text[start:end], "."), 64)
-	if err != nil {
-		return 0, fmt.Errorf("版本号无法解析")
-	}
-	return value, nil
-}
-
-// codexHarvestProbeVersionQualified 报告回答对应的版本号是否合格：必须严格大于 2.5。
-func codexHarvestProbeVersionQualified(text string) (float64, bool) {
-	version, err := parseCodexHarvestProbeVersion(text)
-	if err != nil {
-		return 0, false
-	}
-	return version, version > codexTicketHarvestMinVersion
 }
 
 // ==================== 探测 ====================
@@ -137,33 +82,23 @@ type codexTicketHarvestResult struct {
 // fireCodexTicketHarvest 用专用打票代理向 Codex 上游铸造一张门票。出站头复用
 // applyCodexRequestHeaders 的伪装逻辑，保证探测请求与业务请求形状一致。
 //
-// 门票只有在读到 response.completed / response.incomplete 成功终态后才可信。
+// 门票只有在读到 response.completed 成功终态后才进入验收。
 func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, proxyURL string, attemptTimeout time.Duration) (result codexTicketHarvestResult) {
-	fail := func(result string, err error) codexTicketHarvestResult {
-		return codexTicketHarvestResult{Result: result, Err: err}
+	fail := func(kind, message string) codexTicketHarvestResult {
+		return codexTicketHarvestResult{Result: kind, Err: fmt.Errorf("%s", message)}
 	}
-	if account == nil {
-		return fail("error", fmt.Errorf("账号为空"))
+	if account == nil || !account.CanHarvestCodexTicket(time.Now()) || account.GetAccessToken() == "" {
+		return fail("token_error", "账号当前不可采票或缺少凭据")
 	}
-	if !account.CanHarvestCodexTicket(time.Now()) {
-		return fail("error", fmt.Errorf("账号不支持 Codex 自动打票或当前不可用"))
-	}
-	accessToken := account.GetAccessToken()
-	if strings.TrimSpace(accessToken) == "" {
-		return fail("token_error", fmt.Errorf("账号无 access token"))
-	}
-	model = strings.TrimSpace(model)
-	if model == "" {
-		return fail("error", fmt.Errorf("模型为空"))
-	}
-	if strings.TrimSpace(proxyURL) == "" {
-		// 绝不回退到业务代理：那会污染账号的住宅出口。
-		return fail("error", fmt.Errorf("未配置打票代理"))
+	model = auth.NormalizeCodexTicketModel(model)
+	if model == "" || strings.TrimSpace(proxyURL) == "" {
+		return fail("error", "未配置模型或采票代理")
 	}
 	client, err := auth.BuildHTTPClientChecked(proxyURL)
 	if err != nil {
-		return fail("error", fmt.Errorf("打票代理不可用: %w", err))
+		return fail("error", "采票代理不可用")
 	}
+	defer client.CloseIdleConnections()
 	if attemptTimeout <= 0 {
 		attemptTimeout = time.Duration(auth.CodexTicketDefaultProbeTimeoutSecs) * time.Second
 	}
@@ -171,95 +106,126 @@ func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, p
 	defer cancel()
 	release, err := mihomo.Lease(attemptCtx, proxyURL)
 	if err != nil {
-		return fail("error", fmt.Errorf("采票节点不可用"))
+		return fail("error", "采票节点不可用")
 	}
 	defer func() { release(result.Result == "success") }()
-
-	body := codexTicketHarvestProbeBody(model)
-	req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, codexTicketUpstreamEndpoint(), bytes.NewReader(body))
-	if err != nil {
-		return fail("error", err)
+	protocol, _ := ctx.Value(harvestProtocolKey{}).(string)
+	if protocol == "" {
+		protocol = "sse"
 	}
 	sessionID := NewUpstreamSessionUUID()
-	applyCodexRequestHeaders(req, account, accessToken, sessionID, "", nil, nil)
-	applyCodexTicketSession(req.Header, sessionID)
-	// 与 sub2api 一致：只复用本账号、本模型的有效 Cookie，不继承自定义 Cookie 或旧票据。
-	req.Header.Del("Cookie")
-	if cookie := account.CodexHarvestCookie(model, time.Now()); cookie != "" {
-		req.Header.Set("Cookie", cookie)
+	body := codexTicketHarvestProbeBody(model)
+	shot := func(state string, cookies codexTicketCookies) (codexHarvestResponse, error) {
+		if reserve, ok := ctx.Value(harvestReserveKey{}).(func(context.Context) error); ok {
+			if err := reserve(attemptCtx); err != nil {
+				return codexHarvestResponse{}, err
+			}
+		}
+		req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, codexTicketUpstreamEndpoint(), bytes.NewReader(body))
+		if err != nil {
+			return codexHarvestResponse{}, err
+		}
+		applyCodexRequestHeaders(req, account, account.GetAccessToken(), sessionID, "", nil, nil)
+		applyCodexTicketSession(req.Header, sessionID)
+		// 每个候选从空材料开始；仅续接本次刚采到的完整材料。
+		req.Header.Del("Cookie")
+		req.Header.Del(codexTurnStateHeader)
+		if cookies.Header != "" {
+			req.Header.Set("Cookie", cookies.Header)
+		}
+		if state != "" {
+			req.Header.Set(codexTurnStateHeader, state)
+		}
+		req.Header.Set("Accept", "text/event-stream")
+		req.Header.Set("Accept-Encoding", "identity")
+		edge, _ := ctx.Value(harvestEdgeKey{}).(string)
+		req, shotClient, err := codexHarvestEdgeClient(req, client, edge)
+		if err != nil {
+			return codexHarvestResponse{}, err
+		}
+		defer shotClient.CloseIdleConnections()
+		return performCodexHarvestTransport(req, body, shotClient, protocol, cookies)
 	}
-	req.Header.Del(codexTurnStateHeader)
-	req.Header.Set("Accept", "text/event-stream")
-
-	probe, err := performCodexHarvestTransport(req, body, client)
+	seed, _ := ctx.Value(harvestSeedKey{}).(*auth.CodexTicket)
+	var probe codexHarvestResponse
+	if seed != nil {
+		probe, err = shot(seed.State, codexTicketCookies{Header: seed.Cookie, ExpiresAt: seed.CookieExpiresAt, CapturedAt: seed.CookieCapturedAt})
+	} else {
+		probe, err = shot("", codexTicketCookies{})
+	}
+	invalid := func(validation, message string) codexTicketHarvestResult {
+		return codexTicketHarvestResult{ObservedLength: len(probe.State), HTTPStatus: probe.Status, Result: "invalid_state", Err: fmt.Errorf("%s (validation=%s plan_type=%q actual_length=%d expected_length=%d)", message, validation, account.GetPlanType(), len(probe.State), auth.CodexTicketTargetLength(account.GetPlanType()))}
+	}
+	check := func(p codexHarvestResponse, err error) *codexTicketHarvestResult {
+		var failure codexTicketHarvestResult
+		switch {
+		case p.Status >= 400:
+			failure = codexTicketHarvestResult{HTTPStatus: p.Status, Result: harvestResultForHTTPStatus(p.Status), Err: fmt.Errorf("上游状态 %d", p.Status)}
+		case err != nil:
+			failure = codexTicketHarvestResult{HTTPStatus: p.Status, Result: "response_incomplete_or_error", Err: err}
+		case !p.Completed:
+			failure = codexTicketHarvestResult{HTTPStatus: p.Status, Result: "response_incomplete_or_error", Err: fmt.Errorf("采票响应未完整结束")}
+		case p.Model != "" && auth.NormalizeCodexTicketModel(p.Model) != model:
+			failure = invalid("model", "上游返回了不同模型")
+		default:
+			return nil
+		}
+		failure.ObservedLength = len(p.State)
+		return &failure
+	}
+	if failure := check(probe, err); failure != nil {
+		return *failure
+	}
+	if probe.State == "" {
+		return invalid("missing", "响应未回带 turn state")
+	}
+	if seed != nil && probe.State == seed.State {
+		return invalid("reuse_inconclusive", "来源票未换发为目标账号的票据")
+	}
+	shape, err := auth.ParseCodexTicketShape(probe.State)
 	if err != nil {
-		return fail("error", fmt.Errorf("打票请求失败: %w", err))
+		return invalid("shape", "响应门票信封无法识别")
 	}
-	status := probe.Status
-	if status != http.StatusOK {
-		return codexTicketHarvestResult{
-			HTTPStatus: status,
-			Result:     harvestResultForHTTPStatus(status),
-			Err:        fmt.Errorf("上游状态 %d", status),
+	if len(probe.State) != auth.CodexTicketTargetLength(account.GetPlanType()) {
+		return invalid("length", "响应门票长度不符合配置")
+	}
+	if probe.Cookies.Header == "" {
+		return invalid("cookie", "门票缺少配套 Cookie")
+	}
+	verified := false
+	if len(probe.State) == 780 {
+		if _, _, ok := auth.CodexRouteCookie(probe.Cookies.Header, time.Now()); !ok {
+			return invalid("cookie", "路由 Cookie 对无效")
 		}
-	}
-	state, cookies := probe.State, probe.Cookies
-	if !probe.Completed {
-		return codexTicketHarvestResult{ObservedLength: len(state), HTTPStatus: status, Result: harvestResultForTerminal(probe.Terminal), Err: fmt.Errorf("打票响应未到成功终态")}
-	}
-	// 合格判定看探测回答：模型回答的最新 Gemini 版本号必须严格大于 2.5，
-	// 回答 2.5 或更低、以及根本答不出版本号都判不合格，不再按门票长度区分。
-	_, qualified := codexHarvestProbeVersionQualified(probe.Text)
-	if !qualified {
-		return codexTicketHarvestResult{
-			ObservedLength: len(state),
-			HTTPStatus:     status,
-			Result:         "invalid_state",
-			Err:            fmt.Errorf("探测回答不合格 (validation=probe_version answer_length=%d)", len(strings.TrimSpace(probe.Text))),
+		continuation, continuationErr := shot(probe.State, probe.Cookies)
+		if failure := check(continuation, continuationErr); failure != nil {
+			return *failure
 		}
-	}
-	settings := auth.ConfiguredCodexTicketSettings()
-	planType := account.GetPlanType()
-	// Explain rejections without logging the opaque ticket, access token or proxy.
-	// Capture the plan/config once so the diagnostic matches the actual check.
-	invalidState := func(validation string, err error) codexTicketHarvestResult {
-		return codexTicketHarvestResult{
-			ObservedLength: len(state),
-			HTTPStatus:     status,
-			Result:         "invalid_state",
-			Err: fmt.Errorf("%w (validation=%s plan_type=%q actual_length=%d expected_length=%d)",
-				err, validation, planType, len(state), auth.CodexTicketExpectedLength(auth.CodexTicketExpectedBlocks(planType))),
+		if continuation.State != "" && continuation.State != probe.State {
+			return invalid("probe_reissued", "续接重签了门票")
 		}
-	}
-	if state == "" {
-		return invalidState("missing", fmt.Errorf("响应未回带 turn state"))
-	}
-	shape, err := auth.ParseCodexTicketShape(state)
-	if err != nil {
-		return invalidState("shape", fmt.Errorf("响应门票信封解析失败: %w", err))
-	}
-	if !strings.HasPrefix(state, auth.CodexTicketStatePrefix) {
-		return invalidState("prefix", fmt.Errorf("响应门票前缀不符合要求"))
-	}
-	if cookies.Header == "" {
-		return invalidState("cookie", fmt.Errorf("响应门票缺少配套的有效 Cookie"))
+		if continuation.Cookies.Header != probe.Cookies.Header {
+			return invalid("probe_route_changed", "续接更换了路由 Cookie")
+		}
+		verified = true
 	}
 	now := time.Now()
-	ticket := &auth.CodexTicket{
-		State: state, Cookie: cookies.Header, Length: len(state), IssuedAt: shape.IssuedAt,
-		ExpiresAt: auth.CodexTicketExpiry(now, shape.IssuedAt, time.Duration(settings.TTLSeconds)*time.Second),
-	}
-	if !cookies.ExpiresAt.IsZero() && cookies.ExpiresAt.Before(ticket.ExpiresAt) {
-		ticket.ExpiresAt = cookies.ExpiresAt
-	}
+	settings := auth.ConfiguredCodexTicketSettings()
+	ticket := &auth.CodexTicket{State: probe.State, Cookie: probe.Cookies.Header, CookieCapturedAt: probe.Cookies.CapturedAt, CookieExpiresAt: probe.Cookies.ExpiresAt, Length: len(probe.State), IssuedAt: shape.IssuedAt, ExpiresAt: auth.CodexTicketExpiry(now, shape.IssuedAt, time.Duration(settings.TTLSeconds)*time.Second), ProbeVerified: verified, Transport: protocol}
 	if !ticket.Valid(now, 0) {
-		return invalidState("time", fmt.Errorf("响应门票时间校验失败: issued_at=%s expires_at=%s now=%s age_seconds=%d",
-			shape.IssuedAt.UTC().Format(time.RFC3339), ticket.ExpiresAt.UTC().Format(time.RFC3339),
-			now.UTC().Format(time.RFC3339), int64(now.Sub(shape.IssuedAt)/time.Second)))
+		return invalid("time", fmt.Sprintf("门票时效校验失败: issued_at=%s expires_at=%s now=%s age_seconds=%d", shape.IssuedAt.UTC().Format(time.RFC3339), ticket.ExpiresAt.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339), int64(now.Sub(shape.IssuedAt)/time.Second)))
 	}
-	return codexTicketHarvestResult{HTTPStatus: status, State: state, Cookies: cookies,
-		ProbeText: probe.Text, Binding: &auth.CodexTicket{HarvestProxyURL: proxyURL, HarvestSessionID: sessionID}, Result: "success"}
+	binding := &auth.CodexTicket{HarvestProxyURL: proxyURL, HarvestSessionID: sessionID, ProbeVerified: verified, Transport: protocol, Acquisition: "self"}
+	if seed != nil {
+		binding.Acquisition, binding.SourceAccountID = "reuse", seed.SourceAccountID
+		binding.HarvestNodeID, binding.HarvestNodeName, binding.HarvestPoolID, binding.ManagedNode = seed.HarvestNodeID, seed.HarvestNodeName, seed.HarvestPoolID, seed.ManagedNode
+	}
+	return codexTicketHarvestResult{HTTPStatus: probe.Status, State: probe.State, Cookies: probe.Cookies, ProbeText: probe.Text, Binding: binding, Result: "success"}
 }
+
+type harvestProtocolKey struct{}
+type harvestReserveKey struct{}
+type harvestSeedKey struct{}
 
 func harvestResultForHTTPStatus(status int) string {
 	switch status {
@@ -268,47 +234,6 @@ func harvestResultForHTTPStatus(status int) string {
 	default:
 		return "error"
 	}
-}
-
-func harvestResultForTerminal(gotTerminal bool) string {
-	if !gotTerminal {
-		return "response_incomplete_or_error"
-	}
-	return "error"
-}
-
-// validateCodexHarvestStream 读流式响应直到终态。返回值 gotTerminal 表示是否读到
-// response.completed / response.incomplete；ok 表示整轮成功；text 是累积的回答正文。
-func validateCodexHarvestStream(r io.Reader) (gotTerminal, ok bool, text string) {
-	if r == nil {
-		return false, false, ""
-	}
-	var out strings.Builder
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if data == "" || data == "[DONE]" {
-			continue
-		}
-		switch typ := gjson.Get(data, "type").String(); typ {
-		case "response.output_text.delta":
-			out.WriteString(gjson.Get(data, "delta").String())
-		case "response.completed", "response.incomplete":
-			if final := gjson.Get(data, "response.output_text").String(); final != "" && out.Len() == 0 {
-				out.WriteString(final)
-			}
-			return true, true, out.String()
-		case "response.failed", "error":
-			return gotTerminal, false, out.String()
-		}
-	}
-	// 读到 EOF 都没等到终态（连接被掐断、上游只发了一半）——不可信。
-	return gotTerminal, false, out.String()
 }
 
 // ==================== 调度 ====================
@@ -437,13 +362,19 @@ func probeCodexTicketWithRefresh(ctx context.Context, store *auth.Store, acc *au
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	ctx = context.WithValue(ctx, harvestReserveKey{}, func(wait context.Context) error {
+		if *budget <= 0 {
+			return fmt.Errorf("本轮采票请求预算已用完")
+		}
+		if err := waitCodexHarvestRequest(wait); err != nil {
+			return err
+		}
+		*budget--
+		return nil
+	})
 	if err := store.EnsureCodexTicketAccessToken(ctx, acc, false); err != nil {
 		return codexTicketHarvestResult{Result: "token_error", Err: err}
 	}
-	if err := waitCodexHarvestRequest(ctx); err != nil {
-		return codexTicketHarvestResult{Result: "error", Err: err}
-	}
-	*budget--
 	result := fireCodexTicketHarvest(ctx, acc, model, proxyURL, timeout)
 	if result.HTTPStatus != http.StatusUnauthorized || ctx.Err() != nil {
 		return result
@@ -456,10 +387,6 @@ func probeCodexTicketWithRefresh(ctx context.Context, store *auth.Store, acc *au
 		result.Err = fmt.Errorf("%v；凭据已刷新，本轮打票次数已用完，冷却后重试", result.Err)
 		return result
 	}
-	if err := waitCodexHarvestRequest(ctx); err != nil {
-		return codexTicketHarvestResult{Result: "error", Err: err}
-	}
-	*budget--
 	return fireCodexTicketHarvest(ctx, acc, model, proxyURL, timeout)
 }
 

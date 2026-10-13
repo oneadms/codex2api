@@ -16,6 +16,8 @@ import (
 // 采票走 HarvestProxyURL；业务注入票据后沿用票据里的出口和会话快照。
 // 普通轮换代理不保证固定 IP，定向节点需由 Mihomo 独立 Selector 锁定。
 type CodexTicketSettings struct {
+	// TargetLength 为 780 时启用完整续接验收；0 表示按账号套餐选择旧信封长度。
+	TargetLength int `json:"target_length"`
 	// Enabled 是总开关。关闭时既不探测也不注入，按原链路转发。
 	Enabled bool `json:"enabled"`
 	// HarvestProxyURL 是打票专用代理（http/https/socks5/socks5h）。空表示未配置，
@@ -59,9 +61,10 @@ const (
 
 var configuredCodexTicketSettings atomic.Value // CodexTicketSettings
 
-// DefaultCodexTicketSettings 返回出厂默认：关闭、无代理、个人版长度、无门控模型。
+// DefaultCodexTicketSettings 返回出厂默认：关闭、无代理、780 目标长度、无门控模型。
 func DefaultCodexTicketSettings() CodexTicketSettings {
 	return CodexTicketSettings{
+		TargetLength:         780,
 		Enabled:              false,
 		TTLSeconds:           CodexTicketDefaultTTLSeconds,
 		RefreshBeforeSeconds: CodexTicketDefaultRefreshBeforeSecs,
@@ -73,9 +76,19 @@ func DefaultCodexTicketSettings() CodexTicketSettings {
 	}
 }
 
+func CodexTicketTargetLength(planType string) int {
+	if length := ConfiguredCodexTicketSettings().TargetLength; length > 0 {
+		return length
+	}
+	return CodexTicketExpectedLength(CodexTicketExpectedBlocks(planType))
+}
+
 // NormalizeCodexTicketSettings 补齐缺省值并校验，返回可安全使用的配置。
 func NormalizeCodexTicketSettings(settings CodexTicketSettings) (CodexTicketSettings, error) {
 	out := settings
+	if out.TargetLength != 0 && out.TargetLength != 292 && out.TargetLength != 332 && out.TargetLength != 780 {
+		return DefaultCodexTicketSettings(), fmt.Errorf("门票目标长度必须是 0、292、332 或 780")
+	}
 	out.HarvestProxyURL = strings.TrimSpace(out.HarvestProxyURL)
 	if out.HarvestProxyURL != "" {
 		if err := ValidateCodexTicketProxyURL(out.HarvestProxyURL); err != nil {
@@ -250,12 +263,10 @@ func SetConfiguredCodexTicketSettings(settings CodexTicketSettings) {
 
 // ConfiguredCodexTicketSettings 返回当前生效的打票配置。
 func ConfiguredCodexTicketSettings() CodexTicketSettings {
-	settings, _ := configuredCodexTicketSettings.Load().(CodexTicketSettings)
-	if len(settings.Models) == 0 && !settings.Enabled && settings.HarvestProxyURL == "" {
-		// 尚未装载过任何配置（进程刚起）时给出默认值。
-		return DefaultCodexTicketSettings()
+	if settings, loaded := configuredCodexTicketSettings.Load().(CodexTicketSettings); loaded {
+		return settings
 	}
-	return settings
+	return DefaultCodexTicketSettings()
 }
 
 // CodexTicketGateEnabled 报告打票门控是否生效：开关打开、配置了打票代理、且门控名单非空。

@@ -5512,7 +5512,7 @@
     "claudeMaxToolSchemaBytesDesc": "0 means no gateway schema cap; request and upstream limits still apply.",
     "codexTicket": {
       "sectionTitle": "Codex Turn-State Tickets (Auto Harvest)",
-      "sectionDescription": "Capture X-Codex-Turn-State tickets and their matching cookies through a dedicated proxy, then send them together on upstream requests. Tickets last about 240 seconds and stop being used 30 seconds early. Legacy tickets without cookies are refreshed. Manual injection still takes priority.",
+      "sectionDescription": "Capture tickets and matching cookies through a dedicated proxy and use the complete materials for requests. A 780 ticket requires two complete short requests with the same session and protocol. Local caching is capped at 240 seconds; legacy 780 tickets without verification are collected again. Manual injection still takes priority.",
       "enabled": "Enable background harvesting",
       "enabledDesc": "When off, nothing is probed or injected and requests pass through unchanged. When on, a harvest proxy and at least one gated model are also required for gating to take effect.",
       "gateInactive": "Gating is inactive: a harvest proxy and at least one gated model are still required.",

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -18,7 +19,7 @@ type harvestSelection struct {
 }
 
 func (m *CodexHarvestManager) selectNode(ctx context.Context, account *auth.Account, model, proxyURL string, controls harvest.CodexHarvestControls, tried map[string]bool) (*harvestSelection, string) {
-	if !controls.NodeMemoryEnabled {
+	if !controls.NodeMemoryEnabled && proxyURL != mihomo.Endpoint {
 		return nil, "rotation"
 	}
 	sidecar, err := mihomo.LoadDirectedSidecar(m.DataDir, proxyURL)
@@ -63,7 +64,7 @@ func (m *CodexHarvestManager) selectNode(ctx context.Context, account *auth.Acco
 
 func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account, model, proxyURL string, controls harvest.CodexHarvestControls, budget *int, tried map[string]bool, keep **harvestSelection, source, jobID string, number int) (event harvest.Event) {
 	started := time.Now()
-	event = harvest.Event{AccountID: account.ID(), Model: model, Source: source, JobID: jobID, Attempt: number, Stage: "probe", ExpectedLength: auth.CodexTicketExpectedLength(auth.CodexTicketExpectedBlocks(account.GetPlanType())), CreatedAt: started.UTC()}
+	event = harvest.Event{AccountID: account.ID(), Model: model, Source: source, JobID: jobID, Attempt: number, Stage: "probe", ExpectedLength: auth.CodexTicketTargetLength(account.GetPlanType()), CreatedAt: started.UTC()}
 	defer func() { event.LatencyMS = time.Since(started).Milliseconds(); m.appendEvent(event) }()
 	scope, err := m.Scope(ctx)
 	if err != nil || !auth.CodexTicketGateEnabled() || !harvestAccountEligible(account, scope, true) {
@@ -72,7 +73,13 @@ func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account
 		return
 	}
 	selection, reason := (*harvestSelection)(nil), "rotation"
-	if keep != nil && *keep != nil {
+	seed, releaseSeed := m.reuseCandidate(ctx, account, model, controls, budget, tried)
+	defer releaseSeed()
+	if seed != nil {
+		ctx = context.WithValue(ctx, harvestSeedKey{}, seed)
+		proxyURL, reason = seed.HarvestProxyURL, "reuse"
+		event.NodeID, event.NodeName = seed.HarvestNodeID, seed.HarvestNodeName
+	} else if keep != nil && *keep != nil && !(*keep).sidecar.UsesNodesOnce() {
 		selection = *keep
 		reason = "manual_sticky"
 	} else {
@@ -116,9 +123,15 @@ func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account
 		if wait.Err() != nil {
 			return wait.Err()
 		}
+		currentScope, err := m.Scope(wait)
+		if err != nil || !auth.CodexTicketGateEnabled() || !harvestAccountEligible(account, currentScope, true) {
+			return fmt.Errorf("采票范围变化、账号忙碌或采票已关闭")
+		}
 		m.lastRequest = time.Now()
 		return nil
 	})
+	ctx = context.WithValue(ctx, harvestProtocolKey{}, controls.Transport)
+	ctx = context.WithValue(ctx, harvestEdgeKey{}, controls.EdgeIP)
 	res := probeCodexTicketWithRefresh(ctx, m.Store, account, model, proxyURL, time.Duration(controls.Speed.AttemptTimeoutSeconds)*time.Second, budget)
 	event.HTTPStatus, event.Length = res.HTTPStatus, len(res.State)
 	if res.ObservedLength > 0 {
@@ -137,6 +150,7 @@ func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account
 				event.Result = "network_error"
 			} else {
 				res.Binding.HarvestNodeID, res.Binding.HarvestNodeName, res.Binding.HarvestPoolID = selection.node.ID, selection.node.Name, selection.sidecar.PoolID
+				res.Binding.ManagedNode = selection.sidecar.IsManaged()
 			}
 		}
 		if res.Result == "success" && !publishCodexTicket(m.DB, m.Store, account, model, res.State, codexTicketIssuedAt(res.State), res.Cookies, res.Binding) {
@@ -183,13 +197,13 @@ func waitCodexHarvestRequest(ctx context.Context) error {
 func harvestResultMessage(result string) string {
 	switch result {
 	case "success":
-		return "合格票据及 Cookie 已持久化"
+		return "票据及配套 Cookie 已验收并持久化"
 	case "invalid_state":
-		return "探测回答（Gemini 版本号须大于 2.5）、票据形状、时效或 Cookie 不合格"
+		return "票据形状、时效、模型或续接校验未通过"
 	case "account_error":
 		return "上游鉴权或限流，账号进入采票冷却"
 	case "network_error":
-		return "代理、节点或 WebSocket 连接失败"
+		return "代理、节点或上游连接失败"
 	case "persistence_error":
 		return "票据落库失败，未发布"
 	case "response_incomplete_or_error":

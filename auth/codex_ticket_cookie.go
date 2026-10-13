@@ -11,20 +11,6 @@ const maxCodexTicketCookieBytes = 8192
 // CodexTicketCookieFreshness 是 Cookie 的注入窗口，与 turn-state 的签发时间分开计算。
 const CodexTicketCookieFreshness = 240 * time.Second
 
-// CodexHarvestCookie 复用同账号、同模型仍新鲜的 Cookie，不要求旧票本身仍可注入。
-func (a *Account) CodexHarvestCookie(model string, now time.Time) string {
-	if a == nil {
-		return ""
-	}
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	previous := a.CodexTickets[NormalizeCodexTicketModel(model)]
-	if previous.CookieFresh(now) {
-		return NormalizeCodexTicketCookie(previous.Cookie)
-	}
-	return ""
-}
-
 func (t *CodexTicket) CookieEffectiveExpiry() time.Time {
 	if t == nil || NormalizeCodexTicketCookie(t.Cookie) == "" {
 		return time.Time{}

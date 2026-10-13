@@ -121,6 +121,7 @@ export interface AntigravitySettingsResponse {
 }
 
 export interface CodexTicketSettingsResponse {
+	 target_length: number
   enabled: boolean
   harvest_proxy_url: string
   harvest_proxy_masked: boolean

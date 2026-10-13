@@ -37,9 +37,12 @@ type CodexHarvestBound struct {
 }
 
 type CodexHarvestControls struct {
-	Version           int               `json:"version"`
-	NodeMemoryEnabled bool              `json:"node_memory_enabled"`
-	Speed             CodexHarvestSpeed `json:"speed"`
+	ReuseSourceAccountID int64             `json:"reuse_source_account_id"`
+	EdgeIP               string            `json:"edge_ip"`
+	Transport            string            `json:"transport"`
+	Version              int               `json:"version"`
+	NodeMemoryEnabled    bool              `json:"node_memory_enabled"`
+	Speed                CodexHarvestSpeed `json:"speed"`
 }
 
 type CodexHarvestRuntime struct {
@@ -147,6 +150,9 @@ func normalizeCodexHarvestControls(v *CodexHarvestControls) {
 	if v == nil {
 		return
 	}
+	if v.Transport == "" {
+		v.Transport = "sse"
+	}
 	if v.Speed.RefreshBeforeSeconds <= 0 {
 		v.Speed.RefreshBeforeSeconds = 600
 	}
@@ -163,6 +169,15 @@ func NewCodexHarvestService(nodes CodexHarvestNodeRepository, settings SettingRe
 
 func ValidateCodexHarvestControls(v CodexHarvestControls) error {
 	normalizeCodexHarvestControls(&v)
+	if v.ReuseSourceAccountID < 0 {
+		return errors.New("来源账号 ID 无效")
+	}
+	if err := ValidateEdgeIP(v.EdgeIP); err != nil {
+		return err
+	}
+	if v.Transport != "sse" && v.Transport != "websocket" {
+		return errors.New("采票协议必须是 sse 或 websocket")
+	}
 	if v.Version != 1 {
 		return errors.New("unsupported harvest settings version")
 	}

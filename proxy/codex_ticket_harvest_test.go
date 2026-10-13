@@ -169,14 +169,16 @@ func TestValidateCodexHarvestStream(t *testing.T) {
 		wantText string
 	}{
 		{name: "completed", body: "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n", wantTerm: true, wantOK: true},
-		{name: "incomplete", body: "data: {\"type\":\"response.incomplete\"}\n\n", wantTerm: true, wantOK: true},
-		{name: "failed", body: "data: {\"type\":\"response.failed\"}\n\n", wantTerm: false, wantOK: false},
-		{name: "error frame", body: "data: {\"type\":\"error\"}\n\n", wantTerm: false, wantOK: false},
+		{name: "incomplete", body: "data: {\"type\":\"response.incomplete\"}\n\n", wantTerm: true, wantOK: false},
+		{name: "failed", body: "data: {\"type\":\"response.failed\"}\n\n", wantTerm: true, wantOK: false},
+		{name: "error frame", body: "data: {\"type\":\"error\"}\n\n", wantTerm: true, wantOK: false},
 		{name: "truncated", body: "data: {\"type\":\"response.output_text.delta\"}\n\n", wantTerm: false, wantOK: false},
 		{name: "delta text", body: "data: {\"type\":\"response.output_text.delta\",\"delta\":\"3.\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"0\"}\n\ndata: {\"type\":\"response.completed\"}\n\n", wantTerm: true, wantOK: true, wantText: "3.0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			term, ok, text := validateCodexHarvestStream(strings.NewReader(tc.body))
+			out := codexHarvestResponse{}
+			err := consumeCodexHarvestSSE([]byte(tc.body), &out)
+			term, ok, text := out.Terminal, err == nil, out.Text
 			if term != tc.wantTerm || ok != tc.wantOK {
 				t.Fatalf("got term=%v ok=%v, want term=%v ok=%v", term, ok, tc.wantTerm, tc.wantOK)
 			}
@@ -187,25 +189,22 @@ func TestValidateCodexHarvestStream(t *testing.T) {
 	}
 }
 
-// 合格判定：回答的最新 Gemini 版本号必须严格大于 2.5；2.5 及以下、无版本号都不合格。
-func TestCodexHarvestProbeVersionQualified(t *testing.T) {
+// 完整终态后的错误、截断和模型变化都不能被验收为成功。
+func TestCodexHarvestCompleteStream(t *testing.T) {
 	for _, tc := range []struct {
-		answer string
+		stream string
 		want   bool
 	}{
-		{"3.0", true},
-		{"3.8", true},
-		{"2.5", false},
-		{"2.0", false},
-		{"1.5", false},
-		{"Gemini 3.1", true},
-		{"  2.6  ", true},
+		{"data: {\"type\":\"response.completed\"}\n\n", true},
+		{"data: {\"type\":\"response.completed\"}\n\ndata: {\"type\":\"error\"}\n\n", false},
+		{"data: {\"type\":\"response.incomplete\"}\n\n", false},
+		{"data: {\"type\":\"response.completed\"}", false},
+		{"data: {\"type\":\"response.created\",\"response\":{\"model\":\"a\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"b\"}}\n\n", false},
 		{"", false},
-		{"不知道", false},
-		{"abc", false},
 	} {
-		if _, got := codexHarvestProbeVersionQualified(tc.answer); got != tc.want {
-			t.Errorf("codexHarvestProbeVersionQualified(%q) = %v, want %v", tc.answer, got, tc.want)
+		out := codexHarvestResponse{}
+		if got := consumeCodexHarvestSSE([]byte(tc.stream), &out) == nil; got != tc.want {
+			t.Errorf("stream accepted = %v, want %v", got, tc.want)
 		}
 	}
 }
@@ -265,10 +264,10 @@ func TestFireCodexTicketHarvestRequiresProxy(t *testing.T) {
 	}
 }
 
-// 探测请求体提问当前最新 Gemini 版本号，且带 model。
+// 探测使用不调用工具的短请求。
 func TestCodexTicketHarvestProbeBody(t *testing.T) {
 	body := string(codexTicketHarvestProbeBody("gpt-5.5"))
-	for _, want := range []string{`"model":"gpt-5.5"`, `"store":false`, `"stream":true`, "Gemini", "版本号"} {
+	for _, want := range []string{`"model":"gpt-5.5"`, `"store":false`, `"stream":true`, "Reply OK", "Do not call tools"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("probe body missing %s: %s", want, body)
 		}
@@ -463,9 +462,7 @@ func TestFireCodexTicketHarvestRejectsUnusableTickets(t *testing.T) {
 		plan       string
 		validation string
 	}{
-		{name: "probe answer at 2.5 rejected", state: testTicketState(time.Now(), auth.CodexTicketPersonalBlocks), answer: "2.5", plan: "plus", validation: "probe_version"},
-		{name: "probe answer below 2.5 rejected", state: testTicketState(time.Now(), auth.CodexTicketPersonalBlocks), answer: "1.5", plan: "plus", validation: "probe_version"},
-		{name: "probe answer without version rejected", state: testTicketState(time.Now(), auth.CodexTicketPersonalBlocks), answer: "不知道", plan: "plus", validation: "probe_version"},
+		{name: "wrong target length", state: testTicketState(time.Now(), auth.CodexTicketTeamBlocks), answer: "OK", plan: "plus", validation: "length"},
 		{name: "missing", answer: "3.0", plan: "plus", validation: "missing"},
 		{name: "wrong shape", state: "gAAAAAshort", answer: "3.0", plan: "plus", validation: "shape"},
 		{name: "malformed envelope", state: "gAAAAA" + strings.Repeat("a", 286), answer: "3.0", plan: "plus", validation: "shape"},

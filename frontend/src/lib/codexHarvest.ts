@@ -7,7 +7,7 @@ export interface HarvestSpeed {
   max_node_attempts: number
   refresh_before_seconds: number
 }
-export interface HarvestControls { version: number; node_memory_enabled: boolean; speed: HarvestSpeed }
+export interface HarvestControls { version: number; reuse_source_account_id: number; edge_ip: string; transport: 'sse' | 'websocket'; node_memory_enabled: boolean; speed: HarvestSpeed }
 export interface HarvestScope { mode: 'all' | 'selected'; group_ids: number[]; account_policy: 'schedulable_only' | 'prioritize_schedulable'; skipped_account_ids: number[] }
 export interface HarvestControlSnapshot {
   settings: HarvestControls
@@ -21,6 +21,8 @@ export interface HarvestControlSnapshot {
   runtime: { running: boolean; next_round_at: string | null; requests_used: number; request_budget: number; current_node: string; selection_reason: string; degraded_reason: string }
 }
 export interface HarvestTicket {
+	probe_verified: boolean; transport?: 'sse' | 'websocket'
+	acquisition?: 'self' | 'reuse'; source_account_id?: number
   model: string; ready: boolean; revoked: boolean; length: number; remaining_seconds: number
   cookie_count: number; cookie_remaining_seconds: number; cookie_expired: boolean
   egress_bound: boolean; session_bound: boolean; standby_ready: boolean
@@ -33,11 +35,12 @@ export interface HarvestEvent {
   http_status: number; length: number; expected_length: number; cookie_count: number; latency_ms: number; attempt: number; created_at: string
 }
 export interface HarvestManualRequest {
+	collect_lanes: number
   account_id: number; models: string[]; probe_interval_seconds: number; rate_limit_cooldown_seconds: number
   max_attempts: number; node_switch_rule: 'every_request' | '312_or_2fail' | '312_only' | 'never'; stop_on_success: boolean
 }
 export interface HarvestJob { id: string; request: HarvestManualRequest; running: boolean; cancelled: boolean; attempts: number; tickets_stored: number; last_event?: HarvestEvent; started_at: string; finished_at?: string }
-export interface HarvestSnapshot { controls: HarvestControlSnapshot; scope: HarvestScope; accounts: HarvestAccount[]; jobs: HarvestJob[] }
+export interface HarvestSnapshot { controls: HarvestControlSnapshot; scope: HarvestScope; accounts: HarvestAccount[]; jobs: HarvestJob[]; parallel_available: boolean }
 export interface HarvestNodeRecord {
   id: number; pool_id: string; account_id: number; model: string; blocks: number; node_id: string; node_name: string; provider: string
   successes: number; misses: number; network_errors: number; account_errors: number; consecutive_failures: number

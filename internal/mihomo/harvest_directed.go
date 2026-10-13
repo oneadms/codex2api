@@ -25,6 +25,7 @@ type HarvestNode struct {
 }
 
 type DirectedSidecar struct {
+	managed    *Manager
 	Controller string
 	Secret     string
 	ProxyURL   string
@@ -123,6 +124,14 @@ func (s *DirectedSidecar) liveLeaves(ctx context.Context) (map[string]directedPr
 }
 
 func (s *DirectedSidecar) Directory(ctx context.Context) ([]HarvestNode, error) {
+	if s.managed != nil {
+		s.managed.mu.Lock()
+		defer s.managed.mu.Unlock()
+		if s.managed.closed || !s.managed.state.Running {
+			return nil, errors.New("托管 Mihomo 未运行")
+		}
+		return managedNodes(s.managed.saved, false), nil
+	}
 	var state struct {
 		Proxies map[string]directedProxy `json:"proxies"`
 	}
@@ -188,6 +197,9 @@ func (s *DirectedSidecar) Lookup(ctx context.Context, id, name string) (HarvestN
 // Acquire holds the dedicated selector until response closure and validation.
 // The queue deadline is independent from the caller's upstream request timeout.
 func (s *DirectedSidecar) Acquire(ctx context.Context, node HarvestNode) (func(), error) {
+	if s.managed != nil {
+		return s.acquireManaged(ctx, node)
+	}
 	wait, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	select {
@@ -209,6 +221,9 @@ func (s *DirectedSidecar) Acquire(ctx context.Context, node HarvestNode) (func()
 }
 
 func (s *DirectedSidecar) Confirm(ctx context.Context, node HarvestNode) error {
+	if s.managed != nil {
+		return s.confirmManaged(ctx, node)
+	}
 	var group directedProxy
 	if err := s.control(ctx, http.MethodGet, "/proxies/"+url.PathEscape(HarvestSelectGroup), nil, &group); err != nil {
 		return err

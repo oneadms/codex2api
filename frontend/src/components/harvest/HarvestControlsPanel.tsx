@@ -5,10 +5,10 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
-import { harvestSpeedFields, splitHarvestList, type HarvestControlSnapshot, type HarvestScope } from '@/lib/codexHarvest'
+import { harvestSpeedFields, splitHarvestList, type HarvestControlSnapshot, type HarvestScope, type HarvestAccount } from '@/lib/codexHarvest'
 import { HarvestSection, type HarvestAction } from './shared'
 
-export default function HarvestControlsPanel({ snapshot, scope, busy, onAction }: { snapshot: HarvestControlSnapshot; scope: HarvestScope; busy: boolean; onAction: HarvestAction }) {
+export default function HarvestControlsPanel({ snapshot, scope, accounts, busy, onAction }: { snapshot: HarvestControlSnapshot; scope: HarvestScope; accounts: HarvestAccount[]; busy: boolean; onAction: HarvestAction }) {
   const { t } = useTranslation()
   const [draft, setDraft] = useState(snapshot.settings)
   const [scopeDraft, setScopeDraft] = useState(scope)
@@ -18,6 +18,10 @@ export default function HarvestControlsPanel({ snapshot, scope, busy, onAction }
     <HarvestSection title={t('harvest.controls')} actions={<Button size="sm" variant="ghost" onClick={() => setDraft(snapshot.defaults)} disabled={busy}>{t('harvest.defaults')}</Button>}>
       <div className="mb-5 flex flex-wrap gap-2">{Object.entries(snapshot.presets).map(([name, speed]) => <Button key={name} size="sm" variant={JSON.stringify(draft.speed) === JSON.stringify(speed) ? 'default' : 'outline'} disabled={busy} onClick={() => setDraft({ ...draft, speed })}>{t(`harvest.${name}`)}</Button>)}</div>
       <form onSubmit={event => { event.preventDefault(); void onAction(() => api.updateHarvestControls(draft)) }}>
+        <label className="mb-4 block max-w-lg space-y-2 text-sm"><span>{t('harvest.transport')}</span><Select aria-label={t('harvest.transport')} disabled={busy} value={draft.transport} onValueChange={transport => setDraft({ ...draft, transport: transport as typeof draft.transport })} options={[{ value: 'sse', label: 'SSE / HTTP' }, { value: 'websocket', label: 'WebSocket' }]} /></label>
+        <p className="mb-4 text-xs leading-relaxed text-muted-foreground">{t('harvest.transportHint')}</p>
+        <label className="mb-4 block max-w-lg space-y-2 text-sm"><span>{t('harvest.reuseSource')}</span><Select aria-label={t('harvest.reuseSource')} disabled={busy} value={String(draft.reuse_source_account_id ?? 0)} onValueChange={value => setDraft({ ...draft, reuse_source_account_id: Number(value) })} options={[{ value: '0', label: t('harvest.selfCollection') }, ...accounts.filter(account => account.eligible).map(account => ({ value: String(account.id), label: `${account.email || 'Codex'} #${account.id}` }))]} /><span className="block text-xs leading-relaxed text-muted-foreground">{t('harvest.reuseHint')}</span></label>
+        <label className="mb-4 block max-w-lg space-y-2 text-sm"><span>{t('harvest.edgeIP')}</span><Input value={draft.edge_ip} disabled={busy} onChange={event => setDraft({ ...draft, edge_ip: event.target.value.trim() })} placeholder="104.18.0.1" /><span className="block text-xs leading-relaxed text-muted-foreground">{t('harvest.edgeHint')}</span></label>
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">{harvestSpeedFields.map(field => <label key={field} className="space-y-2 text-sm"><span>{t(`harvest.${field}`)}</span><Input type="number" required min={snapshot.bounds[field].min} max={snapshot.bounds[field].max} disabled={busy} value={draft.speed[field]} onChange={event => setDraft({ ...draft, speed: { ...draft.speed, [field]: Number(event.target.value) } })} /></label>)}</div>
         <p className="mt-3 text-xs text-muted-foreground">{t('harvest.refreshHint')}</p>
         <div className="mt-5 flex items-start justify-between gap-4 border-t pt-4"><div><label className="flex items-center gap-2 text-sm font-medium"><Switch checked={draft.node_memory_enabled} disabled={busy} onCheckedChange={node_memory_enabled => setDraft({ ...draft, node_memory_enabled })} />{t('harvest.learning')}</label><p className="mt-2 text-xs text-muted-foreground">{t('harvest.learningHint')}</p></div><Button type="submit" disabled={busy}>{t('harvest.save')}</Button></div>

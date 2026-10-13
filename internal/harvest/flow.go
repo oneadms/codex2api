@@ -69,6 +69,7 @@ type EventPage struct {
 }
 
 type ManualRequest struct {
+	CollectLanes             int      `json:"collect_lanes"`
 	AccountID                int64    `json:"account_id"`
 	Models                   []string `json:"models"`
 	ProbeIntervalSeconds     int      `json:"probe_interval_seconds"`
@@ -79,6 +80,9 @@ type ManualRequest struct {
 }
 
 func (r ManualRequest) Validate() error {
+	if r.CollectLanes < 0 || r.CollectLanes > 32 {
+		return fmt.Errorf("采票通道数必须为 0–32")
+	}
 	if r.AccountID <= 0 || len(r.Models) == 0 || len(r.Models) > 64 {
 		return fmt.Errorf("请选择账号和模型")
 	}

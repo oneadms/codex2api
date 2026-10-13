@@ -954,7 +954,7 @@
     "claudeMaxToolSchemaBytesDesc": "0 表示不設閘道 Schema 上限；請求體仍受系統大小與上游限制。",
     "codexTicket": {
       "sectionTitle": "Codex 回合门票（自动打票）",
-      "sectionDescription": "透過專用代理取得 X-Codex-Turn-State 門票與配套 Cookie，並在業務請求中一起傳送。門票有效期約 240 秒，提前 30 秒停止使用；缺少 Cookie 的舊票會重新取得。手動注入值仍優先。",
+      "sectionDescription": "透過專用代理取得門票與配套 Cookie，業務沿用完整材料。780 票須通過同會話、同協定的兩次短請求續接驗收；本地快取上限為 240 秒，缺少驗收標記的舊 780 票會重新採集。手動注入值仍優先。",
       "enabled": "启用后台自动打票",
       "enabledDesc": "关闭时既不探测也不注入，按原链路转发。开启后需要同时配置打票代理与门控模型，三者齐备门控才生效。",
       "gateInactive": "门控当前未生效：还需要配置打票代理与至少一个门控模型。",

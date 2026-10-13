@@ -8,6 +8,7 @@ import { getErrorMessage } from '../utils/error'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Switch } from './ui/switch'
+import { Select } from './ui/select'
 
 // Codex turn state 后台打票配置。独立读写 /settings/codex-ticket，改动即时保存，
 // 不受通用设置保存影响。
@@ -133,6 +134,12 @@ export default function CodexTicketSettings() {
           <p className="text-sm leading-relaxed text-muted-foreground">{t('settings.codexTicket.modelsDesc')}</p>
         </div>
       </div>
+
+      <label className="block max-w-lg space-y-2 text-sm">
+        <span className="font-medium">{t('harvest.targetLength')}</span>
+        <Select aria-label={t('harvest.targetLength')} value={String(settings?.target_length ?? 0)} disabled={saving} onValueChange={value => void patch({ target_length: Number(value) })} options={[{ value: '780', label: t('harvest.target780') }, { value: '0', label: t('harvest.targetAuto') }, { value: '292', label: '292' }, { value: '332', label: '332' }]} />
+        <p className="text-xs leading-relaxed text-muted-foreground">{t('harvest.probePolicy')}</p>
+      </label>
 
       <div className="flex items-start justify-between gap-4 rounded-xl border border-border p-4">
         <div className="space-y-1.5">

@@ -27,7 +27,7 @@ func TestCodexHarvestWebsocketCookiePolicy(t *testing.T) {
 		age        time.Duration
 		wantCookie string
 	}{
-		{"first", 0, ""}, {"fresh", time.Minute, "ticket=previous"}, {"expired", 241 * time.Second, ""},
+		{"first", 0, ""}, {"fresh", time.Minute, ""}, {"expired", 241 * time.Second, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			state := testTicketState(time.Now(), auth.CodexTicketPersonalBlocks)
@@ -183,11 +183,11 @@ func TestCodexHarvestRoundStandbyScopeAndManualBudget(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	jobs := m.Jobs()
-	if len(jobs) != 1 || jobs[0].Running || jobs[0].Attempts != 2 || jobs[0].TicketsStored != 2 {
+	if len(jobs) != 1 || jobs[0].Running || jobs[0].Attempts != 1 || jobs[0].TicketsStored != 1 {
 		t.Fatalf("手动预算错误: %+v", jobs)
 	}
 	events, err := m.Repository.Events(t.Context(), account.ID(), job.ID, 0, 25)
-	if err != nil || events.Total != 2 {
+	if err != nil || events.Total != 1 {
 		t.Fatalf("手动事件缺失: %v", err)
 	}
 	scope, _ := m.Scope(t.Context())
@@ -199,7 +199,7 @@ func TestCodexHarvestRoundStandbyScopeAndManualBudget(t *testing.T) {
 		t.Fatal("跳过账号仍能开始手动采票")
 	}
 	m.RunRound(t.Context())
-	if requests.Load() != 4 {
+	if requests.Load() != 3 {
 		t.Fatal("跳过账号仍发出了请求")
 	}
 }

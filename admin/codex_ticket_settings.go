@@ -15,6 +15,7 @@ import (
 // codexTicketSettingsResponse 是打票配置的管理端投影。代理地址回显时把密码掩成
 // ***（绝不把凭据透出去），并额外给一个 has_password 让界面知道"回显的是掩码"。
 type codexTicketSettingsResponse struct {
+	TargetLength         int      `json:"target_length"`
 	Enabled              bool     `json:"enabled"`
 	HarvestProxyURL      string   `json:"harvest_proxy_url"`
 	HarvestProxyMasked   bool     `json:"harvest_proxy_masked"`
@@ -35,6 +36,7 @@ type codexTicketSettingsResponse struct {
 
 func (h *Handler) codexTicketSettingsResponse(settings auth.CodexTicketSettings) codexTicketSettingsResponse {
 	response := codexTicketSettingsResponse{
+		TargetLength:         settings.TargetLength,
 		Enabled:              settings.Enabled,
 		HarvestProxyURL:      auth.MaskCodexTicketProxyURL(settings.HarvestProxyURL),
 		TTLSeconds:           settings.TTLSeconds,
@@ -65,7 +67,7 @@ func (h *Handler) codexTicketReadyAccountCounts(models []string) (ready, total i
 			continue
 		}
 		total++
-		if _, ok := account.CodexTicketInjectionWithShared(now, 0, models...); ok {
+		if _, ok := account.CodexTicketInjectionWithShared(now, auth.CodexTicketTargetLength(account.GetPlanType()), models...); ok {
 			ready++
 		}
 	}
@@ -81,6 +83,7 @@ func (h *Handler) GetCodexTicketSettings(c *gin.Context) {
 // 代理地址收到掩码占位符时沿用原密码，避免把 *** 当成新密码存回去。
 func (h *Handler) UpdateCodexTicketSettings(c *gin.Context) {
 	var req struct {
+		TargetLength         *int      `json:"target_length"`
 		Enabled              *bool     `json:"enabled"`
 		HarvestProxyURL      *string   `json:"harvest_proxy_url"`
 		TTLSeconds           *int      `json:"ttl_seconds"`
@@ -96,7 +99,7 @@ func (h *Handler) UpdateCodexTicketSettings(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "请求体格式错误")
 		return
 	}
-	if req.Enabled == nil && req.HarvestProxyURL == nil &&
+	if req.TargetLength == nil && req.Enabled == nil && req.HarvestProxyURL == nil &&
 		req.TTLSeconds == nil && req.RefreshBeforeSeconds == nil && req.ProbeIntervalSeconds == nil &&
 		req.CooldownSeconds == nil && req.MaxProbesPerRound == nil && req.ProbeTimeoutSeconds == nil &&
 		req.FailClosed == nil && req.Models == nil {
@@ -106,6 +109,9 @@ func (h *Handler) UpdateCodexTicketSettings(c *gin.Context) {
 
 	current := auth.ConfiguredCodexTicketSettings()
 	next := current
+	if req.TargetLength != nil {
+		next.TargetLength = *req.TargetLength
+	}
 	if req.Enabled != nil {
 		next.Enabled = *req.Enabled
 	}

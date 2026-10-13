@@ -29,6 +29,7 @@ type CodexHarvestManager struct {
 	jobs        map[string]*harvest.ManualJob
 	cancels     map[string]context.CancelFunc
 	roundMu     sync.Mutex
+	harvestMu   sync.RWMutex
 	cursor      uint64
 	paceMu      sync.Mutex
 	lastRequest time.Time
@@ -108,16 +109,24 @@ func (m *CodexHarvestManager) ControlSnapshot(ctx context.Context) harvest.Codex
 	if err == nil {
 		query, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
-		_, err = sidecar.Directory(query)
+		var nodes []mihomo.HarvestNode
+		nodes, err = sidecar.Directory(query)
+		if err == nil && len(nodes) == 0 {
+			err = errors.New("没有可用的定向采票节点")
+		}
 	}
 	out.Available = err == nil
 	if err != nil {
-		out.AvailabilityReason = "定向学习需要外部 Mihomo 的专用 Selector 和监听端口；当前按代理轮换，不能保证固定出口 IP"
+		out.AvailabilityReason = "定向采票需要运行中的托管 Mihomo 或外部 Mihomo 专用 Selector，并有可用节点；普通代理轮换不能保证固定出口 IP"
 	}
 	return out
 }
 
 func (m *CodexHarvestManager) RunRound(ctx context.Context) {
+	if !m.harvestMu.TryRLock() {
+		return
+	}
+	defer m.harvestMu.RUnlock()
 	if !m.roundMu.TryLock() {
 		return
 	}
@@ -172,12 +181,12 @@ func (m *CodexHarvestManager) RunRound(ctx context.Context) {
 					return
 				}
 				now := time.Now()
-				if ticket := account.CodexTicketForModel(model, now, 0); ticket != nil {
+				if ticket := account.CodexTicketForModel(model, now, auth.CodexTicketTargetLength(account.GetPlanType()), controls.Transport); ticket != nil {
 					auth.PublishCodexTicketToSharedPool(account, ticket)
 					refresh := time.Duration(controls.Speed.RefreshBeforeSeconds) * time.Second
 					// Cookie 的有效窗口比上游预设短，至少保留一半窗口用于正常业务。
 					refresh = min(refresh, auth.CodexTicketCookieFreshness/2)
-					if !ticket.NeedsRefresh(now, refresh) && ticket.Standby.Valid(now, ticket.Length) {
+					if !ticket.NeedsRefresh(now, refresh) && ticket.Standby.Valid(now, ticket.Length) && (ticket.Standby.Transport == "" || ticket.Standby.Transport == controls.Transport) {
 						continue
 					}
 				}
@@ -188,7 +197,7 @@ func (m *CodexHarvestManager) RunRound(ctx context.Context) {
 				for attempt := 0; attempt < controls.Speed.MaxNodeAttempts && budget > 0; attempt++ {
 					event := m.attempt(ctx, account, model, settings.HarvestProxyURL, controls, &budget, tried, nil, "auto", "", attempt+1)
 					m.Controls.SetRuntime(func(r *harvest.CodexHarvestRuntime) { r.RequestsUsed = r.RequestBudget - budget })
-					if event.Result == "success" || event.Result == "account_error" || event.Result == "skipped" || event.Result == "cancelled" {
+					if event.Result == "success" || event.Result == "account_error" || event.Result == "skipped" || event.Result == "cancelled" || event.Result == "persistence_error" {
 						break
 					}
 					if !harvestWait(ctx, time.Duration(controls.Speed.ProbeIntervalSeconds)*time.Second) {
@@ -250,7 +259,7 @@ func (m *CodexHarvestManager) Accounts(ctx context.Context) ([]CodexHarvestAccou
 		a.Mu().RUnlock()
 		_, busy := m.working.Load(a.ID())
 		row := CodexHarvestAccount{ID: a.ID(), Email: email, GroupIDs: a.GroupIDSnapshot(), Eligible: harvestAccountEligible(a, scope, false), Busy: busy,
-			Tickets: a.CodexTicketStatuses(models, time.Now(), 0)}
+			Tickets: a.CodexTicketStatuses(models, time.Now(), auth.CodexTicketTargetLength(a.GetPlanType()))}
 		for _, id := range scope.SkippedAccountIDs {
 			if id == a.ID() {
 				row.Skipped = true

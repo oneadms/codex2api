@@ -20,8 +20,8 @@ import (
 // 门票不是身份：它只影响上游的回合状态校验，不进调度、不影响请求归属。
 //
 // 门票的形状是一个可校验的信封：base64url 解码后是 57 字节固定头 + N 个 16 字节
-// 加密块，首字节恒为 0x80，第 1..9 字节是大端 unix 签发时刻。合格判定不再依赖编码
-// 长度（上游编码会变化），采票侧改用探测回答校验（Gemini 版本号须大于 2.5）。
+// 加密块，首字节恒为 0x80，第 1..9 字节是大端 unix 签发时刻。
+// 采票按配置校验信封长度与时效，780 票还必须通过同会话、同协议的完整续接。
 const (
 	// CodexTicketStatePrefix 是门票 blob 的固定前缀（解码后首字节 0x80）。
 	CodexTicketStatePrefix = "gAAAAA"
@@ -146,6 +146,12 @@ type CodexTicketProbeSummary struct {
 
 // CodexTicket 是一张已捕获的门票。
 type CodexTicket struct {
+	// 780 票只有在同出口、同会话完整续接通过后才可使用。
+	ProbeVerified   bool   `json:"probe_verified,omitempty"`
+	Transport       string `json:"transport,omitempty"`
+	ManagedNode     bool   `json:"managed_node,omitempty"`
+	Acquisition     string `json:"acquisition,omitempty"`
+	SourceAccountID int64  `json:"source_account_id,omitempty"`
 	// Model 是该门票适用的上游模型名。
 	Model string `json:"model"`
 	// State 是门票 blob 本身。
@@ -183,7 +189,7 @@ type CodexTicket struct {
 }
 
 // Valid 报告门票在 now 时刻是否可用：形状正确、未撤销、未过期、签发时刻合理。
-// targetLen 传 0（或负值）表示不按编码长度校验——采票合格判定已改为探测回答。
+// targetLen 传 0（或负值）表示不按配置长度筛选，信封和续接要求仍然生效。
 func (t *CodexTicket) Valid(now time.Time, targetLen int) bool {
 	if t == nil || t.Revoked || NormalizeCodexTicketCookie(t.Cookie) == "" {
 		return false
@@ -196,6 +202,9 @@ func (t *CodexTicket) Valid(now time.Time, targetLen int) bool {
 		return false
 	}
 	if targetLen > 0 && len(state) != targetLen {
+		return false
+	}
+	if len(state) == 780 && (!t.ProbeVerified || (t.Transport != "sse" && t.Transport != "websocket") || !ValidCodexRouteCookie(t.Cookie, now)) {
 		return false
 	}
 	shape, err := ParseCodexTicketShape(state)
@@ -320,7 +329,7 @@ func firstNonEmptyString(values ...string) string {
 
 // CodexTicketForModel 返回该账号在指定模型上的门票（含有效性判定）。
 // 主票不可用但热备票可用时返回热备票。targetLen 传 0 表示不按长度校验。
-func (a *Account) CodexTicketForModel(model string, now time.Time, targetLen int) *CodexTicket {
+func (a *Account) CodexTicketForModel(model string, now time.Time, targetLen int, protocols ...string) *CodexTicket {
 	if a == nil {
 		return nil
 	}
@@ -334,10 +343,13 @@ func (a *Account) CodexTicketForModel(model string, now time.Time, targetLen int
 	if ticket == nil {
 		return nil
 	}
-	if ticket.Valid(now, targetLen) {
+	compatible := func(t *CodexTicket) bool {
+		return t.Valid(now, targetLen) && (len(protocols) == 0 || t.Transport == "" || t.Transport == protocols[0])
+	}
+	if compatible(ticket) {
 		return ticket
 	}
-	if ticket.Standby != nil && ticket.Standby.Valid(now, targetLen) {
+	if ticket.Standby != nil && compatible(ticket.Standby) {
 		return ticket.Standby
 	}
 	return nil
@@ -388,7 +400,8 @@ func (a *Account) CodexTicketSnapshot(model string) *CodexTicket {
 }
 
 func publishCodexTicketToSharedPool(planType string, ticket *CodexTicket) {
-	if ticket == nil || NormalizeCodexTicketModel(ticket.Model) == "" {
+	// 780 票经过账号身份续接，不能直接把来源 state 注入另一账号。
+	if ticket == nil || ticket.Length == 780 || NormalizeCodexTicketModel(ticket.Model) == "" {
 		return
 	}
 	key := codexTicketSharedPoolKey(planType, ticket.Model)
@@ -464,6 +477,27 @@ func (a *Account) CodexTicketWithShared(now time.Time, targetLen int, models ...
 	return nil
 }
 
+// CodexTicketForRequest 按实际业务协议选票，主票协议不符时仍可使用同协议备用票。
+func (a *Account) CodexTicketForRequest(now time.Time, targetLen int, protocol string, models ...string) *CodexTicket {
+	if a == nil {
+		return nil
+	}
+	for _, model := range models {
+		if ticket := a.CodexTicketForModel(model, now, targetLen, protocol); ticket != nil {
+			return ticket
+		}
+	}
+	if targetLen == 780 {
+		return nil
+	}
+	for _, model := range models {
+		if ticket := sharedCodexTicketForModel(a.GetPlanType(), model, now, targetLen); ticket != nil && (ticket.Transport == "" || ticket.Transport == protocol) {
+			return ticket
+		}
+	}
+	return nil
+}
+
 // RevokeSharedCodexTicket removes the matching shared ticket and its standby.
 // Matching the state prevents a stale 401 from revoking a newer replacement.
 func RevokeSharedCodexTicket(planType, model, state string) bool {
@@ -500,7 +534,11 @@ func ResetCodexTicketSharedPoolForTest() {
 
 // CodexTicketStatus 是单个模型的门票状态投影，供管理端展示。
 type CodexTicketStatus struct {
-	Model string `json:"model"`
+	Acquisition     string `json:"acquisition,omitempty"`
+	SourceAccountID int64  `json:"source_account_id,omitempty"`
+	ProbeVerified   bool   `json:"probe_verified"`
+	Transport       string `json:"transport,omitempty"`
+	Model           string `json:"model"`
 	// Ready 表示存在可用门票（主票或热备票）。
 	Ready bool `json:"ready"`
 	// Length 是当前可用门票的长度。
@@ -553,6 +591,8 @@ func (a *Account) CodexTicketStatuses(models []string, now time.Time, targetLen 
 			active = ticket.Standby
 		}
 		status.CookieCount = active.CookieCount()
+		status.ProbeVerified, status.Transport = active.ProbeVerified, active.Transport
+		status.Acquisition, status.SourceAccountID = active.Acquisition, active.SourceAccountID
 		status.CookieExpired = !active.CookieFresh(now)
 		if expiry := active.CookieEffectiveExpiry(); !expiry.IsZero() {
 			status.CookieExpiresAt = &expiry
