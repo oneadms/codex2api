@@ -6,27 +6,27 @@ import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { harvestSpeedFields, splitHarvestList, type HarvestControlSnapshot, type HarvestControls, type HarvestScope, type HarvestAccount } from '@/lib/codexHarvest'
+import HarvestProxyPicker from './HarvestProxyPicker'
 import { HarvestPill, HarvestSection, type HarvestAction } from './shared'
 
 /**
  * 采票控制。草稿独立保存：轮询刷新运行时但不覆盖未保存的 speed/transport 修改，
- * 只有点击刷新或放弃修改才回读服务端值。strategy/proxy_pool_id 与 Go controls.go 对齐。
+ * 只有点击刷新或放弃修改才回读服务端值。strategy/proxy_ids 与 Go controls.go 对齐。
  */
 export default function HarvestControlsPanel({ snapshot, scope, accounts, groups, busy, onAction }: { snapshot: HarvestControlSnapshot; scope: HarvestScope; accounts: HarvestAccount[]; groups: { id: number; name: string }[]; busy: boolean; onAction: HarvestAction }) {
   const { t } = useTranslation()
   const [draft, setDraft] = useState<HarvestControls>(snapshot.settings)
   const [scopeDraft, setScopeDraft] = useState<HarvestScope>(scope)
   const [groupsText, setGroupsText] = useState(scope.group_ids.join(', '))
-  const [proxyPoolText, setProxyPoolText] = useState(String(snapshot.settings.proxy_pool_id ?? 0))
   const touched = useRef(false)
   const savedKey = JSON.stringify(snapshot.settings)
   useEffect(() => {
     // 服务端保存成功后（settings 与草稿一致或用户未改动）同步草稿。
-    if (!touched.current) { setDraft(snapshot.settings); setProxyPoolText(String(snapshot.settings.proxy_pool_id ?? 0)) }
+    if (!touched.current) { setDraft(snapshot.settings) }
   }, [savedKey, snapshot.settings])
   const markTouched = () => { touched.current = true }
   const controlsDirty = JSON.stringify(draft) !== JSON.stringify(snapshot.settings)
-  const resetDraft = () => { touched.current = false; setDraft(snapshot.settings); setProxyPoolText(String(snapshot.settings.proxy_pool_id ?? 0)) }
+  const resetDraft = () => { touched.current = false; setDraft(snapshot.settings) }
   const saveScope = () => onAction(() => api.updateHarvestScope({ ...scopeDraft, skipped_account_ids: scope.skipped_account_ids, group_ids: scopeDraft.mode === 'selected' ? splitHarvestList(groupsText).map(Number).filter(id => Number.isInteger(id) && id > 0) : [] }))
   return <div className="space-y-5">
     <HarvestSection title={t('harvest.controls')} actions={<div className="flex flex-wrap items-center gap-2">
@@ -38,7 +38,7 @@ export default function HarvestControlsPanel({ snapshot, scope, accounts, groups
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
           <label className="space-y-2 text-sm"><span>{t('harvest.transport')}</span><Select aria-label={t('harvest.transport')} disabled={busy} value={draft.transport} onValueChange={transport => { markTouched(); setDraft({ ...draft, transport: transport as typeof draft.transport }) }} options={[{ value: 'sse', label: 'SSE / HTTP' }, { value: 'websocket', label: 'WebSocket' }]} /></label>
           <label className="space-y-2 text-sm"><span>{t('harvest.strategy')}</span><Select aria-label={t('harvest.strategy')} disabled={busy} value={draft.strategy} onValueChange={strategy => { markTouched(); setDraft({ ...draft, strategy: strategy as HarvestControls['strategy'] }) }} options={[{ value: 'refresh', label: t('harvest.strategyRefresh') }, { value: 'fixed', label: t('harvest.strategyFixed') }]} /><span className="block text-xs leading-relaxed text-muted-foreground">{t('harvest.strategyHint')}</span></label>
-          <label className="space-y-2 text-sm"><span>{t('harvest.proxyPool')}</span><Input inputMode="numeric" value={proxyPoolText} disabled={busy} onChange={event => { markTouched(); setProxyPoolText(event.target.value.replace(/[^0-9]/g, '')) }} onBlur={() => { const value = Number(proxyPoolText || '0'); setDraft(current => ({ ...current, proxy_pool_id: Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0 })); setProxyPoolText(String(Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0)) }} /><span className="block text-xs leading-relaxed text-muted-foreground">{t('harvest.proxyPoolHint')}</span></label>
+          <HarvestProxyPicker selected={draft.proxy_ids ?? []} disabled={busy} onChange={proxy_ids => { markTouched(); setDraft(current => ({ ...current, proxy_ids })) }} />
         </div>
         <p className="my-4 text-xs leading-relaxed text-muted-foreground">{t('harvest.transportHint')}</p>
         <label className="mb-4 block max-w-lg space-y-2 text-sm"><span>{t('harvest.edgeIP')}</span><Input value={draft.edge_ip} disabled={busy} onChange={event => { markTouched(); setDraft({ ...draft, edge_ip: event.target.value.trim() }) }} placeholder="104.18.0.1" /><span className="block text-xs leading-relaxed text-muted-foreground">{t('harvest.edgeHint')}</span></label>

@@ -581,12 +581,26 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	// 忽略本地 WHAM 100% 快照；previous_response_id 本身不足以证明这是活跃 turn。
 	continuationPinned := turnContinuation && turnHasBinding
 	continuationDegraded := false
+	fixedGatewayRequest := false
+	checkFixedGateway := func(a *auth.Account) error {
+		fixed, err := CodexGatewayWSRequired(c.Request.Context(), a, effectiveModel)
+		fixedGatewayRequest = fixedGatewayRequest || fixed
+		return err
+	}
+	if boundID, ok := h.store.SessionAffinityAccountID(affinityKey); ok {
+		if err := checkFixedGateway(h.store.FindByID(boundID)); err != nil {
+			return writeResponsesWSRecoveryError(conn, responsesWSContextUnavailable(http.StatusServiceUnavailable, "gateway_settings_unavailable"))
+		}
+	}
 	if err := waitNativeWSCommit(c.Request.Context(), respCacheOwner, gjson.GetBytes(codexBody, "previous_response_id").String()); err != nil {
 		return writeResponsesWSError(conn, nativeResponsesWSContextError(responsesWSContextUnavailable(http.StatusServiceUnavailable, "context_commit_pending")))
 	}
 	turnReplay := newResponsesWSReplaySource(codexBody, respCacheOwner)
 	accountFilter = nativeWSReplayAccountFilter(accountFilter, turnReplay)
 	degradeContinuation := func(reason string, attempt int) *api.APIError {
+		if fixedGatewayRequest {
+			return responsesWSContextUnavailable(http.StatusConflict, "fixed_ws_session_requires_original_connection")
+		}
 		expanded, lost, contextErr := degradeResponsesWSContinuationWithSource(codexBody, respCacheOwner, turnReplay)
 		if contextErr != nil {
 			return contextErr
@@ -608,7 +622,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	// 钉死只约束「别换号」，不该把 previous_response_not_found 原样甩给
 	// Codex CLI（它几乎每轮都带回 x-codex-turn-state，#541）。
 	canDegradeContinuation := func() bool {
-		return hasPreviousResponse && !continuationDegraded
+		return hasPreviousResponse && !continuationDegraded && !fixedGatewayRequest
 	}
 	var wsHTTPFallback websocketHTTPFallbackState
 	var lastUpstreamCancel context.CancelFunc
@@ -681,6 +695,11 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			_ = writeResponsesWSError(conn, apiErr)
 			return nil
 		}
+		if err := checkFixedGateway(account); err != nil {
+			h.store.Release(account)
+			return writeResponsesWSRecoveryError(conn, responsesWSContextUnavailable(http.StatusServiceUnavailable, "gateway_settings_unavailable"))
+		}
+		retryEnabled = retryEnabled && !fixedGatewayRequest
 		if attempt > 0 {
 			clearNewAPIUpstreamCyberPolicyDecision(c)
 		}
@@ -738,6 +757,12 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		if relayUpstreamWS {
 			useWebsocket = true
 		}
+		if fixedGatewayRequest && !useWebsocket {
+			ttftGuard.Stop()
+			upstreamCancel()
+			h.store.Release(account)
+			return writeResponsesWSRecoveryError(conn, responsesWSContextUnavailable(http.StatusConflict, "fixed_ws_session_requires_websocket"))
+		}
 		// WebSocket 上游下剥离自动注入的图片工具，防止模型自主生图卡死。
 		upstreamBody := codexBody
 		attemptReplay := turnReplay
@@ -786,6 +811,19 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		}
 
 		if reqErr != nil {
+			if quotaErr := apiKeyModelRequestError(reqErr); quotaErr != nil {
+				ttftGuard.Stop()
+				h.store.Release(account)
+				// A model-specific budget must not close the connection for other models.
+				return writeResponsesWSError(conn, quotaErr.apiErr)
+			}
+			var fixedErr *CodexGatewayWSError
+			if fixedGatewayRequest || errors.As(reqErr, &fixedErr) {
+				ttftGuard.Stop()
+				upstreamCancel()
+				h.store.Release(account)
+				return writeResponsesWSRecoveryError(conn, responsesWSContextUnavailable(http.StatusConflict, "fixed_ws_session_requires_original_connection"))
+			}
 			var capacityErr *UpstreamWSConnectionCapacityError
 			if errors.As(reqErr, &capacityErr) {
 				ttftGuard.Stop()
@@ -812,12 +850,6 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 					continue
 				}
 				return writeResponsesWSRecoveryError(conn, nativeResponsesWSContextError(responsesWSContextUnavailable(http.StatusConflict, continuationLost.Reason)))
-			}
-			if quotaErr := apiKeyModelRequestError(reqErr); quotaErr != nil {
-				ttftGuard.Stop()
-				h.store.Release(account)
-				// A model-specific budget must not close the connection for other models.
-				return writeResponsesWSError(conn, quotaErr.apiErr)
 			}
 			timedOut := ttftGuard.TimedOut()
 			ttftGuard.Stop()
@@ -906,7 +938,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				return errResponsesWSClientGone
 			}
 
-			if !invalidEncryptedContentRetried && isInvalidEncryptedContentError(resp.StatusCode, errBody) {
+			if !fixedGatewayRequest && !invalidEncryptedContentRetried && isInvalidEncryptedContentError(resp.StatusCode, errBody) {
 				strippedRawBody, rawChanged := stripInvalidEncryptedContentFromResponsesBody(rawBody)
 				strippedCodexBody, codexChanged := stripInvalidEncryptedContentFromResponsesBody(codexBody)
 				if rawChanged || codexChanged {
@@ -1039,7 +1071,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			var retryErr *responsesWSRetryableStreamError
 			if errors.As(err, &retryErr) {
 				lastRetryableUpstreamErr = api.NewAPIError(api.ErrCodeUpstreamError, retryErr.outcome.failureMessage, api.ErrorTypeUpstream)
-				if useWebsocket && isWebsocketMessageTooBigOutcome(retryErr.outcome) && !account.OpenAIResponsesUsesUpstreamWebsocket() {
+				if !fixedGatewayRequest && useWebsocket && isWebsocketMessageTooBigOutcome(retryErr.outcome) && !account.OpenAIResponsesUsesUpstreamWebsocket() {
 					wsElapsed := time.Since(start)
 					globalWSSizeRouter.RecordMessageTooBig(len(codexBody))
 					wsHTTPFallback.Retain(account, proxyURL, wsElapsed, websocketMessageTooBigSource(retryErr.outcome.failureMessage))

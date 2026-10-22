@@ -55,8 +55,10 @@ export default function HarvestGatewayPanel({ accounts, busy, onAction }: { acco
       if (!keepDraft || !draftTouched.current) applySettings(settings)
       else setSaved(normalizeGatewaySettings(settings))
       setRuntime(status)
-      setError('')
-      setRevisionConflict(false)
+      if (!keepDraft || !draftTouched.current) {
+        setError('')
+        setRevisionConflict(false)
+      }
     } catch (err) {
       setError(getGatewayError(err, t))
     } finally { setLoading(false) }
@@ -74,9 +76,9 @@ export default function HarvestGatewayPanel({ accounts, busy, onAction }: { acco
     if (!draft || validation || !dirty) return
     setSaving(true); setError(''); setRevisionConflict(false)
     try {
-      const latest = await api.getCodexGateway()
-      const merged = { ...draft, revision: latest.revision }
-      const result = await api.updateCodexGateway(merged)
+      // Keep the revision associated with this draft. Fetching a newer token
+      // here would allow an old form to overwrite another administrator's save.
+      const result = await api.updateCodexGateway(normalizeGatewaySettings(draft))
       draftTouched.current = false
       applySettings(result)
       await load(false)
@@ -172,7 +174,7 @@ export default function HarvestGatewayPanel({ accounts, busy, onAction }: { acco
             disabled={busy || saving}
             onToggle={id => update(current => {
               const account_ids = toggleList(current.ws_session.account_ids, id, current.cookie_pool.source_account_ids)
-              const target_account_ids = current.cookie_pool.target_account_ids.filter(targetId => !account_ids.includes(targetId))
+              const target_account_ids = [...new Set([...current.cookie_pool.target_account_ids, ...account_ids])]
               return { ...current, ws_session: { ...current.ws_session, account_ids }, cookie_pool: { ...current.cookie_pool, target_account_ids } }
             })} /></div>
           <label className="mt-3 block max-w-xs space-y-2 text-sm"><span>{t('harvest.wsTTL')}</span><Input type="number" min={60} max={3600} required disabled={busy || saving} value={draft.ws_session.ttl_seconds} onChange={event => update(current => ({ ...current, ws_session: { ...current.ws_session, ttl_seconds: Number(event.target.value) } }))} /></label>
@@ -255,7 +257,7 @@ export default function HarvestGatewayPanel({ accounts, busy, onAction }: { acco
           <h4 className="text-xs font-medium text-muted-foreground">{t('harvest.wsAccounts')}</h4>
           {runtime.ws.length === 0 ? <p className="text-sm text-muted-foreground">{t('harvest.empty')}</p> : runtime.ws.map(row => <div key={`ws-${row.account_id}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-3">
             <div className="text-sm"><span className="font-mono text-xs">#{row.account_id}</span><HarvestPill good={row.ready}>{t(row.ready ? 'harvest.ready' : 'harvest.empty')}</HarvestPill><span className="ml-2 text-xs text-muted-foreground">{t('harvest.wsSessions', { count: row.active_sessions })} · {t(`harvest.gatewayReasons.${row.reason}`, { defaultValue: row.reason })}</span></div>
-            <Button size="xs" variant="outline" disabled={busy || testing || dirty || !draft?.cookie_pool.enabled || !row.ready} onClick={() => void runTest('ws', row.account_id)}>{t('harvest.verifyWS')}</Button>
+            <Button size="xs" variant="outline" disabled={busy || testing || dirty || !draft?.cookie_pool.enabled || !draft.ws_session.enabled} onClick={() => void runTest('ws', row.account_id)}>{t('harvest.verifyWS')}</Button>
           </div>)}
         </div>
       </div>

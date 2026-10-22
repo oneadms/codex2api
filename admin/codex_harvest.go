@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/codex2api/auth"
 	"github.com/codex2api/internal/harvest"
 	"github.com/codex2api/internal/mihomo"
 	"github.com/codex2api/proxy"
@@ -82,7 +81,7 @@ func (h *Handler) GetCodexHarvest(c *gin.Context) {
 		writeError(c, 500, "读取采票范围失败")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"coverage": h.codexHarvest.HarvestCoverage(ctx), "controls": h.codexHarvest.ControlSnapshot(ctx), "scope": scope, "accounts": accounts, "jobs": h.codexHarvest.Jobs(), "parallel_available": mihomo.CollectionAvailable() && auth.ConfiguredCodexTicketSettings().HarvestProxyURL == mihomo.Endpoint})
+	c.JSON(http.StatusOK, gin.H{"coverage": h.codexHarvest.HarvestCoverage(ctx), "controls": h.codexHarvest.ControlSnapshot(ctx), "scope": scope, "accounts": accounts, "jobs": h.codexHarvest.Jobs(), "parallel_available": h.codexHarvest.ParallelAvailable(ctx)})
 }
 
 func (h *Handler) UpdateCodexHarvestControls(c *gin.Context) {
@@ -99,8 +98,8 @@ func (h *Handler) UpdateCodexHarvestControls(c *gin.Context) {
 		writeError(c, 400, err.Error())
 		return
 	}
-	if err := h.codexHarvest.Controls.SaveControls(c.Request.Context(), request); err != nil {
-		writeError(c, 500, "保存采票控制失败")
+	if err := h.codexHarvest.SaveControls(c.Request.Context(), request); err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	c.JSON(http.StatusOK, h.codexHarvest.ControlSnapshot(c.Request.Context()))

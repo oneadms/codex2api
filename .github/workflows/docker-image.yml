@@ -27,7 +27,7 @@ env:
 jobs:
   harvest-check:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:18-alpine
@@ -50,9 +50,9 @@ jobs:
       - name: Validate harvest persistence in isolated PostgreSQL
         env:
           CODEX2API_TEST_POSTGRES_DSN: postgres://codex2api_test:test-only@localhost:5432/codex2api_test?sslmode=disable
-        run: go test -count=1 -timeout 2m ./database -run '^TestCodexHarvestPersistence$'
+        run: go test -count=1 -timeout 2m ./database -run '^TestCodex(HarvestPersistence|GatewaySettingsPersistence)$'
       - name: Validate harvest concurrency
-        run: go test -race -count=1 -timeout 5m ./internal/harvest ./internal/mihomo ./proxy ./admin ./database -run 'TestCodexHarvest|TestCodexTicketHTTPFeedback|TestCodexTicketFeedbackCompletion|TestHarvestNodeRanking|TestUseOnce|TestCountry'
+        run: go test -race -count=1 -timeout 5m ./internal/harvest ./internal/mihomo ./proxy ./proxy/wsrelay ./admin ./database -run 'TestCodexGateway|TestGateway|TestCodexHarvest|TestCodexTicketHTTPFeedback|TestCodexTicketFeedbackCompletion|TestHarvestNodeRanking|TestUseOnce|TestCountry'
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -61,6 +61,9 @@ jobs:
       - name: Validate frontend types
         working-directory: frontend
         run: npm ci --no-audit --no-fund && npm run typecheck && npm test
+      - name: Validate harvest settings and proxy selection in Chromium
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium && npm run test:harvest
   docker:
     needs: harvest-check
     runs-on: ubuntu-latest

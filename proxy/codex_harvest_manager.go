@@ -31,6 +31,7 @@ type CodexHarvestManager struct {
 	roundMu     sync.Mutex
 	harvestMu   sync.RWMutex
 	cursor      uint64
+	proxyCursor atomic.Uint64
 	paceMu      sync.Mutex
 	lastRequest time.Time
 	gatewayOnce sync.Once
@@ -47,6 +48,8 @@ func ConfigureCodexHarvest(db *database.DB, store *auth.Store, dataDir string) *
 		MaxRequestsPerRound: settings.MaxProbesPerRound, MaxNodeAttempts: 3, RefreshBeforeSeconds: settings.RefreshBeforeSeconds}
 	m := &CodexHarvestManager{DB: db, Store: store, Repository: repo, Controls: harvest.NewCodexHarvestService(repo, repo, &speed), DataDir: dataDir,
 		jobs: map[string]*harvest.ManualJob{}, cancels: map[string]context.CancelFunc{}}
+	initialControls, _, _ := m.Controls.Controls(context.Background())
+	auth.SetCodexTicketProxyPoolConfigured(len(initialControls.ProxyIDs) > 0)
 	codexHarvester.Store(m)
 	registerCodexTicketFeedback(db, store)
 	m.gatewayManager().start()
@@ -108,6 +111,14 @@ func harvestAccountEligible(account *auth.Account, scope harvest.Scope, idle boo
 
 func (m *CodexHarvestManager) ControlSnapshot(ctx context.Context) harvest.CodexHarvestControlSnapshot {
 	out := m.Controls.Snapshot(ctx)
+	if len(out.Settings.ProxyIDs) > 0 {
+		exits, err := m.harvestProxyExits(ctx, out.Settings.ProxyIDs, false)
+		out.Available = err == nil && len(exits) > 0
+		if !out.Available {
+			out.AvailabilityReason = "所选普通代理中没有启用且合格的出口"
+		}
+		return out
+	}
 	sidecar, err := mihomo.LoadDirectedSidecar(m.DataDir, auth.ConfiguredCodexTicketSettings().HarvestProxyURL)
 	if err == nil {
 		query, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -211,7 +222,7 @@ func (m *CodexHarvestManager) RunRound(ctx context.Context) {
 					if event.Result == "account_error" {
 						return
 					}
-					if event.Result == "success" || event.Result == "terminal_error" || event.Result == "skipped" || event.Result == "cancelled" || event.Result == "persistence_error" {
+					if event.RetryAfterSeconds > 0 || event.Result == "success" || event.Result == "terminal_error" || event.Result == "skipped" || event.Result == "cancelled" || event.Result == "persistence_error" {
 						break
 					}
 					if !harvestWait(ctx, time.Duration(controls.Speed.ProbeIntervalSeconds)*time.Second) {

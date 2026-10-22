@@ -563,6 +563,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = withCodexGatewayWSClientScope(ctx, headers, requestBody)
 	headers = headers.Clone()
 	if headers == nil {
 		headers = make(http.Header)
@@ -642,7 +643,15 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	if blocked, ok := CodexTicketGateBlocked(ctx, account, codexClientModelFromContext(ctx), strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())); ok {
 		return nil, ErrCodexTicketUnavailable(blocked)
 	}
-	if !wantWebsocket {
+	fixedGatewayWS := false
+	if wantWebsocket {
+		var err error
+		fixedGatewayWS, err = CodexGatewayWSRequired(ctx, account, gjson.GetBytes(requestBody, "model").String())
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !fixedGatewayWS {
 		var gatewayRelease func()
 		var gatewayErr error
 		ctx, proxyOverride, gatewayRelease, gatewayErr = prepareCodexGatewayHTTP(ctx, account, requestBody, proxyOverride)

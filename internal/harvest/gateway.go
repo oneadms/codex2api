@@ -17,6 +17,9 @@ type GatewaySettings struct {
 	SchedulingMode       string            `json:"scheduling_mode"`
 	SchedulingGroupIDs   []int64           `json:"scheduling_group_ids"`
 	Revision             string            `json:"revision"`
+	// RouteRevision changes only when route or fixed-session settings change.
+	// Revision remains the optimistic concurrency token for every settings save.
+	RouteRevision string `json:"route_revision"`
 }
 type GatewayCookiePool struct {
 	Enabled             bool    `json:"enabled"`

@@ -81,6 +81,6 @@ func (m *CodexHarvestManager) reuseCandidate(ctx context.Context, target *auth.A
 		return nil, noop
 	}
 	ticket.SourceAccountID = sourceID
-	ticket.ReuseRevision = v.Revision
+	ticket.ReuseRevision = gatewayRouteRevision(v)
 	return ticket, release
 }

@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,32 +26,63 @@ import (
 // gatewayWSServer 模拟上游：记录每轮的路由 Cookie、turn state 与续接 ID，
 // 返回 response.completed，模拟固定会话依赖的原连接续接。
 type gatewayWSServer struct {
-	server   *httptest.Server
-	requests chan string
+	server          *httptest.Server
+	requests        chan string
+	dials           atomic.Int64
+	closeAfterReply atomic.Bool
+	sequence        atomic.Int64
+	mu              sync.Mutex
+	connections     map[*websocket.Conn]bool
+}
+
+func (s *gatewayWSServer) closeConnections() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for conn := range s.connections {
+		_ = conn.Close()
+	}
 }
 
 func newGatewayWSServer(t *testing.T) *gatewayWSServer {
 	t.Helper()
-	s := &gatewayWSServer{requests: make(chan string, 16)}
+	s := &gatewayWSServer{requests: make(chan string, 64), connections: make(map[*websocket.Conn]bool)}
 	up := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := up.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		s.dials.Add(1)
+		s.mu.Lock()
+		s.connections[conn] = true
+		s.mu.Unlock()
+		defer func() {
+			s.mu.Lock()
+			delete(s.connections, conn)
+			s.mu.Unlock()
+			_ = conn.Close()
+		}()
+		responses := map[string]bool{}
 		for {
 			_, payload, err := conn.ReadMessage()
 			if err != nil {
 				return
 			}
-			id := fmt.Sprintf("resp_%s", gjson.GetBytes(payload, "input").String())
+			id := fmt.Sprintf("resp_%d", s.sequence.Add(1))
 			cookie := r.Header.Get("Cookie")
 			state := gjson.GetBytes(payload, "client_metadata.x-codex-turn-state").String()
 			previous := gjson.GetBytes(payload, "previous_response_id").String()
 			s.requests <- strings.TrimSpace(cookie) + "|" + strings.TrimSpace(state) + "|" + previous
-			frame := fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"status":"completed","model":"gpt-6-astra"}}`, id)
+			if previous != "" && !responses[previous] {
+				_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","error":{"code":"previous_response_not_found"}}`))
+				continue
+			}
+			responses[id] = true
+			frame := fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"status":"completed","model":"gpt-6-astra","error":null,"output":[{"content":[{"type":"output_text","text":"OK"}]}]}}`, id)
 			if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
+				return
+			}
+			if s.closeAfterReply.Load() {
 				return
 			}
 		}
@@ -199,9 +232,16 @@ func TestCodexGatewayWSFixedSessionSticksToOriginalConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("固定会话续接失败: %v", err)
 	}
-	secondBody, _ := readAllHTTPBody(second)
-	if gatewayWSResponseID(secondBody) == "" {
+	secondBody, readErr := readAllHTTPBody(second)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	secondID := gatewayWSResponseID(secondBody)
+	if secondID == "" {
 		t.Fatalf("续接响应缺少 response_id: %s", string(secondBody))
+	}
+	if server.dials.Load() != 1 {
+		t.Fatalf("续接必须使用原连接，实际拨号 %d 次", server.dials.Load())
 	}
 
 	// 不同 API Key 或不同客户端会话不能续接别人的响应。
@@ -210,8 +250,8 @@ func TestCodexGatewayWSFixedSessionSticksToOriginalConnection(t *testing.T) {
 		previous                           string
 		wantFail                           bool
 	}{
-		{"other api key", "api-key-B", "ws-fixed-session", "ws-fixed-session", firstID, true},
-		{"other client session", "api-key-A", "other-session", "other-session", firstID, true},
+		{"other api key", "api-key-B", "ws-fixed-session", "ws-fixed-session", secondID, true},
+		{"other client session", "api-key-A", "other-session", "other-session", secondID, true},
 	} {
 		otherHeaders := http.Header{}
 		otherHeaders.Set("Session_id", tc.scopeHeader)
@@ -240,10 +280,18 @@ func TestCodexGatewayWSFixedSessionSticksToOriginalConnection(t *testing.T) {
 	if parts[0] != continuationParts[0] {
 		t.Fatalf("续接使用了不同的路由 Cookie: %q vs %q", parts[0], continuationParts[0])
 	}
+
+	original, _ := executor.manager.lookupResponseConn(secondID, account.ID(), "api-key-A")
+	server.closeConnections()
+	executor.manager.DiscardConnection(original)
+	_, err = proxy.ExecuteRequest(ctx, account, gatewayWSBody("after-close", secondID), "ws-fixed-session", "", "api-key-A", nil, headers, true)
+	if err == nil || server.dials.Load() != 1 {
+		t.Fatalf("原连接关闭后不得续接或重拨: err=%v dials=%d", err, server.dials.Load())
+	}
 }
 
-// seedGatewayWSTicket 给目标账号注入一张 780 长度的有效 WebSocket 票，避免 FailClosed 门控在
-// 固定会话测试前拒绝出站。固定会话按目标身份续接，不消费该票。
+// seedGatewayWSTicket 给目标账号注入一张 780 长度的有效 WebSocket 票。
+// 此测试通过业务入口实际注入该完整票，不借来源 Cookie。
 func seedGatewayWSTicket(t *testing.T, account *auth.Account) {
 	t.Helper()
 	now := time.Now()

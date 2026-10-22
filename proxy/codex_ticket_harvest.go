@@ -417,7 +417,7 @@ func harvestOneTicket(ctx context.Context, db *database.DB, store *auth.Store, a
 		CheckedAt:  checkedAt,
 	}
 	if res.Result != "success" {
-		next := checkedAt.Add(auth.CodexTicketCooldown())
+		next := time.Now().Add(max(auth.CodexTicketCooldown(), res.RetryAfter))
 		summary.NextProbeAt = &next
 		store.PublishCodexTicketProbe(acc.ID(), model, summary)
 		log.Printf("[codex-ticket] 账号 %d %s 打票未成功: result=%s status=%d err=%v", acc.ID(), model, res.Result, res.HTTPStatus, res.Err)

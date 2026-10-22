@@ -11,6 +11,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/internal/harvest"
+	"github.com/codex2api/internal/mihomo"
 )
 
 var ErrGatewayRevisionConflict = errors.New("借票配置已变化，请刷新后重新保存")
@@ -33,34 +34,40 @@ type gatewayPreparation struct {
 	revision string
 }
 type gatewayCheck struct {
+	sourceID    int64
 	status      harvest.GatewayRouteStatus
 	fingerprint [32]byte
 	identity    string
 }
 type codexGatewayManager struct {
-	coverage     harvestCoverageState
-	owner        *CodexHarvestManager
-	mu           sync.Mutex
-	settings     harvest.GatewaySettings
-	loaded       bool
-	loadedUntil  time.Time
-	routes       map[int64]gatewayRoute
-	statuses     map[int64]harvest.GatewayRouteStatus
-	checks       map[int64]gatewayCheck
-	activeSource int64
-	preparation  *gatewayPreparation
-	retryAfter   time.Time
-	nodeCooldown map[string]time.Time
-	lastTest     *harvest.GatewayTestResult
-	setup        harvest.GatewaySetup
-	cancel       context.CancelFunc
-	stopped      bool
-	anchors      map[string]*gatewayAnchor
+	coverage       harvestCoverageState
+	owner          *CodexHarvestManager
+	mu             sync.Mutex
+	settings       harvest.GatewaySettings
+	loaded         bool
+	loadedUntil    time.Time
+	routes         map[int64]gatewayRoute
+	statuses       map[int64]harvest.GatewayRouteStatus
+	checks         map[int64]gatewayCheck
+	activeSource   int64
+	preparation    *gatewayPreparation
+	retryAfter     time.Time
+	nodeCooldown   map[string]time.Time
+	sourceCooldown map[string]time.Time
+	nodeCursor     uint64
+	probeToken     chan struct{}
+	listNodes      func() ([]mihomo.HarvestNode, string, error)
+	pinNode        func(context.Context, string, string) (string, func(), error)
+	lastTest       *harvest.GatewayTestResult
+	setup          harvest.GatewaySetup
+	cancel         context.CancelFunc
+	stopped        bool
+	anchors        map[string]*gatewayAnchor
 }
 
 func (m *CodexHarvestManager) gatewayManager() *codexGatewayManager {
 	m.gatewayOnce.Do(func() {
-		m.gateway = &codexGatewayManager{owner: m, settings: harvest.DefaultGatewaySettings(), routes: map[int64]gatewayRoute{}, statuses: map[int64]harvest.GatewayRouteStatus{}, checks: map[int64]gatewayCheck{}, nodeCooldown: map[string]time.Time{}, anchors: map[string]*gatewayAnchor{}}
+		m.gateway = &codexGatewayManager{owner: m, settings: harvest.DefaultGatewaySettings(), routes: map[int64]gatewayRoute{}, statuses: map[int64]harvest.GatewayRouteStatus{}, checks: map[int64]gatewayCheck{}, nodeCooldown: map[string]time.Time{}, sourceCooldown: map[string]time.Time{}, probeToken: make(chan struct{}, 1), listNodes: mihomo.GatewayNodes, pinNode: mihomo.PinGatewayNode, anchors: map[string]*gatewayAnchor{}}
 	})
 	return m.gateway
 }
@@ -98,7 +105,7 @@ func (m *CodexHarvestManager) GatewaySettings(ctx context.Context) (harvest.Gate
 			return cloneGatewaySettings(g.settings), err
 		}
 	}
-	if g.loaded && !gatewayRouteSettingsEqual(g.settings, v) {
+	if g.loaded && (!gatewayRouteSettingsEqual(g.settings, v) || gatewayRouteRevision(g.settings) != gatewayRouteRevision(v)) {
 		g.resetLocked()
 	}
 	g.settings = v
@@ -106,6 +113,13 @@ func (m *CodexHarvestManager) GatewaySettings(ctx context.Context) (harvest.Gate
 	g.loadedUntil = time.Now().Add(3 * time.Second)
 	return cloneGatewaySettings(v), nil
 }
+func gatewayRouteRevision(v harvest.GatewaySettings) string {
+	if v.RouteRevision != "" {
+		return v.RouteRevision
+	}
+	return v.Revision
+}
+
 func gatewayRouteSettingsEqual(a, b harvest.GatewaySettings) bool {
 	a.TicketPoolScheduling = false
 	b.TicketPoolScheduling = false
@@ -115,6 +129,8 @@ func gatewayRouteSettingsEqual(a, b harvest.GatewaySettings) bool {
 	b.SchedulingGroupIDs = nil
 	a.Revision = ""
 	b.Revision = ""
+	a.RouteRevision = ""
+	b.RouteRevision = ""
 	aa, _ := json.Marshal(a)
 	bb, _ := json.Marshal(b)
 	return string(aa) == string(bb)
@@ -155,13 +171,22 @@ func (m *CodexHarvestManager) SaveGatewaySettings(ctx context.Context, v harvest
 		g.mu.Unlock()
 		return v, ErrGatewayRevisionConflict
 	}
+	routeChanged := !gatewayRouteSettingsEqual(g.settings, v)
+	v.RouteRevision = gatewayRouteRevision(g.settings)
+	if routeChanged || v.RouteRevision == "" {
+		v.RouteRevision = NewUpstreamSessionUUID()
+	}
 	v.Revision = NewUpstreamSessionUUID()
-	raw, _ := json.Marshal(v)
-	if err = m.Repository.Set(ctx, harvest.GatewaySettingsKey, string(raw)); err != nil {
+	saved, err := m.Repository.CompareAndSwapGatewaySettings(ctx, current.Revision, v)
+	if err != nil {
 		g.mu.Unlock()
 		return v, errors.New("保存借票配置失败")
 	}
-	routeChanged := !gatewayRouteSettingsEqual(g.settings, v)
+	if !saved {
+		g.loadedUntil = time.Time{}
+		g.mu.Unlock()
+		return v, ErrGatewayRevisionConflict
+	}
 	if routeChanged {
 		g.resetLocked()
 	}
@@ -173,14 +198,14 @@ func (m *CodexHarvestManager) SaveGatewaySettings(ctx context.Context, v harvest
 	}
 	g.mu.Unlock()
 	if routeChanged && v.CookiePool.Enabled {
-		g.schedulePreparation(v.Revision)
+		g.schedulePreparation(gatewayRouteRevision(v))
 	}
 	KickCodexTicketHarvest()
 	return v, nil
 }
 func (m *CodexHarvestManager) GatewayReuseCurrent(ctx context.Context, revision string, targetID int64) bool {
 	v, err := m.GatewaySettings(ctx)
-	return err == nil && v.Revision == revision && gatewayUnified(v) && slices.Contains(v.CookiePool.TargetAccountIDs, targetID)
+	return err == nil && gatewayRouteRevision(v) == revision && gatewayUnified(v) && slices.Contains(v.CookiePool.TargetAccountIDs, targetID)
 }
 func gatewayUnified(v harvest.GatewaySettings) bool {
 	return v.CookiePool.Enabled && auth.CodexTicketGateEnabled() && auth.ConfiguredCodexTicketSettings().TargetLength == 780 && auth.CodexTicketModelGated(gatewayModel)
@@ -199,7 +224,7 @@ func gatewayAccountEligible(a *auth.Account) bool {
 }
 func (g *codexGatewayManager) current(ctx context.Context, v harvest.GatewaySettings) bool {
 	now, err := g.owner.GatewaySettings(ctx)
-	return err == nil && now.Revision == v.Revision && now.CookiePool.Enabled
+	return err == nil && gatewayRouteRevision(now) == gatewayRouteRevision(v) && now.CookiePool.Enabled
 }
 func (g *codexGatewayManager) schedulePreparation(revision string) {
 	g.mu.Lock()
@@ -219,7 +244,7 @@ func (g *codexGatewayManager) schedulePreparation(revision string) {
 		defer stop()
 		defer cancel()
 		v, err := g.owner.GatewaySettings(ctx)
-		if err != nil || v.Revision != revision {
+		if err != nil || gatewayRouteRevision(v) != revision {
 			return
 		}
 		_, _ = g.owner.TestGateway(ctx, "prepare", 0)
@@ -317,13 +342,16 @@ func (m *CodexHarvestManager) GatewaySnapshot(ctx context.Context) harvest.Gatew
 			return row
 		}
 		if c, ok := g.checks[id]; ok {
-			row = c.status
-			if row.ExpiresAt != nil && !now.Before(*row.ExpiresAt) {
-				row.State = "expired"
-				row.Reason = "route_expired"
-			}
-			if row.ExpiresAt != nil {
-				row.RemainingSeconds = max(0, int64(row.ExpiresAt.Sub(now).Seconds()))
+			route, exists := g.routes[c.sourceID]
+			account := m.Store.FindByID(id)
+			current := exists && g.routeValidLocked(v, route, now) && gatewayFingerprint(route) == c.fingerprint && gatewayAccountEligible(account) && gatewayIdentity(account) == c.identity
+			if current && c.status.ExpiresAt != nil && now.Before(*c.status.ExpiresAt) {
+				row = c.status
+				expires := minGatewayTime(*row.ExpiresAt, route.expires)
+				row.ExpiresAt = &expires
+				row.RemainingSeconds = max(0, int64(expires.Sub(now).Seconds()))
+			} else {
+				row.Reason = "not_tested"
 			}
 		}
 		return row
@@ -394,14 +422,21 @@ func (m *CodexHarvestManager) TestGateway(ctx context.Context, action string, id
 	defer cancel()
 	if action == "prepare" {
 		err = g.prepare(ctx, v)
+	} else if action == "ws" {
+		if !gatewayUnified(v) {
+			err = g.prepare(ctx, v)
+		}
+		if err == nil {
+			err = m.TestGatewayWS(ctx, id)
+		}
 	} else {
-		err = g.verify(ctx, v, id, action == "ws")
+		err = g.verify(ctx, v, id, false)
 	}
 	result.Success = err == nil
 	result.Reason = gatewaySafeReason(err)
 	result.DurationMS = time.Since(start).Milliseconds()
 	g.mu.Lock()
-	if g.settings.Revision == v.Revision {
+	if gatewayRouteRevision(g.settings) == gatewayRouteRevision(v) {
 		g.lastTest = &result
 	}
 	g.mu.Unlock()

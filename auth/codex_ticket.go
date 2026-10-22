@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/codex2api/internal/openaiidentity"
 )
 
 // 后台自动打票：X-Codex-Turn-State 门票。
@@ -48,6 +51,16 @@ const (
 	// maxCodexTicketBytes 是门票编码后的长度上限（团队版 332，留一个数量级余量）。
 	maxCodexTicketBytes = 2048
 )
+
+// CodexTicketProxyPoolConfigured reports the persisted collector pool selection.
+// It describes configuration, not current reachability: an empty/disabled pool
+// must fail closed instead of disabling the business ticket gate.
+var codexTicketProxyPoolConfigured atomic.Bool
+
+func CodexTicketProxyPoolConfigured() bool { return codexTicketProxyPoolConfigured.Load() }
+func SetCodexTicketProxyPoolConfigured(configured bool) {
+	codexTicketProxyPoolConfigured.Store(configured)
+}
 
 // CodexTicketShape 是门票信封的可校验投影。
 type CodexTicketShape struct {
@@ -345,7 +358,7 @@ func (a *Account) CodexTicketForModel(model string, now time.Time, targetLen int
 	if ticket == nil {
 		return nil
 	}
-	identity := CodexTicketIdentity(a.EffectiveAccountID(), a.ticketEmail())
+	identity := a.CodexTicketIdentitySnapshot()
 	compatible := func(t *CodexTicket) bool {
 		return t != nil && (t.Identity == "" || t.Identity == identity) && t.Valid(now, targetLen) && (len(protocols) == 0 || t.Transport == "" || t.Transport == protocols[0])
 	}
@@ -358,7 +371,24 @@ func (a *Account) CodexTicketForModel(model string, now time.Time, targetLen int
 	return nil
 }
 
-func (a *Account) ticketEmail() string { a.mu.RLock(); defer a.mu.RUnlock(); return a.Email }
+// CodexTicketIdentitySnapshot reads the workspace override and email under one
+// lock, so harvest guards never combine two different account generations.
+func (a *Account) CodexTicketIdentitySnapshot() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.codexTicketIdentityLocked()
+}
+
+func (a *Account) codexTicketIdentityLocked() string {
+	workspace := a.AccountID
+	if override := openaiidentity.WorkspaceOverrideFromHeaders(a.CustomHeaders); override != "" {
+		workspace = override
+	}
+	return CodexTicketIdentity(workspace, a.Email)
+}
 
 // CodexTicketInjection 返回该账号本次请求该注入的门票。
 // 仅查询账号自己的门票；需要共享池回退时使用 CodexTicketInjectionWithShared。
@@ -574,6 +604,10 @@ func (a *Account) CodexTicketStatuses(models []string, now time.Time, targetLen 
 	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
+	identity := a.codexTicketIdentityLocked()
+	compatible := func(ticket *CodexTicket) bool {
+		return ticket != nil && (ticket.Identity == "" || ticket.Identity == identity) && ticket.Valid(now, targetLen)
+	}
 	out := make([]CodexTicketStatus, 0, len(models))
 	for _, model := range models {
 		key := NormalizeCodexTicketModel(model)
@@ -592,7 +626,7 @@ func (a *Account) CodexTicketStatuses(models []string, now time.Time, targetLen 
 		}
 		status.Revoked = ticket.Revoked
 		active := ticket
-		if !ticket.Valid(now, targetLen) && ticket.Standby != nil && ticket.Standby.Valid(now, targetLen) {
+		if !compatible(ticket) && compatible(ticket.Standby) {
 			active = ticket.Standby
 		}
 		status.CookieCount = active.CookieCount()
@@ -605,8 +639,8 @@ func (a *Account) CodexTicketStatuses(models []string, now time.Time, targetLen 
 		}
 		status.EgressBound = active.HarvestProxyURL != ""
 		status.SessionBound = active.HarvestSessionID != ""
-		status.StandbyReady = active == ticket && ticket.Standby.Valid(now, targetLen)
-		if active.Valid(now, targetLen) {
+		status.StandbyReady = active == ticket && compatible(ticket.Standby)
+		if compatible(active) {
 			status.Ready = true
 			status.Length = active.Length
 			expires := active.EffectiveExpiry()

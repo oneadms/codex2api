@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/proxy"
 	"github.com/codex2api/security"
 	"github.com/gorilla/websocket"
 )
@@ -109,6 +110,13 @@ type WsConnection struct {
 	// Protected by the owning Manager's respConnMu. Once removed from the pool,
 	// late completion callbacks must never retain this connection again.
 	responseBindingsDisabled bool
+}
+
+func effectiveProxyURLForContext(ctx context.Context, account *auth.Account, override string) string {
+	if pinned, bound, _ := proxy.CodexGatewayEgressFromContext(ctx); bound {
+		return pinned
+	}
+	return effectiveProxyURL(account, override)
 }
 
 func effectiveProxyURL(account *auth.Account, proxyOverride string) string {
@@ -567,7 +575,7 @@ func (m *Manager) AcquireConnection(
 	proxyOverride string,
 ) (*WsConnection, *PendingRequest, error) {
 	kind := requestConnectionCapacityKind(ctx)
-	key := m.poolKey(account.ID(), wsURL, sessionKey, effectiveProxyURL(account, proxyOverride))
+	key := m.poolKey(account.ID(), wsURL, sessionKey, effectiveProxyURLForContext(ctx, account, proxyOverride))
 	lock, releaseKeyLock := m.keyLock(key)
 	defer releaseKeyLock()
 	accountLock, releaseAccountLock := m.accountLock(account.ID())
@@ -721,7 +729,7 @@ func (m *Manager) tryAcquireBusyOverflow(
 	headers http.Header,
 	proxyOverride string,
 ) (*WsConnection, *PendingRequest, bool) {
-	proxyURL := effectiveProxyURL(account, proxyOverride)
+	proxyURL := effectiveProxyURLForContext(ctx, account, proxyOverride)
 	kind := requestConnectionCapacityKind(ctx)
 	accountLimit := connectionLimit(kind)
 	accountLock, releaseAccountLock := m.accountLock(account.ID())
@@ -840,7 +848,7 @@ func (m *Manager) AcquireReusableConnection(
 	headers http.Header,
 	proxyOverride string,
 ) (*WsConnection, *PendingRequest, string, error) {
-	proxyURL := effectiveProxyURL(account, proxyOverride)
+	proxyURL := effectiveProxyURLForContext(ctx, account, proxyOverride)
 	kind := requestConnectionCapacityKind(ctx)
 	accountLimit := connectionLimit(kind)
 	if slots < 1 || slots > statelessConnectionSlots() {

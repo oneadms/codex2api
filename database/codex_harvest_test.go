@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -29,14 +30,14 @@ func TestCodexHarvestPersistence(t *testing.T) {
 			ctx := context.Background()
 			repo := db.HarvestRepository()
 			controls := harvest.NewCodexHarvestService(repo, repo, nil)
-			settings := harvest.CodexHarvestControls{Version: 1, Transport: "websocket", EdgeIP: "1.1.1.1", Strategy: "refresh", ProxyPoolID: 42,
+			settings := harvest.CodexHarvestControls{Version: 1, Transport: "websocket", EdgeIP: "1.1.1.1", Strategy: "refresh", ProxyIDs: []int64{42},
 				NodeMemoryEnabled: true, Speed: harvest.CodexHarvestSpeedPresets()["burst"]}
 			if err = controls.SaveControls(ctx, settings); err != nil {
 				t.Fatal(err)
 			}
 			reloaded := harvest.NewCodexHarvestService(repo, repo, nil)
 			got, configured, err := reloaded.Controls(ctx)
-			if err != nil || !configured || got != settings {
+			if err != nil || !configured || !reflect.DeepEqual(got, settings) {
 				t.Fatalf("控制设置未持久化: %v", err)
 			}
 			scope := harvest.CodexHarvestNodeScope{PoolID: "pool", AccountID: time.Now().UnixNano(), Identity: "account-identity", Model: "gpt-6-astra", Blocks: 10}

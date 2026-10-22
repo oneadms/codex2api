@@ -81,14 +81,14 @@ type ManualRequest struct {
 }
 
 func (r ManualRequest) Validate() error {
-	if r.CollectLanes < 0 || r.CollectLanes > 32 {
-		return fmt.Errorf("采票通道数必须为 0–32")
+	if r.CollectLanes < 0 {
+		return fmt.Errorf("采票通道数必须为非负整数")
 	}
 	if r.AccountID <= 0 || len(r.Models) == 0 || len(r.Models) > 64 {
 		return fmt.Errorf("请选择账号和模型")
 	}
-	if r.MaxAttempts < 1 || r.MaxAttempts > 100 {
-		return fmt.Errorf("手动采票次数必须为 1–100")
+	if r.MaxAttempts < 1 {
+		return fmt.Errorf("手动采票次数必须大于零")
 	}
 	if r.ProbeIntervalSeconds < 0 || r.ProbeIntervalSeconds > 60 || r.RateLimitCooldownSeconds < 1 || r.RateLimitCooldownSeconds > 3600 {
 		return fmt.Errorf("手动采票间隔或冷却超出范围")

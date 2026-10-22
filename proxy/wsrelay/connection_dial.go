@@ -29,7 +29,7 @@ func (m *Manager) createConnection(ctx context.Context, input connectionDialRequ
 	if err != nil {
 		return nil, err
 	}
-	session, poolKey := m.newDialSession(input)
+	session, poolKey := m.newDialSession(ctx, input)
 	conn, resp, err := dialer.DialContext(ctx, input.url, input.headers)
 	if err != nil {
 		if resp != nil {
@@ -55,7 +55,7 @@ func (m *Manager) createConnection(ctx context.Context, input connectionDialRequ
 
 func (m *Manager) connectionDialer(ctx context.Context, input connectionDialRequest) (*websocket.Dialer, error) {
 	dialer := *m.dialer
-	proxyURL := effectiveProxyURL(input.account, input.proxyOverride)
+	proxyURL := effectiveProxyURLForContext(ctx, input.account, input.proxyOverride)
 	if dialProxy := proxy.CodexDialProxyURLForContext(ctx, input.account, proxyURL); dialProxy != "" {
 		if err := configureWebsocketDialerProxy(&dialer, dialProxy); err != nil {
 			return nil, err
@@ -66,8 +66,8 @@ func (m *Manager) connectionDialer(ctx context.Context, input connectionDialRequ
 	return &dialer, nil
 }
 
-func (m *Manager) newDialSession(input connectionDialRequest) (*Session, string) {
-	poolKey := m.poolKey(input.account.ID(), input.url, input.sessionKey, effectiveProxyURL(input.account, input.proxyOverride))
+func (m *Manager) newDialSession(ctx context.Context, input connectionDialRequest) (*Session, string) {
+	poolKey := m.poolKey(input.account.ID(), input.url, input.sessionKey, effectiveProxyURLForContext(ctx, input.account, input.proxyOverride))
 	if value, ok := m.sessions.Load(poolKey); ok {
 		value.(*Session).Close()
 	}

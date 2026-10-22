@@ -10,6 +10,13 @@ import (
 	"github.com/codex2api/internal/mihomo"
 )
 
+// The node lease and the explicitly requested one-shot connection policy are
+// independent. Fixed WS sessions can retain their original established socket.
+func CodexTicketNeedsFreshWebsocket(ctx context.Context) bool {
+	ticket := codexTicketFromContext(ctx)
+	return ticket != nil && ticket.HarvestNodeID != ""
+}
+
 // 定向票据持有 Selector 直到响应关闭。拨号、重连与换节点不能并发改变出口。
 func acquireCodexTicketEgress(ctx context.Context) (context.Context, func(), error) {
 	ticket := codexTicketFromContext(ctx)
@@ -24,7 +31,7 @@ func acquireCodexTicketEgress(ctx context.Context) (context.Context, func(), err
 		copy := *ticket
 		copy.HarvestProxyURL = proxyURL
 		ctx = context.WithValue(ctx, codexTicketInjectionKey{}, &copy)
-		return WithFreshCodexConnection(ctx), release, nil
+		return ctx, release, nil
 	}
 	m := codexHarvester.Load()
 	if m == nil {
@@ -42,7 +49,7 @@ func acquireCodexTicketEgress(ctx context.Context) (context.Context, func(), err
 	if err != nil {
 		return ctx, nil, fmt.Errorf("票据绑定节点暂不可用")
 	}
-	return WithFreshCodexConnection(ctx), release, nil
+	return ctx, release, nil
 }
 
 type codexTicketLeaseBody struct {

@@ -8,7 +8,6 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/internal/harvest"
-	"github.com/codex2api/internal/mihomo"
 )
 
 func (m *CodexHarvestManager) StartManual(ctx context.Context, request harvest.ManualRequest) (harvest.ManualJob, error) {
@@ -16,8 +15,8 @@ func (m *CodexHarvestManager) StartManual(ctx context.Context, request harvest.M
 	if err != nil {
 		return harvest.ManualJob{}, err
 	}
-	if request.CollectLanes > 1 && (auth.ConfiguredCodexTicketSettings().HarvestProxyURL != mihomo.Endpoint || !mihomo.CollectionAvailable()) {
-		return harvest.ManualJob{}, fmt.Errorf("并行采票需要运行中的托管 Mihomo 代理")
+	if request.CollectLanes > 1 && !m.ParallelAvailable(ctx) {
+		return harvest.ManualJob{}, fmt.Errorf("并行采票需要合格的普通代理池或运行中的托管 Mihomo")
 	}
 	if !m.harvestMu.TryLock() {
 		return harvest.ManualJob{}, fmt.Errorf("已有自动或手动采票正在运行，请稍后重试")
@@ -84,6 +83,7 @@ func (m *CodexHarvestManager) runManual(ctx context.Context, account *auth.Accou
 	}
 	budget := r.MaxAttempts
 	successes := map[string]bool{}
+	rejected := map[string]bool{}
 	tried := map[string]bool{}
 	var keep *harvestSelection
 	failures := 0
@@ -104,10 +104,11 @@ func (m *CodexHarvestManager) runManual(ctx context.Context, account *auth.Accou
 		}
 		controls, _, _ := m.Controls.Controls(ctx)
 		controls.Speed.ProbeIntervalSeconds = r.ProbeIntervalSeconds
+		controls.Speed.CooldownSeconds = max(controls.Speed.CooldownSeconds, r.RateLimitCooldownSeconds)
 		model := r.Models[modelIndex%len(r.Models)]
 		modelIndex++
-		if successes[model] {
-			if len(successes) == len(r.Models) {
+		if successes[model] || rejected[model] {
+			if len(successes)+len(rejected) == len(r.Models) {
 				return
 			}
 			continue
@@ -132,6 +133,11 @@ func (m *CodexHarvestManager) runManual(ctx context.Context, account *auth.Accou
 		if event.Result == "cancelled" || before == budget {
 			return
 		}
+		if event.Result == "terminal_error" {
+			rejected[model] = true
+			keep = nil
+			continue
+		}
 		change := r.NodeSwitchRule == "every_request" || (r.NodeSwitchRule == "312_only" && event.Length == 312) || (r.NodeSwitchRule == "312_or_2fail" && (event.Length == 312 || failures >= 2))
 		if change {
 			keep = nil
@@ -141,9 +147,9 @@ func (m *CodexHarvestManager) runManual(ctx context.Context, account *auth.Accou
 		if len(r.Models) > 1 {
 			keep = nil
 		}
-		wait := time.Duration(r.ProbeIntervalSeconds) * time.Second
+		wait := time.Duration(max(r.ProbeIntervalSeconds, event.RetryAfterSeconds)) * time.Second
 		if event.HTTPStatus == 429 {
-			wait = time.Duration(max(r.RateLimitCooldownSeconds, event.RetryAfterSeconds)) * time.Second
+			wait = max(wait, time.Duration(controls.Speed.CooldownSeconds)*time.Second)
 		}
 		if event.HTTPStatus == 401 || event.HTTPStatus == 403 || event.Result == "persistence_error" {
 			return

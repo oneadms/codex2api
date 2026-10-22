@@ -9,18 +9,20 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/internal/harvest"
-	"github.com/codex2api/internal/mihomo"
 )
 
-// 所有通道和模型共用实际请求预算，续接和失败请求同样计数。
+// All lanes/models share the actual request budget, including continuations.
 func reserveHarvestRequest(used *atomic.Int64, limit int) bool {
 	return reserveHarvestBudget(used, limit, 1)
 }
 
 func reserveHarvestBudget(used *atomic.Int64, limit, cost int) bool {
+	if cost <= 0 || limit < cost {
+		return false
+	}
 	for {
 		n := used.Load()
-		if n+int64(cost) > int64(limit) {
+		if n > int64(limit-cost) {
 			return false
 		}
 		if used.CompareAndSwap(n, n+int64(cost)) {
@@ -31,6 +33,7 @@ func reserveHarvestBudget(used *atomic.Int64, limit, cost int) bool {
 
 func (m *CodexHarvestManager) runParallel(ctx context.Context, account *auth.Account, job harvest.ManualJob) {
 	r := job.Request
+	identity := account.CodexTicketIdentitySnapshot()
 	emit := func(event harvest.Event) {
 		m.appendEvent(event)
 		m.jobsMu.Lock()
@@ -43,6 +46,8 @@ func (m *CodexHarvestManager) runParallel(ctx context.Context, account *auth.Acc
 	if err := m.Store.EnsureCodexTicketAccessToken(ctx, account, false); err != nil {
 		event := baseEvent(r.Models[0])
 		event.Result, event.Message = "account_error", "账号凭据不可用"
+		controls, _, _ := m.Controls.Controls(ctx)
+		m.recordHarvestProbe(account, event.Model, event, max(controls.Speed.CooldownSeconds, r.RateLimitCooldownSeconds), 0)
 		emit(event)
 		return
 	}
@@ -50,18 +55,28 @@ func (m *CodexHarvestManager) runParallel(ctx context.Context, account *auth.Acc
 	if auth.CodexTicketTargetLength(account.GetPlanType()) == 780 {
 		cost = 2
 	}
-	collection, err := mihomo.BeginCollection(ctx, auth.ConfiguredCodexTicketSettings().HarvestProxyURL, min(r.CollectLanes, max(1, r.MaxAttempts/cost)))
+	if r.MaxAttempts < cost {
+		return
+	}
+	controls, _, _ := m.Controls.Controls(ctx)
+	collection, err := m.beginHarvestCollection(ctx, controls, min(r.CollectLanes, r.MaxAttempts/cost))
 	if err != nil {
 		event := baseEvent(r.Models[0])
-		event.Result, event.Message = "network_error", err.Error()
+		event.Result, event.Message = "network_error", "采票出口分配失败"
 		emit(event)
 		return
 	}
-	defer collection.Close()
+	defer func() {
+		if err := collection.Close(); err != nil {
+			event := baseEvent(r.Models[0])
+			event.Result, event.Message = "network_error", "采票通道清理失败，托管代理已停止"
+			emit(event)
+		}
+	}()
 	var used atomic.Int64
 	var reserved atomic.Int64
 	for _, model := range r.Models {
-		if ctx.Err() != nil || used.Load() >= int64(r.MaxAttempts) || !auth.CodexTicketGateEnabled() {
+		if ctx.Err() != nil || int64(r.MaxAttempts)-used.Load() < int64(cost) || !m.harvestAdmitted(ctx, account, identity, model) {
 			return
 		}
 		controls, _, _ := m.Controls.Controls(ctx)
@@ -69,11 +84,12 @@ func (m *CodexHarvestManager) runParallel(ctx context.Context, account *auth.Acc
 		type outcome struct {
 			event  harvest.Event
 			result codexTicketHarvestResult
-			node   mihomo.HarvestNode
+			exit   harvestCollectionExit
 		}
-		results := make(chan outcome, collection.LaneCount())
+		lanes := min(collection.lanes, (r.MaxAttempts-int(used.Load()))/cost)
+		results := make(chan outcome, lanes)
 		var workers sync.WaitGroup
-		for lane := 0; lane < collection.LaneCount(); lane++ {
+		for lane := 0; lane < lanes; lane++ {
 			workers.Add(1)
 			go func(lane int) {
 				defer workers.Done()
@@ -85,16 +101,16 @@ func (m *CodexHarvestManager) runParallel(ctx context.Context, account *auth.Acc
 						}
 						continue
 					}
-					scope, err := m.Scope(modelCtx)
-					if err != nil || !harvestAccountEligible(account, scope, true) || !auth.CodexTicketGateEnabled() {
+					if !m.harvestAdmitted(modelCtx, account, identity, model) {
 						return
 					}
-					// 为完整候选先预留两次额度，避免所有通道只拿到首请求而无法续接。
+					// Reserve a complete candidate before provisioning an exit. Useful
+					// lanes are bounded by nodes/proxies AND remaining request budget.
 					if !reserveHarvestBudget(&reserved, r.MaxAttempts, cost) {
 						return
 					}
-					node, proxyURL, err := collection.Next(modelCtx, lane)
-					if err != nil || node.ID == "" {
+					exit, err := collection.Next(modelCtx, lane)
+					if err != nil || exit.node.ID == "" {
 						reserved.Add(-int64(cost))
 						if err != nil && modelCtx.Err() == nil {
 							event := baseEvent(model)
@@ -103,7 +119,7 @@ func (m *CodexHarvestManager) runParallel(ctx context.Context, account *auth.Acc
 						}
 						return
 					}
-					sent := 0
+					sent, denied := 0, false
 					started := time.Now()
 					attemptCtx := context.WithValue(modelCtx, harvestProtocolKey{}, controls.Transport)
 					attemptCtx = context.WithValue(attemptCtx, harvestEdgeKey{}, controls.EdgeIP)
@@ -111,12 +127,9 @@ func (m *CodexHarvestManager) runParallel(ctx context.Context, account *auth.Acc
 						if remaining := time.Until(last.Add(time.Duration(r.ProbeIntervalSeconds) * time.Second)); remaining > 0 && !harvestWait(wait, remaining) {
 							return wait.Err()
 						}
-						if wait.Err() != nil {
-							return wait.Err()
-						}
-						currentScope, err := m.Scope(wait)
-						if err != nil || !auth.CodexTicketGateEnabled() || !harvestAccountEligible(account, currentScope, true) {
-							return fmt.Errorf("采票范围变化、账号忙碌或采票已关闭")
+						if !m.harvestAdmitted(wait, account, identity, model) || (exit.proxyID > 0 && !m.harvestProxyCurrent(wait, exit.proxyID, exit.proxyURL)) {
+							denied = true
+							return fmt.Errorf("账号身份、采票范围或代理配置已变化")
 						}
 						if sent >= cost {
 							return fmt.Errorf("采票请求预算已用完")
@@ -129,35 +142,39 @@ func (m *CodexHarvestManager) runParallel(ctx context.Context, account *auth.Acc
 						m.jobsMu.Unlock()
 						return nil
 					})
-					result := fireCodexTicketHarvest(attemptCtx, account, model, proxyURL, time.Duration(controls.Speed.AttemptTimeoutSeconds)*time.Second)
+					result := fireCodexTicketHarvest(attemptCtx, account, model, exit.proxyURL, time.Duration(controls.Speed.AttemptTimeoutSeconds)*time.Second)
 					reserved.Add(-int64(cost - sent))
 					event := baseEvent(model)
-					event.NodeID, event.NodeName, event.Attempt = node.ID, node.Name, int(used.Load())
+					event.NodeID, event.NodeName, event.Attempt = exit.node.ID, exit.node.Name, int(used.Load())
 					event.Result, event.HTTPStatus, event.Length = result.Result, result.HTTPStatus, max(len(result.State), result.ObservedLength)
+					event.RetryAfterSeconds = harvestRetryAfterSeconds(result.RetryAfter)
 					event.LatencyMS = time.Since(started).Milliseconds()
-					if result.HTTPStatus == 401 || result.HTTPStatus == 403 || result.HTTPStatus == 429 {
+					if result.Terminal {
+						event.Result = "terminal_error"
+					}
+					if result.HTTPStatus == 401 || result.HTTPStatus == 403 || result.HTTPStatus == 429 || result.Result == "token_error" {
 						event.Result = "account_error"
 					}
-					if modelCtx.Err() != nil {
+					if modelCtx.Err() != nil || denied {
 						event.Result = "cancelled"
 					}
-					results <- outcome{event, result, node}
-					if event.Result == "success" || event.Result == "account_error" {
+					results <- outcome{event, result, exit}
+					if event.Result == "success" || event.Result == "account_error" || event.Result == "cancelled" || result.Terminal || result.RetryAfter > 0 {
 						return
 					}
 				}
 			}(lane)
 		}
 		go func() { workers.Wait(); close(results) }()
-		won, stop := false, false
-		for outcome := range results {
-			event, result := outcome.event, outcome.result
+		won, stop, rejected := false, false, false
+		for out := range results {
+			event, result := out.event, out.result
 			if event.Result == "success" {
-				if won || stop || ctx.Err() != nil {
+				if won || stop || rejected || !m.harvestAdmitted(ctx, account, identity, model) || (out.exit.proxyID > 0 && !m.harvestProxyCurrent(ctx, out.exit.proxyID, out.exit.proxyURL)) {
 					event.Result = "cancelled"
 				} else {
-					result.Binding.HarvestNodeID, result.Binding.HarvestNodeName = outcome.node.ID, outcome.node.Name
-					result.Binding.HarvestPoolID, result.Binding.ManagedNode = collection.PoolID(), true
+					collection.bind(result.Binding, out.exit)
+					result.Binding.Identity = identity
 					if publishCodexTicket(m.DB, m.Store, account, model, result.State, codexTicketIssuedAt(result.State), result.Cookies, result.Binding) {
 						won = true
 						event.Stage, event.CookieCount = "stored", (&auth.CodexTicket{Cookie: result.Cookies.Header}).CookieCount()
@@ -167,31 +184,31 @@ func (m *CodexHarvestManager) runParallel(ctx context.Context, account *auth.Acc
 					} else {
 						event.Result, stop = "persistence_error", true
 					}
-					cancel()
 				}
+				cancel()
 			}
 			if event.Result == "account_error" {
 				stop = true
 				cancel()
 			}
-			// 迟到的取消或失败结果不能覆盖已经入库的成功状态。
-			if event.Result != "cancelled" && (!won || event.Result == "success") {
-				summary := &auth.CodexTicketProbeSummary{Result: event.Result, HTTPStatus: event.HTTPStatus, CheckedAt: time.Now()}
-				if event.Result != "success" {
-					cooldown := controls.Speed.CooldownSeconds
-					if event.Result == "account_error" {
-						cooldown = r.RateLimitCooldownSeconds
-					}
-					next := time.Now().Add(time.Duration(cooldown) * time.Second)
-					summary.NextProbeAt = &next
-				}
-				m.Store.PublishCodexTicketProbe(account.ID(), model, summary)
-				write, done := context.WithTimeout(context.Background(), 3*time.Second)
-				_ = m.DB.UpdateCredentials(write, account.ID(), map[string]interface{}{auth.CodexTicketProbeCredentialKey(model): summary})
-				done()
+			if result.Terminal {
+				rejected = true
+				cancel()
+			}
+			if result.RetryAfter > 0 {
+				cancel()
+			}
+			// Only the coordinator publishes. Late failures cannot replace a
+			// persisted winner; repeated failures retain the longest cooldown.
+			if !won || event.Result == "success" {
+				m.recordHarvestProbe(account, model, event, max(controls.Speed.CooldownSeconds, r.RateLimitCooldownSeconds), result.RetryAfter)
 			}
 			event.Message = harvestResultMessage(event.Result)
-			emit(event)
+			if won && event.Result != "success" {
+				m.appendEvent(event)
+			} else {
+				emit(event)
+			}
 		}
 		cancel()
 		if stop || (won && r.StopOnSuccess) {

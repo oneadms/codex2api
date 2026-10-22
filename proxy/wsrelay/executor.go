@@ -111,7 +111,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	deviceCfg *proxy.DeviceProfileConfig,
 	ginHeaders http.Header,
 	poolRouteKey string,
-) (*WsResponse, error) {
+) (response *WsResponse, requestErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -128,25 +128,42 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		return nil, fmt.Errorf("无可用 access_token")
 	}
 
-	gatewayTurn, gatewayErr := proxy.BeginCodexGatewayWSTurn(ctx, account, requestBody, ginHeaders, apiKey, effectiveProxyURL(account, proxyOverride))
+	proxyOverride = proxy.CodexTicketProxyForRequest(ctx, proxyOverride)
+	gatewayTurn, gatewayErr := proxy.BeginCodexGatewayWSTurn(ctx, account, requestBody, ginHeaders, apiKey, effectiveProxyURLForContext(ctx, account, proxyOverride))
 	if gatewayErr != nil {
 		return nil, gatewayErr
 	}
 	gatewayHandedOff := false
+	gatewayRelease := func() {}
 	defer func() {
-		if gatewayTurn != nil && !gatewayHandedOff {
-			gatewayTurn.Finish(true)
+		if !gatewayHandedOff {
+			gatewayRelease()
+			if gatewayTurn != nil {
+				gatewayTurn.Finish(true)
+			}
+		}
+		if requestErr != nil && gatewayTurn != nil {
+			var fixed *proxy.CodexGatewayWSError
+			if !errors.As(requestErr, &fixed) {
+				requestErr = &proxy.CodexGatewayWSError{Reason: "原连接请求失败，禁止换连接重放", Cause: requestErr}
+			}
 		}
 	}()
 	if gatewayTurn != nil {
 		ctx = gatewayTurn.Context(ctx)
 		proxyOverride = gatewayTurn.ProxyURL()
+	} else {
+		ctx, proxyOverride, gatewayRelease, gatewayErr = proxy.PrepareCodexGatewayWebsocket(ctx, account, requestBody, effectiveProxyURLForContext(ctx, account, proxyOverride))
+		if gatewayErr != nil {
+			return nil, gatewayErr
+		}
+		_, _, freshRoute := proxy.CodexGatewayEgressFromContext(ctx)
+		freshConnection = freshConnection || proxy.CodexTicketNeedsFreshWebsocket(ctx) || freshRoute
 	}
 
 	// 准备请求体
 	wsBody := e.prepareWebsocketBody(requestBody, sessionID)
 	wsBody = proxy.ApplyCodexTicketRequestBody(ctx, wsBody, true)
-	proxyOverride = proxy.CodexTicketProxyForRequest(ctx, proxyOverride)
 
 	headerSessionID := resolveHandshakeSessionID(sessionID, poolRouteKey, wsBody)
 
@@ -170,7 +187,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		}
 	}
 	// URL 改写和拨号共用请求快照，热更新不会改变在途请求的出口。
-	egress := proxy.ResolveCodexWebsocketEgressForContext(ctx, account, wsURL, effectiveProxyURL(account, proxyOverride))
+	egress := proxy.ResolveCodexWebsocketEgressForContext(ctx, account, wsURL, effectiveProxyURLForContext(ctx, account, proxyOverride))
 	wsURL = egress.URL
 
 	// 准备请求头
@@ -181,8 +198,9 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		return nil, err
 	}
 	proxy.ApplyCodexTurnStateInjectionHeader(ctx, headers)
+	proxy.ApplyCodexGatewayCookie(ctx, headers)
 	if gatewayTurn != nil {
-		gatewayTurn.Apply(headers)
+		gatewayTurn.Apply(headers, ctx)
 	}
 	// 握手头在复用连接上不会重发；每轮必须把最终状态同步到 response.create。
 	if state := headers.Get("X-Codex-Turn-State"); state != "" {
@@ -225,6 +243,9 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	// Cookie 只在握手时发送。换 Cookie 后必须换连接，帧内更新 turn state 无法替代握手。
 	cookieKey := websocketCookieKey(headers.Get("Cookie"), proxy.CodexTicketSessionForRequest(ctx))
 	poolSessionID = withWebsocketCookieKey(poolSessionID, cookieKey)
+	if freshConnection {
+		poolSessionID = "fresh:" + proxy.NewUpstreamSessionUUID() + ":" + poolSessionID
+	}
 	ctx = withConnectionCapacityKind(ctx, ginHeaders, wsBody)
 	var wc *WsConnection
 	var pr *PendingRequest
@@ -236,7 +257,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		}
 		wc, pr, poolSessionID, err2 = e.acquireContinuation(ctx, websocketContinuation{
 			responseID: prevRespID, accountID: account.ID(), apiKey: apiKey, identity: websocketClientIdentity(headers), cookieKey: &cookieKey,
-			model: gjson.GetBytes(wsBody, "model").String(), url: wsURL, proxyURL: effectiveProxyURL(account, proxyOverride),
+			model: gjson.GetBytes(wsBody, "model").String(), url: wsURL, proxyURL: effectiveProxyURLForContext(ctx, account, proxyOverride),
 		})
 		if err2 != nil {
 			if gatewayTurn != nil {
@@ -283,7 +304,8 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	}
 
 	if gatewayTurn != nil {
-		if err := gatewayTurn.BindConnection(fmt.Sprintf("%p", wc)); err != nil {
+		bound := wc
+		if err := gatewayTurn.BindConnection(fmt.Sprintf("%p", wc), func() { e.manager.DiscardConnection(bound) }); err != nil {
 			wc.session.RemovePendingRequest(pr.RequestID)
 			e.manager.DiscardConnection(wc)
 			return nil, err
@@ -309,7 +331,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		}
 		return nil, &proxy.ResponsesContinuationLostError{Reason: "original_connection_send_failed"}
 	}
-	for retries := 0; shouldRetryWebsocketSendError(sendErr) && retries < 2; retries++ {
+	for retries := 0; gatewayTurn == nil && shouldRetryWebsocketSendError(sendErr) && retries < 2; retries++ {
 		wc.session.RemovePendingRequest(pr.RequestID)
 		e.manager.DiscardConnection(wc)
 
@@ -338,7 +360,8 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	e.manager.StartHeartbeat(wc)
 
 	if gatewayTurn != nil {
-		if err := gatewayTurn.BindConnection(fmt.Sprintf("%p", wc)); err != nil {
+		bound := wc
+		if err := gatewayTurn.BindConnection(fmt.Sprintf("%p", wc), func() { e.manager.DiscardConnection(bound) }); err != nil {
 			wc.session.RemovePendingRequest(pr.RequestID)
 			e.manager.DiscardConnection(wc)
 			return nil, err
@@ -346,6 +369,8 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	}
 	gatewayHandedOff = true
 	return &WsResponse{
+		ctx:             ctx,
+		gatewayRelease:  gatewayRelease,
 		gatewayTurn:     gatewayTurn,
 		conn:            wc,
 		pendingReq:      pr,
@@ -529,14 +554,16 @@ func (e *Executor) sendRequest(wc *WsConnection, body []byte, requestID string) 
 
 // WsResponse WebSocket 响应包装器
 type WsResponse struct {
-	gatewayTurn *proxy.GatewayWSTurn
-	model       string
-	conn        *WsConnection
-	pendingReq  *PendingRequest
-	sessionID   string
-	manager     *Manager
-	readErrChan chan error
-	closed      bool
+	ctx            context.Context
+	gatewayRelease func()
+	gatewayTurn    *proxy.GatewayWSTurn
+	model          string
+	conn           *WsConnection
+	pendingReq     *PendingRequest
+	sessionID      string
+	manager        *Manager
+	readErrChan    chan error
+	closed         bool
 	// apiKey 发起本请求的下游 API Key，用于 response_id → 连接绑定的归属校验。
 	apiKey string
 	// 手工测连的连接用完即关，下一次测连重新验证当前出口。
@@ -555,6 +582,13 @@ type WsResponse struct {
 
 // ReadStream 读取 SSE 流
 func (r *WsResponse) ReadStream(callback func(data []byte) bool) error {
+	if r.ctx != nil {
+		stop := context.AfterFunc(r.ctx, func() { _ = r.Close() })
+		defer stop()
+		if err := r.ctx.Err(); err != nil {
+			return err
+		}
+	}
 	if r.conn == nil {
 		return fmt.Errorf("websocket connection is not available")
 	}
@@ -571,6 +605,9 @@ func (r *WsResponse) ReadStream(callback func(data []byte) bool) error {
 			// response terminal frame. Any socket close here, including 1000/1001,
 			// is premature and must preserve the real close error for the consumer.
 			r.markConnBroken()
+			if r.ctx != nil && r.ctx.Err() != nil {
+				return r.ctx.Err()
+			}
 			return fmt.Errorf("websocket read error: %w", err)
 		}
 
@@ -759,11 +796,16 @@ func (r *WsResponse) Close() error {
 	}
 
 	r.closed = true
+	if r.gatewayRelease != nil {
+		defer r.gatewayRelease()
+	}
 	if r.gatewayTurn != nil {
 		if !r.gatewayTurn.CanRetain() {
 			r.connBroken = true
 		}
-		r.gatewayTurn.Finish(r.connBroken || !r.streamCompleted)
+		if !r.gatewayTurn.Finish(r.connBroken || !r.streamCompleted) {
+			r.connBroken = true
+		}
 	}
 
 	// 移除等待请求
@@ -890,6 +932,9 @@ func ExecuteRequestWebsocket(ctx context.Context, account *auth.Account, request
 }
 
 func websocketResponseToHTTP(ctx context.Context, wsResp *WsResponse, statusCode int, handshakeHeader http.Header) *http.Response {
+	if wsResp.ctx != nil {
+		ctx = wsResp.ctx // Includes the fixed-session deadline, not just the caller deadline.
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -931,9 +976,11 @@ func websocketResponseToHTTP(ctx context.Context, wsResp *WsResponse, statusCode
 
 	// 在后台读取 WebSocket 流并写入 pipe
 	go func() {
-		defer close(done)
 		defer pw.Close()
 		defer wsResp.Close()
+		// Stop the cancellation watcher before Finish cancels the private
+		// deadline context; successful completion must end in EOF, not canceled.
+		defer close(done)
 
 		err := wsResp.ReadStream(func(data []byte) bool {
 			// 上游回带的 turn state 只在帧里（握手头是建连时的旧快照），逐帧观测记进追踪。

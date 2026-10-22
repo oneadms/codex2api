@@ -598,6 +598,14 @@ func (m *Manager) fetchNodes(ctx context.Context, urls []string) ([]map[string]a
 }
 
 func (m *Manager) config(s saved) ([]byte, error) {
+	ports := make([]int, defaultCollectLanes)
+	for lane := range ports {
+		ports[lane] = collectPort + lane
+	}
+	return m.collectionConfig(s, ports)
+}
+
+func (m *Manager) collectionConfig(s saved, ports []int) ([]byte, error) {
 	names := []string{}
 	for _, n := range s.Nodes {
 		name, ok := n["name"].(string)
@@ -625,9 +633,14 @@ func (m *Manager) config(s saved) ([]byte, error) {
 	for _, node := range managedNodes(s, true) {
 		collectNames = append(collectNames, node.RuntimeID)
 	}
-	for lane := 0; lane < MaxCollectLanes; lane++ {
+	seenPorts := make(map[int]bool, len(ports))
+	for lane, port := range ports {
+		if port <= 0 || port > 65535 || seenPorts[port] || port == 3101 || port == 9098 || (port >= gatewayPort && port < gatewayPort+GatewayLanes) {
+			return nil, errors.New("invalid collection listener port")
+		}
+		seenPorts[port] = true
 		groups = append(groups, map[string]any{"name": collectionGroup(lane), "type": "select", "proxies": collectNames})
-		listeners = append(listeners, map[string]any{"name": collectionGroup(lane), "type": "mixed", "listen": "127.0.0.1", "port": collectPort + lane, "proxy": collectionGroup(lane)})
+		listeners = append(listeners, map[string]any{"name": collectionGroup(lane), "type": "mixed", "listen": "127.0.0.1", "port": port, "proxy": collectionGroup(lane)})
 	}
 	groups, listeners = appendGatewayListeners(groups, listeners, collectNames)
 	return json.Marshal(map[string]any{"mixed-port": 3101, "allow-lan": false, "bind-address": "127.0.0.1", "mode": "rule", "log-level": "silent", "external-controller": "127.0.0.1:9098", "secret": s.Secret, "proxies": s.Nodes, "proxy-groups": groups, "listeners": listeners, "rules": []string{"MATCH,CODEX-ROTATE"}})
@@ -663,7 +676,7 @@ func (m *Manager) reload(ctx context.Context, b []byte, secret string) error {
 
 func (m *Manager) start(ctx context.Context, path, secret string) error {
 	ports := []string{"127.0.0.1:3101", "127.0.0.1:9098"}
-	for lane := 0; lane < MaxCollectLanes; lane++ {
+	for lane := 0; lane < defaultCollectLanes; lane++ {
 		ports = append(ports, fmt.Sprintf("127.0.0.1:%d", collectPort+lane))
 	}
 	for lane := 0; lane < GatewayLanes; lane++ {

@@ -85,15 +85,15 @@ func TestCollectionListenersStayOnLoopback(t *testing.T) {
 		} `json:"listeners"`
 	}
 	require.NoError(t, json.Unmarshal(raw, &config))
-	require.Len(t, config.Listeners, MaxCollectLanes+GatewayLanes)
+	require.Len(t, config.Listeners, defaultCollectLanes+GatewayLanes)
 	for lane, listener := range config.Listeners {
 		require.Equal(t, "127.0.0.1", listener.Listen)
-		if lane < MaxCollectLanes {
+		if lane < defaultCollectLanes {
 			require.Equal(t, collectPort+lane, listener.Port)
 			require.Equal(t, collectionGroup(lane), listener.Proxy)
 			continue
 		}
-		gatewayLane := lane - MaxCollectLanes
+		gatewayLane := lane - defaultCollectLanes
 		require.Equal(t, gatewayPort+gatewayLane, listener.Port)
 		require.Equal(t, gatewayGroup(gatewayLane), listener.Proxy)
 	}

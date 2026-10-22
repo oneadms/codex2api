@@ -269,11 +269,12 @@ func ConfiguredCodexTicketSettings() CodexTicketSettings {
 	return DefaultCodexTicketSettings()
 }
 
-// CodexTicketGateEnabled 报告打票门控是否生效：开关打开、配置了打票代理、且门控名单非空。
-// 三者缺一都不注入——没有代理打不出票，没有名单就没有门控对象。
+// CodexTicketGateEnabled requires an enabled policy, a configured acquisition
+// exit (fixed URL or proxy-ID pool), and at least one gated model. A temporarily
+// unavailable pool must not silently disable fail-closed business admission.
 func CodexTicketGateEnabled() bool {
 	settings := ConfiguredCodexTicketSettings()
-	return settings.Enabled && settings.HarvestProxyURL != "" && len(settings.Models) > 0
+	return settings.Enabled && (settings.HarvestProxyURL != "" || CodexTicketProxyPoolConfigured()) && len(settings.Models) > 0
 }
 
 // CodexTicketModelGated 报告某模型是否在门控名单内。

@@ -223,9 +223,6 @@ func publishCodexTicket(db *database.DB, store *auth.Store, account *auth.Accoun
 	if cookies.CapturedAt.IsZero() {
 		cookies.CapturedAt = capturedAt
 	}
-	account.Mu().RLock()
-	accountEmail := account.Email
-	account.Mu().RUnlock()
 	ticket := &auth.CodexTicket{
 		Model:            model,
 		State:            state,
@@ -236,10 +233,18 @@ func publishCodexTicket(db *database.DB, store *auth.Store, account *auth.Accoun
 		IssuedAt:         issuedAt,
 		CapturedAt:       capturedAt,
 		ExpiresAt:        auth.CodexTicketExpiry(capturedAt, issuedAt, time.Duration(auth.ConfiguredCodexTicketSettings().TTLSeconds)*time.Second),
-		Identity:         auth.CodexTicketIdentity(account.EffectiveAccountID(), accountEmail),
+		Identity:         account.CodexTicketIdentitySnapshot(),
 	}
 	if len(bindings) > 0 && bindings[0] != nil {
 		binding := bindings[0]
+		if binding.Identity != "" {
+			if binding.Identity != ticket.Identity {
+				return false
+			}
+			// Keep the identity used by the probe. A concurrent account edit can
+			// invalidate this ticket, but can never relabel it as the new identity.
+			ticket.Identity = binding.Identity
+		}
 		ticket.EdgeIP = binding.EdgeIP
 		ticket.HarvestProxyURL, ticket.HarvestSessionID = binding.HarvestProxyURL, binding.HarvestSessionID
 		ticket.HarvestNodeID, ticket.HarvestNodeName, ticket.HarvestPoolID = binding.HarvestNodeID, binding.HarvestNodeName, binding.HarvestPoolID

@@ -12,6 +12,8 @@ import (
 )
 
 type harvestSelection struct {
+	proxyID    int64
+	proxyURL   string
 	sidecar    *mihomo.DirectedSidecar
 	node       mihomo.HarvestNode
 	scope      harvest.CodexHarvestNodeScope
@@ -34,9 +36,13 @@ func (m *CodexHarvestManager) selectNode(ctx context.Context, account *auth.Acco
 	email := account.Email
 	account.Mu().RUnlock()
 	scope := harvest.CodexHarvestNodeScope{PoolID: sidecar.PoolID, AccountID: account.ID(), Identity: auth.CodexTicketIdentity(account.EffectiveAccountID(), email), Model: model, Blocks: auth.CodexTicketExpectedBlocks(account.GetPlanType())}
-	generation, records, err := m.Repository.Snapshot(ctx, scope)
-	if err != nil {
-		return nil, "learning_store_unavailable"
+	generation := int64(0)
+	var records []harvest.CodexHarvestNodeRecord
+	if controls.NodeMemoryEnabled {
+		generation, records, err = m.Repository.Snapshot(ctx, scope)
+		if err != nil {
+			return nil, "learning_store_unavailable"
+		}
 	}
 	ranked := m.Controls.Rank(nodes, records, tried)
 	if len(ranked) == 0 {
@@ -78,7 +84,7 @@ func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account
 		seed, releaseSeed = m.reuseCandidate(ctx, account, model, controls, budget, tried)
 	}
 	defer releaseSeed()
-	identity := gatewayIdentity(account)
+	identity := account.CodexTicketIdentitySnapshot()
 	var reuseRevision string
 	if seed != nil {
 		reuseRevision = seed.ReuseRevision
@@ -89,7 +95,9 @@ func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account
 		ctx = context.WithValue(ctx, harvestSeedKey{}, seed)
 		proxyURL, reason = seed.HarvestProxyURL, "reuse"
 		event.NodeID, event.NodeName = seed.HarvestNodeID, seed.HarvestNodeName
-	} else if keep != nil && *keep != nil && !(*keep).sidecar.UsesNodesOnce() {
+	} else if len(controls.ProxyIDs) > 0 {
+		selection, reason = m.selectPoolProxy(ctx, account, model, controls, tried, keep, source == "manual")
+	} else if keep != nil && *keep != nil && (*keep).sidecar != nil && !(*keep).sidecar.UsesNodesOnce() {
 		selection = *keep
 		reason = "manual_sticky"
 	} else {
@@ -102,12 +110,21 @@ func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account
 			r.DegradedReason = "定向节点不可用，已按代理轮换；出口 IP 不保证固定"
 		}
 	})
-	if reason == "nodes_cooling_down" || reason == "learning_store_unavailable" {
+	if reason == "nodes_cooling_down" || reason == "learning_store_unavailable" || reason == "proxy_pool_unavailable" || reason == "proxy_pool_exhausted" {
 		event.Result = "skipped"
 		event.Message = "节点处于冷却或学习记录暂不可用"
 		return
 	}
-	if selection != nil {
+	if selection != nil && selection.proxyID > 0 {
+		exit := harvestProxyExit{id: selection.proxyID, url: selection.proxyURL}
+		proxyURL = exit.url
+		event.NodeID, event.NodeName = exit.key(), exit.name()
+		tried[exit.key()] = true
+		if keep != nil {
+			*keep = selection
+		}
+		m.Controls.SetRuntime(func(r *harvest.CodexHarvestRuntime) { r.CurrentNode = exit.name() })
+	} else if selection != nil {
 		event.NodeID, event.NodeName = selection.node.ID, selection.node.Name
 		m.Controls.SetRuntime(func(r *harvest.CodexHarvestRuntime) { r.CurrentNode = selection.node.Name })
 		release, acquireErr := selection.sidecar.Acquire(ctx, selection.node)
@@ -123,6 +140,7 @@ func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account
 			*keep = selection
 		}
 	}
+	denied := false
 	ctx = context.WithValue(ctx, harvestPacerKey{}, func(wait context.Context) error {
 		m.paceMu.Lock()
 		defer m.paceMu.Unlock()
@@ -133,12 +151,9 @@ func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account
 		if wait.Err() != nil {
 			return wait.Err()
 		}
-		if gatewayIdentity(m.Store.FindByID(account.ID())) != identity || (seed != nil && (!m.GatewayReuseCurrent(wait, reuseRevision, account.ID()) || !seed.Valid(time.Now(), 780))) {
-			return fmt.Errorf("账号身份、来源票或借票配置已变化")
-		}
-		currentScope, err := m.Scope(wait)
-		if err != nil || !auth.CodexTicketGateEnabled() || !harvestAccountEligible(account, currentScope, true) {
-			return fmt.Errorf("采票范围变化、账号忙碌或采票已关闭")
+		if !m.harvestAdmitted(wait, account, identity, model) || (selection != nil && selection.proxyID > 0 && !m.harvestProxyCurrent(wait, selection.proxyID, proxyURL)) || (seed != nil && (!m.GatewayReuseCurrent(wait, reuseRevision, account.ID()) || !seed.Valid(time.Now(), 780))) {
+			denied = true
+			return fmt.Errorf("账号身份、来源票、代理或采票配置已变化")
 		}
 		m.lastRequest = time.Now()
 		return nil
@@ -158,19 +173,20 @@ func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account
 	if res.Terminal {
 		event.Result = "terminal_error"
 	}
-	event.RetryAfterSeconds = int(res.RetryAfter.Seconds())
-	if ctx.Err() != nil {
+	event.RetryAfterSeconds = harvestRetryAfterSeconds(res.RetryAfter)
+	if ctx.Err() != nil || denied {
 		event.Result = "cancelled"
 		event.Message = "任务已停止"
 		return
 	}
-	if res.Result == "success" && (gatewayIdentity(m.Store.FindByID(account.ID())) != identity || (seed != nil && !m.GatewayReuseCurrent(ctx, reuseRevision, account.ID()))) {
+	if res.Result == "success" && (!m.harvestAdmitted(ctx, account, identity, model) || (selection != nil && selection.proxyID > 0 && !m.harvestProxyCurrent(ctx, selection.proxyID, proxyURL)) || (seed != nil && !m.GatewayReuseCurrent(ctx, reuseRevision, account.ID()))) {
 		event.Result = "cancelled"
 		event.Message = "账号身份或借票配置已变化"
 		return
 	}
 	if res.Result == "success" {
-		if selection != nil {
+		res.Binding.Identity = identity
+		if selection != nil && selection.sidecar != nil {
 			if err = selection.sidecar.Confirm(ctx, selection.node); err != nil {
 				res.Result = "error"
 				event.Result = "network_error"
@@ -194,16 +210,8 @@ func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account
 		event.Stage = "stored"
 		event.CookieCount = (&auth.CodexTicket{Cookie: res.Cookies.Header}).CookieCount()
 	}
-	summary := &auth.CodexTicketProbeSummary{Result: event.Result, HTTPStatus: res.HTTPStatus, CheckedAt: started}
-	if event.Result != "success" {
-		next := time.Now().Add(max(time.Duration(controls.Speed.CooldownSeconds)*time.Second, res.RetryAfter))
-		summary.NextProbeAt = &next
-	}
-	m.Store.PublishCodexTicketProbe(account.ID(), model, summary)
-	probeCtx, probeCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	_ = m.DB.UpdateCredentials(probeCtx, account.ID(), map[string]interface{}{auth.CodexTicketProbeCredentialKey(model): summary})
-	probeCancel()
-	if selection != nil && event.Result != "persistence_error" {
+	m.recordHarvestProbe(account, model, event, controls.Speed.CooldownSeconds, res.RetryAfter)
+	if selection != nil && selection.sidecar != nil && controls.NodeMemoryEnabled && event.Result != "persistence_error" {
 		query, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_, _ = m.Repository.Record(query, harvest.CodexHarvestNodeFeedback{Scope: selection.scope, Node: selection.node, Generation: selection.generation, Result: event.Result, LatencyMS: time.Since(started).Milliseconds(), CooldownSeconds: controls.Speed.CooldownSeconds})

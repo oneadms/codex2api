@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -108,14 +109,18 @@ func gatewayRouteChanged(resp *http.Response, value string) bool {
 func gatewayFingerprint(r gatewayRoute) [32]byte {
 	return sha256.Sum256([]byte(r.cookie + "\x00" + r.proxy + "\x00" + r.nodeID + "\x00" + r.identity))
 }
+func (g *codexGatewayManager) routeValidLocked(v harvest.GatewaySettings, r gatewayRoute, now time.Time) bool {
+	a := g.owner.Store.FindByID(r.sourceID)
+	return gatewayRouteRevision(g.settings) == gatewayRouteRevision(v) && v.CookiePool.Enabled && slices.Contains(v.CookiePool.SourceAccountIDs, r.sourceID) && now.Before(r.expires) && gatewayAccountEligible(a) && gatewayIdentity(a) == r.identity
+}
+
 func (g *codexGatewayManager) pickRoute(v harvest.GatewaySettings) (gatewayRoute, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := time.Now()
 	pick := func(id int64) (gatewayRoute, bool) {
 		r, ok := g.routes[id]
-		a := g.owner.Store.FindByID(id)
-		return r, ok && slices.Contains(v.CookiePool.SourceAccountIDs, id) && now.Before(r.expires) && gatewayAccountEligible(a) && gatewayIdentity(a) == r.identity
+		return r, ok && g.routeValidLocked(v, r, now)
 	}
 	if r, ok := pick(g.activeSource); ok {
 		return r, true
@@ -132,30 +137,37 @@ func (g *codexGatewayManager) prepare(ctx context.Context, v harvest.GatewaySett
 	if !v.CookiePool.Enabled {
 		return errors.New("cookie_pool_disabled")
 	}
-	g.mu.Lock()
-	if call := g.preparation; call != nil {
+	for {
+		g.mu.Lock()
+		call := g.preparation
+		if call == nil {
+			break
+		}
 		g.mu.Unlock()
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-call.done:
-			if call.revision != v.Revision {
+			if !g.current(ctx, v) {
 				return errors.New("configuration_changed")
 			}
-			return call.err
+			if call.revision == gatewayRouteRevision(v) {
+				return call.err
+			}
+			// A superseded preparation has drained; start the current generation.
 		}
 	}
 	if time.Now().Before(g.retryAfter) {
 		g.mu.Unlock()
 		return errors.New("source_probe_cooldown")
 	}
-	call := &gatewayPreparation{done: make(chan struct{}), revision: v.Revision}
+	call := &gatewayPreparation{done: make(chan struct{}), revision: gatewayRouteRevision(v)}
 	g.preparation = call
 	g.setup = harvest.GatewaySetup{State: "running"}
 	g.mu.Unlock()
 	call.err = g.prepareSources(ctx, v)
 	g.mu.Lock()
-	if g.settings.Revision == v.Revision {
+	if gatewayRouteRevision(g.settings) == gatewayRouteRevision(v) {
 		if call.err != nil {
 			g.retryAfter = time.Now().Add(15 * time.Second)
 			g.setup = harvest.GatewaySetup{State: "failed", Reason: gatewaySafeReason(call.err)}
@@ -176,11 +188,11 @@ func (g *codexGatewayManager) prepareSources(ctx context.Context, v harvest.Gate
 	if r, ok := g.pickRoute(v); ok && time.Until(r.expires) > 90*time.Second {
 		return nil
 	}
-	var nodes []mihomo.HarvestNode
+	nodes := []mihomo.HarvestNode{{}}
 	pool := ""
 	if v.CookiePool.RotateNodes {
 		var err error
-		nodes, pool, err = mihomo.GatewayNodes()
+		nodes, pool, err = g.listNodes()
 		if err != nil {
 			return err
 		}
@@ -188,13 +200,25 @@ func (g *codexGatewayManager) prepareSources(ctx context.Context, v harvest.Gate
 			return errors.New("node_unavailable")
 		}
 	}
-	tries := 1
-	if v.CookiePool.RotateNodes {
-		tries = min(v.CookiePool.MaxNodeAttempts, len(nodes))
+	g.mu.Lock()
+	startNode := int(g.nodeCursor % uint64(len(nodes)))
+	g.mu.Unlock()
+	controls, _, err := g.owner.Controls.Controls(ctx)
+	if err != nil {
+		return err
 	}
-	controls, _, _ := g.owner.Controls.Controls(ctx)
 	budget := controls.Speed.MaxRequestsPerRound
-	for n := 0; n < tries; n++ {
+	attemptedNodes := 0
+	for scanned := 0; scanned < len(nodes) && attemptedNodes < v.CookiePool.MaxNodeAttempts; scanned++ {
+		node := nodes[(startNode+scanned)%len(nodes)]
+		g.mu.Lock()
+		g.nodeCursor = uint64((startNode + scanned + 1) % len(nodes))
+		nodeCooling := node.ID != "" && time.Now().Before(g.nodeCooldown[node.ID])
+		g.mu.Unlock()
+		if nodeCooling {
+			continue
+		}
+		nodeAttempted := false
 		for _, id := range v.CookiePool.SourceAccountIDs {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -210,6 +234,17 @@ func (g *codexGatewayManager) prepareSources(ctx context.Context, v harvest.Gate
 				continue
 			}
 			identity := gatewayIdentity(a)
+			cooldownKey := fmt.Sprintf("%d:%s:%s", id, identity, node.ID)
+			g.mu.Lock()
+			cooling := time.Now().Before(g.sourceCooldown[cooldownKey])
+			g.mu.Unlock()
+			if cooling {
+				continue
+			}
+			if !nodeAttempted {
+				attemptedNodes++
+				nodeAttempted = true
+			}
 			a.Mu().RLock()
 			proxyURL := a.ProxyURL
 			a.Mu().RUnlock()
@@ -218,65 +253,52 @@ func (g *codexGatewayManager) prepareSources(ctx context.Context, v harvest.Gate
 			}
 			r := gatewayRoute{sourceID: id, identity: identity, proxy: proxyURL}
 			release := func() {}
-			if len(nodes) > 0 {
-				node := nodes[n]
-				g.mu.Lock()
-				cool := time.Now().Before(g.nodeCooldown[node.ID])
-				g.mu.Unlock()
-				if cool {
-					continue
+			if node.ID != "" {
+				effective, finish, pinErr := g.pinNode(ctx, node.ID, pool)
+				if pinErr != nil {
+					g.mu.Lock()
+					g.nodeCooldown[node.ID] = time.Now().Add(time.Duration(v.CookiePool.NodeCooldownSeconds) * time.Second)
+					g.mu.Unlock()
+					break // A failed exit lease affects the node, not a donor credential.
 				}
-				effective, finish, err := mihomo.PinGatewayNode(ctx, node.ID, pool)
-				if err != nil {
-					continue
-				}
-				proxyURL = effective
-				release = finish
-				r.nodeID, r.nodeName, r.poolID, r.managed = node.ID, node.Name, pool, true
-				r.proxy = effective
+				proxyURL, release = effective, finish
+				r.nodeID, r.nodeName, r.poolID, r.managed, r.proxy = node.ID, node.Name, pool, true, effective
 			}
 			budget--
-			start := time.Now()
-			shot, resp, err := gatewayShot(ctx, a, proxyURL, "sse", NewUpstreamSessionUUID(), "", "", time.Duration(controls.Speed.AttemptTimeoutSeconds)*time.Second)
+			started := time.Now()
+			shot, resp, probeErr := gatewayShot(ctx, a, proxyURL, "sse", NewUpstreamSessionUUID(), "", "", time.Duration(controls.Speed.AttemptTimeoutSeconds)*time.Second)
 			release()
-			if err == nil && (shot.Status != http.StatusOK || !shot.Completed || shot.Model != gatewayModel || strings.TrimSpace(shot.Text) == "") {
-				err = errors.New("response_not_qualified")
+			if probeErr == nil && (shot.Status != http.StatusOK || !shot.Completed || shot.Model != gatewayModel || strings.TrimSpace(shot.Text) == "") {
+				probeErr = errors.New("response_not_qualified")
 			}
-			if err == nil {
+			if probeErr == nil {
 				endpoint, _ := url.Parse(codexTicketUpstreamEndpoint())
-				r.cookie, r.expires, err = gatewayResponseCookie(resp, endpoint, time.Now(), v.CookiePool.TTLSeconds)
+				r.cookie, r.expires, probeErr = gatewayResponseCookie(resp, endpoint, time.Now(), v.CookiePool.TTLSeconds)
 			}
-			if err == nil && (!g.current(ctx, v) || gatewayIdentity(g.owner.Store.FindByID(id)) != identity) {
+			if !g.current(ctx, v) || !gatewayAccountEligible(g.owner.Store.FindByID(id)) || gatewayIdentity(g.owner.Store.FindByID(id)) != identity {
 				return errors.New("configuration_changed")
 			}
 			checked := time.Now()
-			r.captured = checked
-			r.gateway = gatewayCookieHost(r.cookie)
-			status := harvest.GatewayRouteStatus{AccountID: id, State: "rejected", Reason: gatewaySafeReason(err), CheckedAt: &checked, Gateway: r.gateway, ProxyNode: r.nodeName}
-			if err == nil {
-				status.State = "candidate"
-				status.Reason = "source_passed_pending_target"
-				status.ExpiresAt = &r.expires
-			}
+			r.captured, r.gateway = checked, gatewayCookieHost(r.cookie)
+			status := harvest.GatewayRouteStatus{AccountID: id, State: "rejected", Reason: gatewaySafeReason(probeErr), CheckedAt: &checked, Gateway: r.gateway, ProxyNode: r.nodeName}
 			g.mu.Lock()
-			if g.settings.Revision == v.Revision {
-				if err == nil {
-					if old, ok := g.routes[id]; ok && old.cookie == r.cookie {
+			if gatewayRouteRevision(g.settings) == gatewayRouteRevision(v) {
+				if probeErr == nil {
+					if old, exists := g.routes[id]; exists && old.cookie == r.cookie {
 						r.expires = minGatewayTime(r.expires, old.expires)
 					}
-					g.routes[id] = r
-					g.activeSource = id
+					status.State, status.Reason, status.ExpiresAt = "candidate", "source_passed_pending_target", &r.expires
+					g.routes[id], g.activeSource = r, id
+					delete(g.sourceCooldown, cooldownKey)
 				} else {
-					delete(g.routes, id)
-					if r.nodeID != "" {
-						g.nodeCooldown[r.nodeID] = checked.Add(time.Duration(v.CookiePool.NodeCooldownSeconds) * time.Second)
-					}
+					// Another donor is still allowed to use this same healthy node.
+					g.sourceCooldown[cooldownKey] = checked.Add(time.Duration(v.CookiePool.NodeCooldownSeconds) * time.Second)
 				}
 				g.statuses[id] = status
 			}
 			g.mu.Unlock()
-			_ = g.owner.Repository.AppendGatewayHistory(ctx, harvest.GatewayHistoryRecord{SourceAccountID: id, Gateway: r.gateway, Action: "source", Success: err == nil, Reason: status.Reason, CheckedAt: start})
-			if err == nil {
+			_ = g.owner.Repository.AppendGatewayHistory(ctx, harvest.GatewayHistoryRecord{SourceAccountID: id, Gateway: r.gateway, Action: "source", Success: probeErr == nil, Reason: status.Reason, CheckedAt: started})
+			if probeErr == nil {
 				return nil
 			}
 			if !harvestWait(ctx, time.Duration(controls.Speed.ProbeIntervalSeconds)*time.Second) {
@@ -286,6 +308,23 @@ func (g *codexGatewayManager) prepareSources(ctx context.Context, v harvest.Gate
 	}
 	return errors.New("no_qualified_source_route")
 }
+func gatewayStoredDonor(a *auth.Account, now time.Time) *auth.CodexTicket {
+	if !gatewayAccountEligible(a) {
+		return nil
+	}
+	t := a.CodexTicketForModel(gatewayModel, now, 780, "sse")
+	if t == nil {
+		return nil
+	}
+	if t.Standby.Valid(now, 780) && t.Standby.Transport == "sse" && (t.Standby.Identity == "" || t.Standby.Identity == gatewayIdentity(a)) && t.Standby.EffectiveExpiry().After(t.EffectiveExpiry()) {
+		t = t.Standby
+	}
+	if t.EffectiveExpiry().Sub(now) <= 30*time.Second {
+		return nil
+	}
+	return t
+}
+
 func (g *codexGatewayManager) prepareStoredSources(ctx context.Context, v harvest.GatewaySettings) error {
 	if !g.owner.harvestMu.TryRLock() {
 		return errors.New("source_busy")
@@ -301,7 +340,7 @@ func (g *codexGatewayManager) prepareStoredSources(ctx context.Context, v harves
 		if !gatewayAccountEligible(a) {
 			continue
 		}
-		if t := a.CodexTicketForModel(gatewayModel, time.Now(), 780, "sse"); t != nil && time.Until(t.EffectiveExpiry()) > 30*time.Second {
+		if gatewayStoredDonor(a, time.Now()) != nil {
 			return nil
 		}
 		if budget < 2 {
@@ -316,7 +355,7 @@ func (g *codexGatewayManager) prepareStoredSources(ctx context.Context, v harves
 		}
 		g.owner.attempt(ctx, a, gatewayModel, auth.ConfiguredCodexTicketSettings().HarvestProxyURL, controls, &budget, map[string]bool{}, nil, "auto", "", 1)
 		g.owner.working.Delete(id)
-		if t := a.CodexTicketForModel(gatewayModel, time.Now(), 780, "sse"); t != nil && time.Until(t.EffectiveExpiry()) > 30*time.Second {
+		if gatewayStoredDonor(a, time.Now()) != nil {
 			return nil
 		}
 	}
@@ -445,11 +484,18 @@ func gatewayShot(ctx context.Context, a *auth.Account, proxyURL, protocol, sessi
 	return out, resp, err
 }
 func (g *codexGatewayManager) pin(ctx context.Context, v harvest.GatewaySettings, r gatewayRoute, fallback string) (string, func(), error) {
-	if !g.current(ctx, v) || !time.Now().Before(r.expires) {
+	if !g.current(ctx, v) {
+		return "", func() {}, errors.New("configuration_changed")
+	}
+	g.mu.Lock()
+	current, exists := g.routes[r.sourceID]
+	valid := exists && g.routeValidLocked(v, current, time.Now()) && gatewayFingerprint(current) == gatewayFingerprint(r)
+	g.mu.Unlock()
+	if !valid {
 		return "", func() {}, errors.New("configuration_changed")
 	}
 	if r.nodeID != "" {
-		return mihomo.PinGatewayNode(ctx, r.nodeID, r.poolID)
+		return g.pinNode(ctx, r.nodeID, r.poolID)
 	}
 	if v.CookiePool.IPAffinity {
 		return r.proxy, func() {}, nil
@@ -457,23 +503,26 @@ func (g *codexGatewayManager) pin(ctx context.Context, v harvest.GatewaySettings
 	return fallback, func() {}, nil
 }
 func (g *codexGatewayManager) verify(ctx context.Context, v harvest.GatewaySettings, id int64, ws bool) error {
+	select {
+	case g.probeToken <- struct{}{}:
+		defer func() { <-g.probeToken }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if !g.current(ctx, v) {
+		return errors.New("configuration_changed")
+	}
 	a := g.owner.Store.FindByID(id)
 	if !gatewayAccountEligible(a) {
 		return errors.New("account_unavailable")
 	}
-	protocol := "sse"
 	if ws {
-		protocol = "websocket"
-		if !v.WSSession.Enabled || !slices.Contains(v.WSSession.AccountIDs, id) {
-			return errors.New("websocket_disabled")
-		}
+		return g.owner.TestGatewayWS(ctx, id)
 	}
+	protocol := "sse"
 	if gatewayUnified(v) {
 		if t := a.CodexTicketForModel(gatewayModel, time.Now(), 780, protocol); t != nil {
 			return nil
-		}
-		if ws {
-			return errors.New("websocket_ticket_unavailable")
 		}
 		if err := g.prepare(ctx, v); err != nil {
 			return err
@@ -485,6 +534,9 @@ func (g *codexGatewayManager) verify(ctx context.Context, v harvest.GatewaySetti
 		controls, _, _ := g.owner.Controls.Controls(ctx)
 		if controls.Transport != "sse" {
 			return errors.New("websocket_ticket_unavailable")
+		}
+		if a.CodexTicketProbeCoolingDown(gatewayModel, time.Now()) {
+			return errors.New("source_probe_cooldown")
 		}
 		budget := 2
 		event := g.owner.attempt(ctx, a, gatewayModel, auth.ConfiguredCodexTicketSettings().HarvestProxyURL, controls, &budget, map[string]bool{}, nil, "auto", "", 1)
@@ -547,6 +599,12 @@ func (g *codexGatewayManager) verify(ctx context.Context, v harvest.GatewaySetti
 			err = errors.New("target_route_changed")
 		}
 	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if !g.current(ctx, v) || !gatewayAccountEligible(g.owner.Store.FindByID(id)) || gatewayIdentity(g.owner.Store.FindByID(id)) != identity {
+		return errors.New("configuration_changed")
+	}
 	checked := time.Now()
 	status := harvest.GatewayRouteStatus{AccountID: id, State: "rejected", Reason: gatewaySafeReason(err), CheckedAt: &checked, ExpiresAt: &r.expires, Gateway: r.gateway, ProxyNode: r.nodeName}
 	if err == nil {
@@ -554,12 +612,12 @@ func (g *codexGatewayManager) verify(ctx context.Context, v harvest.GatewaySetti
 		status.Reason = "target_probe_passed"
 	}
 	g.mu.Lock()
-	if g.settings.Revision == v.Revision {
-		g.checks[id] = gatewayCheck{status: status, fingerprint: gatewayFingerprint(r), identity: identity}
-		if err != nil && r.nodeID != "" {
-			g.nodeCooldown[r.nodeID] = checked.Add(time.Duration(v.CookiePool.NodeCooldownSeconds) * time.Second)
-		}
+	current, exists := g.routes[r.sourceID]
+	if !exists || !g.routeValidLocked(v, current, checked) || gatewayFingerprint(current) != gatewayFingerprint(r) || gatewayIdentity(g.owner.Store.FindByID(id)) != identity {
+		g.mu.Unlock()
+		return errors.New("configuration_changed")
 	}
+	g.checks[id] = gatewayCheck{sourceID: r.sourceID, status: status, fingerprint: gatewayFingerprint(r), identity: identity}
 	g.mu.Unlock()
 	_ = g.owner.Repository.AppendGatewayHistory(ctx, harvest.GatewayHistoryRecord{SourceAccountID: r.sourceID, TargetAccountID: id, Gateway: r.gateway, Action: "verify", Success: err == nil, Reason: status.Reason, CheckedAt: checked})
 	return err

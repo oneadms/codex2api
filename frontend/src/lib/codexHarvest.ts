@@ -8,7 +8,7 @@ export interface HarvestSpeed {
   refresh_before_seconds: number
 }
 /** 对齐 internal/harvest/controls.go：strategy 取代旧的 reuse_source_account_id，不迁移旧值。 */
-export interface HarvestControls { version: number; strategy: 'refresh' | 'fixed'; proxy_pool_id: number; edge_ip: string; transport: 'sse' | 'websocket'; node_memory_enabled: boolean; speed: HarvestSpeed }
+export interface HarvestControls { version: number; strategy: 'refresh' | 'fixed'; proxy_ids: number[]; edge_ip: string; transport: 'sse' | 'websocket'; node_memory_enabled: boolean; speed: HarvestSpeed }
 export interface HarvestScope { mode: 'all' | 'selected'; group_ids: number[]; account_policy: 'schedulable_only' | 'prioritize_schedulable'; skipped_account_ids: number[] }
 export interface HarvestControlSnapshot {
   settings: HarvestControls
@@ -72,7 +72,7 @@ export interface GatewayCookiePool {
 export interface GatewayWSSession { enabled: boolean; account_ids: number[]; ttl_seconds: number }
 export interface GatewaySettings {
   cookie_pool: GatewayCookiePool; ws_session: GatewayWSSession
-  ticket_pool_scheduling: boolean; scheduling_mode: 'account' | 'model' | 'groups'; scheduling_group_ids: number[]; revision: string
+  ticket_pool_scheduling: boolean; scheduling_mode: 'account' | 'model' | 'groups'; scheduling_group_ids: number[]; revision: string; route_revision: string
 }
 export interface GatewayRouteStatus {
   account_id: number; state: string; reason: string; gateway?: string; proxy_node?: string
@@ -120,6 +120,7 @@ export function normalizeGatewaySettings(value: Partial<GatewaySettings> | null 
     scheduling_mode: (['account', 'model', 'groups'] as const).includes(value?.scheduling_mode as never) ? value!.scheduling_mode! : 'account',
     scheduling_group_ids: [...(value?.scheduling_group_ids ?? [])],
     revision: value?.revision ?? '',
+    route_revision: value?.route_revision ?? '',
   }
   if (out.cookie_pool.rotate_nodes) out.cookie_pool.ip_affinity = true
   if (out.ws_session.enabled) {

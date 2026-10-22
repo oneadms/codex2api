@@ -104,6 +104,8 @@ func TestCodexHarvestWebsocketCookiePolicy(t *testing.T) {
 
 func newHarvestManagerTest(t *testing.T) (*CodexHarvestManager, *auth.Account) {
 	t.Helper()
+	previousPoolConfigured := auth.CodexTicketProxyPoolConfigured()
+	t.Cleanup(func() { auth.SetCodexTicketProxyPoolConfigured(previousPoolConfigured) })
 	withCodexTicketGate(t, "gpt-6-astra")
 	db, err := database.New("sqlite", filepath.Join(t.TempDir(), "harvest.db"))
 	if err != nil {

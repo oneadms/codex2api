@@ -68,6 +68,15 @@ func ResolveCodexEgressForContext(ctx context.Context, account *auth.Account, ta
 	if pinned := CodexTicketProxyForRequest(ctx, ""); pinned != "" {
 		return CodexEgress{Kind: CodexEgressProxy, URL: targetURL, ProxyURL: pinned, DialProxyURL: pinned, account: account, freshTicketNode: codexTicketFromContext(ctx).HarvestNodeID != ""}
 	}
+	if codexTicketFromContext(ctx) == nil {
+		if pinned, bound, fresh := CodexGatewayEgressFromContext(ctx); bound {
+			kind := CodexEgressProxy
+			if pinned == "" {
+				kind = CodexEgressDirect
+			}
+			return CodexEgress{Kind: kind, URL: targetURL, ProxyURL: pinned, DialProxyURL: pinned, account: account, freshTicketNode: fresh}
+		}
+	}
 	proxyURL = strings.TrimSpace(proxyURL)
 	cfg := ResinConfigFromContext(ctx)
 	if cfg != nil && AccountSupportsResin(account) {
@@ -95,6 +104,9 @@ func ResolveCodexEgressForContext(ctx context.Context, account *auth.Account, ta
 // resinCarriesEgressForContext 与出口解析使用相同的账号范围与请求配置快照。
 // TRAE CN 保留二开的 Resin 支持，其余中继型账号仍按代理链解析。
 func resinCarriesEgressForContext(ctx context.Context, account *auth.Account) bool {
+	if _, bound, _ := CodexGatewayEgressFromContext(ctx); bound && codexTicketFromContext(ctx) == nil {
+		return false
+	}
 	return CodexTicketProxyForRequest(ctx, "") == "" && IsResinEnabledForContext(ctx) && AccountSupportsResin(account)
 }
 
@@ -110,12 +122,13 @@ func (e CodexEgress) Client() *http.Client {
 	if e.freshTicketNode {
 		// Selector 切换后的请求必须重新 CONNECT，不能复用指向其他节点的 TCP 连接。
 		client, err := auth.BuildHTTPClientChecked(e.DialProxyURL)
-		if err == nil {
-			if transport, ok := client.Transport.(*http.Transport); ok {
-				transport.DisableKeepAlives = true
-			}
-			return client
+		if err != nil {
+			return &http.Client{Transport: codexEgressErrorTransport{err: err}}
 		}
+		if transport, ok := client.Transport.(*http.Transport); ok {
+			transport.DisableKeepAlives = true
+		}
+		return client
 	}
 	if e.client != nil {
 		return e.client
@@ -125,6 +138,12 @@ func (e CodexEgress) Client() *http.Client {
 	}
 	e.client = getPooledClient(e.account, e.DialProxyURL)
 	return e.client
+}
+
+type codexEgressErrorTransport struct{ err error }
+
+func (t codexEgressErrorTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, t.err
 }
 
 // ApplyHeaders 补齐链路要求的请求头:Resin 模式注入账号身份头,其余模式不改。
@@ -146,6 +165,15 @@ func ResolveCodexWebsocketEgress(account *auth.Account, wsURL, proxyURL string) 
 func ResolveCodexWebsocketEgressForContext(ctx context.Context, account *auth.Account, wsURL, proxyURL string) CodexEgress {
 	if pinned := CodexTicketProxyForRequest(ctx, ""); pinned != "" {
 		return CodexEgress{Kind: CodexEgressProxy, URL: wsURL, ProxyURL: pinned, DialProxyURL: pinned, account: account}
+	}
+	if codexTicketFromContext(ctx) == nil {
+		if pinned, bound, _ := CodexGatewayEgressFromContext(ctx); bound {
+			kind := CodexEgressProxy
+			if pinned == "" {
+				kind = CodexEgressDirect
+			}
+			return CodexEgress{Kind: kind, URL: wsURL, ProxyURL: pinned, DialProxyURL: pinned, account: account}
+		}
 	}
 	proxyURL = strings.TrimSpace(proxyURL)
 	cfg := ResinConfigFromContext(ctx)
@@ -179,6 +207,12 @@ func CodexDialProxyURL(account *auth.Account, proxyURL string) string {
 
 // CodexDialProxyURLForContext 与请求的 URL 改写使用同一份 Resin 配置快照。
 func CodexDialProxyURLForContext(ctx context.Context, account *auth.Account, proxyURL string) string {
+	if ticket := CodexTicketProxyForRequest(ctx, ""); ticket != "" {
+		return ticket
+	}
+	if pinned, bound, _ := CodexGatewayEgressFromContext(ctx); bound && codexTicketFromContext(ctx) == nil {
+		return pinned
+	}
 	if resinCarriesEgressForContext(ctx, account) {
 		return ""
 	}

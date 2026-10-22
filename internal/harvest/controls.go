@@ -38,7 +38,7 @@ type CodexHarvestBound struct {
 
 type CodexHarvestControls struct {
 	Strategy          string            `json:"strategy"`
-	ProxyPoolID       int64             `json:"proxy_pool_id"`
+	ProxyIDs          []int64           `json:"proxy_ids"`
 	EdgeIP            string            `json:"edge_ip"`
 	Transport         string            `json:"transport"`
 	Version           int               `json:"version"`
@@ -173,8 +173,12 @@ func NewCodexHarvestService(nodes CodexHarvestNodeRepository, settings SettingRe
 
 func ValidateCodexHarvestControls(v CodexHarvestControls) error {
 	normalizeCodexHarvestControls(&v)
-	if v.ProxyPoolID < 0 {
-		return errors.New("代理池 ID 无效")
+	seen := make(map[int64]bool, len(v.ProxyIDs))
+	for _, id := range v.ProxyIDs {
+		if id <= 0 || seen[id] {
+			return errors.New("采票代理 ID 必须是唯一的正整数")
+		}
+		seen[id] = true
 	}
 	if v.Strategy != "fixed" && v.Strategy != "refresh" {
 		return errors.New("票据策略必须是 fixed 或 refresh")
@@ -197,11 +201,16 @@ func ValidateCodexHarvestControls(v CodexHarvestControls) error {
 	return nil
 }
 
+func cloneCodexHarvestControls(v CodexHarvestControls) CodexHarvestControls {
+	v.ProxyIDs = append([]int64{}, v.ProxyIDs...)
+	return v
+}
+
 func (s *CodexHarvestService) Controls(ctx context.Context) (CodexHarvestControls, bool, error) {
 	s.configMu.Lock()
 	defer s.configMu.Unlock()
 	if time.Now().Before(s.loadedUntil) {
-		return s.current, s.configured, s.configErr
+		return cloneCodexHarvestControls(s.current), s.configured, s.configErr
 	}
 	query, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -210,7 +219,7 @@ func (s *CodexHarvestService) Controls(ctx context.Context) (CodexHarvestControl
 		err = nil
 		raw = ""
 	}
-	v := s.defaults
+	v := cloneCodexHarvestControls(s.defaults)
 	if err == nil && raw != "" {
 		err = json.Unmarshal([]byte(raw), &v)
 		if err == nil {
@@ -228,6 +237,7 @@ func (s *CodexHarvestService) Controls(ctx context.Context) (CodexHarvestControl
 }
 
 func (s *CodexHarvestService) SaveControls(ctx context.Context, v CodexHarvestControls) error {
+	v = cloneCodexHarvestControls(v)
 	normalizeCodexHarvestControls(&v)
 	if err := ValidateCodexHarvestControls(v); err != nil {
 		return err
@@ -273,7 +283,7 @@ func (s *CodexHarvestService) Wake() <-chan struct{} { return s.wake }
 
 func (s *CodexHarvestService) Snapshot(ctx context.Context) CodexHarvestControlSnapshot {
 	v, configured, err := s.Controls(ctx)
-	out := CodexHarvestControlSnapshot{Settings: v, Configured: configured, Defaults: s.defaults,
+	out := CodexHarvestControlSnapshot{Settings: v, Configured: configured, Defaults: cloneCodexHarvestControls(s.defaults),
 		Presets: CodexHarvestSpeedPresets(), Bounds: CodexHarvestSpeedBounds(), Runtime: s.Runtime()}
 	if err != nil {
 		out.SettingsError = "采票设置读取失败，继续使用上次有效设置"
