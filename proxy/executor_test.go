@@ -1677,15 +1677,34 @@ func TestExecuteOpenAIResponsesRequestRetriesForbiddenErrorOfficialClients(t *te
 
 func TestCodexTransportModeDefaultsToStandard(t *testing.T) {
 	t.Setenv("CODEX_TRANSPORT_MODE", "")
-	if _, ok := newCodexTransport("").(*http.Transport); !ok {
-		t.Fatalf("newCodexTransport default = %T, want *http.Transport", newCodexTransport(""))
+	if _, ok := newCodexTransport("", codexTransportModeFromEnv()).(*http.Transport); !ok {
+		t.Fatalf("newCodexTransport default = %T, want *http.Transport", newCodexTransport("", codexTransportModeFromEnv()))
 	}
 }
 
 func TestCodexTransportModeCanUseUTLSChrome(t *testing.T) {
 	t.Setenv("CODEX_TRANSPORT_MODE", "utls_chrome")
-	if _, ok := newCodexTransport("").(*utlsRoundTripper); !ok {
-		t.Fatalf("newCodexTransport utls_chrome = %T, want *utlsRoundTripper", newCodexTransport(""))
+	if _, ok := newCodexTransport("", codexTransportModeFromEnv()).(*utlsRoundTripper); !ok {
+		t.Fatalf("newCodexTransport utls_chrome = %T, want *utlsRoundTripper", newCodexTransport("", codexTransportModeFromEnv()))
+	}
+}
+
+// 中转账号的上游是第三方网关，不需要 Chrome 指纹，且常只支持 HTTP/1.1。
+// 开启 utls_chrome 后它们必须仍走标准 transport，否则会出现
+// "frame too large ... looked like an HTTP/1.1 header" 的协议错配。
+func TestCodexTransportModeSkipsUTLSForRelayAccounts(t *testing.T) {
+	t.Setenv("CODEX_TRANSPORT_MODE", "utls_chrome")
+	relay := &auth.Account{DBID: 4242, UpstreamType: auth.UpstreamOpenAIResponses, BaseURL: "https://relay.example", APIKey: "k"}
+	if got := codexTransportModeForAccount(relay); got != codexTransportModeStandard {
+		t.Fatalf("relay account transport mode = %q, want %q", got, codexTransportModeStandard)
+	}
+	if _, ok := newCodexTransport("", codexTransportModeForAccount(relay)).(*http.Transport); !ok {
+		t.Fatalf("relay account transport = %T, want *http.Transport", newCodexTransport("", codexTransportModeForAccount(relay)))
+	}
+	// Codex OAuth 账号不受影响，仍按全局开关走 uTLS。
+	oauth := &auth.Account{DBID: 4243, AccessToken: "token"}
+	if got := codexTransportModeForAccount(oauth); got != codexTransportModeUTLSChrome {
+		t.Fatalf("oauth account transport mode = %q, want %q", got, codexTransportModeUTLSChrome)
 	}
 }
 

@@ -3,7 +3,9 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -89,7 +91,62 @@ type utlsRoundTripper struct {
 	mu          sync.Mutex
 	connections map[string]*utlsConn  // HTTP/2 连接池，按 host 索引
 	pending     map[string]*sync.Cond // 防止重复连接创建
-	dialer      xproxy.Dialer         // 底层拨号器（支持代理）
+	// http1Hosts 记录「TLS 握手后没有协商出 h2」的上游。这类上游（典型是只
+	// 说 HTTP/1.1 的中转网关）必须走 HTTP/1.1，否则我们会按 h2 发 preface，
+	// 对端把 HTTP/1.1 文本响应回过来，h2 客户端读帧头时报
+	// "frame too large ... looked like an HTTP/1.1 header"。
+	http1Hosts map[string]struct{}
+	dialer     xproxy.Dialer // 底层拨号器（支持代理）
+	// fallback 承载 HTTP/1.1 上游的请求。它复用同一个 dialer（代理设置一致），
+	// 只是换成标准库的 TLS + h1 编解码：这些上游通常是不做 TLS 指纹检测的
+	// 中转网关，保住「能通」比保住 Chrome 指纹更重要。
+	fallback *http.Transport
+}
+
+// errUTLSHTTP1Only 表示上游在 TLS 握手时没有协商出 h2（ALPN 为空或 http/1.1）。
+// 它是内部信号，不直接暴露给调用方：RoundTrip 收到后会改用 fallback 重发。
+var errUTLSHTTP1Only = errors.New("utls: 上游未协商 HTTP/2")
+
+// isUTLSHTTP1Only 报告错误是否代表「该上游只能走 HTTP/1.1」。
+func isUTLSHTTP1Only(err error) bool {
+	return errors.Is(err, errUTLSHTTP1Only)
+}
+
+// utlsNegotiatedHTTP2 判断 TLS 握手协商结果能否承载 HTTP/2。
+//
+// 只认 ALPN 明确给出的 h2。空值意味着对端不支持 ALPN（或只回 http/1.1），
+// 此时按 h2 发帧会让对端把我们的二进制 preface 当成垃圾、回一个 HTTP/1.1
+// 文本响应，客户端读帧头时报 frame too large。
+func utlsNegotiatedHTTP2(state utls.ConnectionState) bool {
+	return state.NegotiatedProtocol == http2.NextProtoTLS
+}
+
+// utlsHTTP1FallbackTransport 构造 HTTP/1.1 回退 transport。
+// 走与 uTLS 相同的拨号器（代理 CONNECT / SOCKS5 语义一致），TLS 交给标准库。
+func utlsHTTP1FallbackTransport(dialer xproxy.Dialer) *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = 4
+	transport.IdleConnTimeout = codexUTLSIdleConnTimeout
+	transport.ResponseHeaderTimeout = 5 * time.Minute
+	// 明确不要 h2：这条路径存在的意义就是服务只支持 HTTP/1.1 的上游。
+	transport.ForceAttemptHTTP2 = false
+	transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	}
+	transport.TLSClientConfig.ClientSessionCache = codexTLSSessionCache
+	// 回退路径自己完成 CONNECT/SOCKS 隧道与 TLS，故不使用 Proxy 字段。
+	transport.Proxy = nil
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		type contextDialer interface {
+			DialContext(context.Context, string, string) (net.Conn, error)
+		}
+		if cd, ok := dialer.(contextDialer); ok {
+			return cd.DialContext(ctx, network, addr)
+		}
+		return dialer.Dial(network, addr)
+	}
+	return transport
 }
 
 // utlsSessionCache 在所有 uTLS 连接间共享 TLS 会话缓存，让重连走 TLS resumption。
@@ -114,7 +171,9 @@ func NewUTLSTransport(proxyURL string) http.RoundTripper {
 	return &utlsRoundTripper{
 		connections: make(map[string]*utlsConn),
 		pending:     make(map[string]*sync.Cond),
+		http1Hosts:  make(map[string]struct{}),
 		dialer:      dialer,
+		fallback:    utlsHTTP1FallbackTransport(dialer),
 	}
 }
 
@@ -246,6 +305,13 @@ func buildSOCKS5Dialer(u *url.URL) (xproxy.Dialer, error) {
 func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*utlsConn, error) {
 	t.mu.Lock()
 
+	// 已判定只能走 HTTP/1.1 的上游不再尝试 h2：每次重连都要多花一次 TLS
+	// 握手才发现不支持，且失败后连接会被丢弃。
+	if _, ok := t.http1Hosts[host]; ok {
+		t.mu.Unlock()
+		return nil, errUTLSHTTP1Only
+	}
+
 	// 检查是否已有可用连接
 	if entry, ok := t.connections[host]; ok && entry.conn.CanTakeNewRequest() {
 		entry.touch()
@@ -258,6 +324,12 @@ func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*utlsConn, 
 		// 等待其他 goroutine 完成（循环重试，避免虚假唤醒）
 		for {
 			cond.Wait()
+			// 建连者可能刚得出「该 host 只说 HTTP/1.1」的结论：等待者必须
+			// 跟着走 h1 回退，而不是自己再握一次手重蹈覆辙。
+			if _, h1 := t.http1Hosts[host]; h1 {
+				t.mu.Unlock()
+				return nil, errUTLSHTTP1Only
+			}
 			// 再次检查连接是否可用
 			if entry, ok := t.connections[host]; ok && entry.conn.CanTakeNewRequest() {
 				entry.touch()
@@ -287,6 +359,16 @@ func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*utlsConn, 
 	cond.Broadcast()
 
 	if err != nil {
+		// 记录「这个上游只说 HTTP/1.1」，后续请求直接走 h1 回退路径，
+		// 不再每次都先做一轮注定失败的 h2 握手。
+		if isUTLSHTTP1Only(err) {
+			if _, known := t.http1Hosts[host]; !known {
+				t.http1Hosts[host] = struct{}{}
+				// 只在这个 host 首次被判定时记一次：h1 上游是常态（中转网关），
+				// 每条请求都打一行日志会把日志刷满。
+				log.Printf("[UTLS] 上游未协商 h2，改用 HTTP/1.1: host=%s", host)
+			}
+		}
 		return nil, err
 	}
 
@@ -332,9 +414,13 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	}
 
 	// 2. 配置 TLS（共享会话缓存，握手走 resumption 降低重连成本）
+	// NextProtos 显式声明与 Chrome 一致的 ALPN 候选：HelloChrome_Auto 的
+	// 指纹扩展里已带同样的列表，这里再写一遍是为了让协商结果可预期——
+	// 握手后我们据此判断该 host 能否走 h2。
 	tlsConfig := &utls.Config{
 		ServerName:         host,
 		ClientSessionCache: utlsSessionCache,
+		NextProtos:         []string{http2.NextProtoTLS, "http/1.1"},
 	}
 
 	// 3. 使用 utls 握手（Chrome 指纹）
@@ -349,7 +435,18 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 		return nil, fmt.Errorf("TLS 握手失败: %w", err)
 	}
 
-	// 4. 创建 HTTP/2 连接
+	// 4. 必须先看 ALPN 协商结果再决定编解码协议。
+	//
+	// 修复前的 bug：无条件按 HTTP/2 发 preface。只支持 HTTP/1.1 的上游
+	// （典型是 new-api 系中转网关，如 ddl.ddpapi.top）会把 HTTP/1.1 文本响应
+	// 回过来，h2 客户端按帧头解析时报
+	// "http2: frame too large, note that the frame header looked like an HTTP/1.1 header"。
+	if !utlsNegotiatedHTTP2(tlsConn.ConnectionState()) {
+		_ = conn.Close()
+		return nil, errUTLSHTTP1Only
+	}
+
+	// 5. 创建 HTTP/2 连接
 	// 启用保活 PING（ReadIdleTimeout/PingTimeout）：uTLS 自管连接池，池化连接
 	// 被代理/NAT 静默掐断后无法被感知，请求会挂到 TCP 重传超时。开启后空闲连接
 	// 主动发 PING，探测失败即在读循环里报错，触发上层从池中剔除并重建。
@@ -388,6 +485,11 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	entry, err := t.getOrCreateConnection(hostname, addr)
 	AddWsAcquireDuration(req.Context(), time.Since(acquireStart))
 	if err != nil {
+		// 上游只支持 HTTP/1.1（中转网关）。改用 h1 回退 transport 重发，
+		// 而不是把 "frame too large" 这类协议错配错误抛给上层。
+		if isUTLSHTTP1Only(err) {
+			return t.fallback.RoundTrip(req)
+		}
 		return nil, err
 	}
 
@@ -439,6 +541,10 @@ func (t *utlsRoundTripper) closeIdleConnections(grace time.Duration) {
 	for _, conn := range reclaimed {
 		_ = conn.Close()
 	}
+	// HTTP/1.1 回退路径也持有连接（issue #446 的同类泄漏点），一并回收。
+	if t.fallback != nil {
+		t.fallback.CloseIdleConnections()
+	}
 }
 
 // CloseAllConnections 摘除并关闭该 transport 持有的全部连接。
@@ -465,6 +571,11 @@ func (t *utlsRoundTripper) CloseAllConnections() {
 			continue
 		}
 		_ = entry.conn.Close()
+	}
+	// 回退 transport 的连接同样必须收口，否则一次性 transport 的 h1 连接
+	// 会随 entry 一起失去持有者而泄漏。
+	if t.fallback != nil {
+		t.fallback.CloseIdleConnections()
 	}
 }
 

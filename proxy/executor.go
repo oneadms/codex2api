@@ -205,6 +205,19 @@ func clientPoolKey(account *auth.Account, proxyURL, transportMode string) string
 	return fmt.Sprintf("%d|%s|%s", account.ID(), strings.TrimSpace(proxyURL), transportMode)
 }
 
+// codexTransportModeForAccount 返回该账号实际使用的 transport 模式。
+//
+// 中转账号（openai_responses / Grok / Antigravity / TraeCN / Claude）的上游是
+// 第三方网关，不是 chatgpt.com：既没有需要绕过的 TLS 指纹检测，还常常只支持
+// HTTP/1.1。对它们启用 Chrome uTLS 只会换来协议错配（"frame too large ...
+// looked like an HTTP/1.1 header"），所以恒走标准 transport。
+func codexTransportModeForAccount(account *auth.Account) string {
+	if account != nil && account.IsRelayStyle() {
+		return codexTransportModeStandard
+	}
+	return codexTransportModeFromEnv()
+}
+
 func shouldRecyclePooledClient(err error) bool {
 	if err == nil {
 		return false
@@ -217,7 +230,7 @@ func shouldRecyclePooledClient(err error) bool {
 }
 
 func recyclePooledClient(account *auth.Account, proxyURL string) {
-	key := clientPoolKey(account, proxyURL, codexTransportModeFromEnv())
+	key := clientPoolKey(account, proxyURL, codexTransportModeForAccount(account))
 	if v, ok := clientPool.LoadAndDelete(key); ok {
 		releaseEvictedClient(v.(*poolEntry).client)
 	}
@@ -262,8 +275,8 @@ func newCodexStandardTransport(proxyURL string) http.RoundTripper {
 	return transport
 }
 
-func newCodexTransport(proxyURL string) http.RoundTripper {
-	switch codexTransportModeFromEnv() {
+func newCodexTransport(proxyURL, transportMode string) http.RoundTripper {
+	switch transportMode {
 	case codexTransportModeUTLSChrome:
 		return NewUTLSTransport(proxyURL)
 	default:
@@ -302,7 +315,7 @@ func logCodexFingerprintDebug(kind string, account *auth.Account, proxyURL strin
 	log.Printf("[CodexFingerprint] kind=%s account_id=%d transport_mode=%s proxy_enabled=%t resin_enabled=%t official_client=%t ua_hash=%s originator=%s session_hash=%s stainless_present=%t",
 		kind,
 		accountID,
-		codexTransportModeFromEnv(),
+		codexTransportModeForAccount(account),
 		strings.TrimSpace(proxyURL) != "",
 		headers.Get("X-Resin-Account") != "",
 		IsCodexOfficialClientByHeaders(userAgent, originator),
@@ -318,7 +331,7 @@ func logCodexFingerprintDebug(kind string, account *auth.Account, proxyURL strin
 
 // getPooledClient 获取或创建连接池中的 HTTP Client（按账号隔离，TTL 自动淘汰）
 func getPooledClient(account *auth.Account, proxyURL string) *http.Client {
-	transportMode := codexTransportModeFromEnv()
+	transportMode := codexTransportModeForAccount(account)
 	key := clientPoolKey(account, proxyURL, transportMode)
 	if v, ok := clientPool.Load(key); ok {
 		entry := v.(*poolEntry)
@@ -326,7 +339,7 @@ func getPooledClient(account *auth.Account, proxyURL string) *http.Client {
 		return entry.client
 	}
 
-	transport := newCodexTransport(proxyURL)
+	transport := newCodexTransport(proxyURL, transportMode)
 
 	entry := &poolEntry{
 		createdAt: time.Now().UnixNano(),

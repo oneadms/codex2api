@@ -112,7 +112,7 @@ func (f claudeBoundaryRoundTripper) RoundTrip(req *http.Request) (*http.Response
 
 func installClaudeBoundaryTransport(t *testing.T, account *auth.Account, transport claudeBoundaryRoundTripper) {
 	t.Helper()
-	key := clientPoolKey(account, "", codexTransportModeFromEnv())
+	key := clientPoolKey(account, "", codexTransportModeForAccount(account))
 	entry := &poolEntry{client: &http.Client{Transport: transport}}
 	previous, existed := clientPool.Load(key)
 	clientPool.Store(key, entry)
