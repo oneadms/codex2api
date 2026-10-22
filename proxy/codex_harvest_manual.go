@@ -143,7 +143,7 @@ func (m *CodexHarvestManager) runManual(ctx context.Context, account *auth.Accou
 		}
 		wait := time.Duration(r.ProbeIntervalSeconds) * time.Second
 		if event.HTTPStatus == 429 {
-			wait = time.Duration(r.RateLimitCooldownSeconds) * time.Second
+			wait = time.Duration(max(r.RateLimitCooldownSeconds, event.RetryAfterSeconds)) * time.Second
 		}
 		if event.HTTPStatus == 401 || event.HTTPStatus == 403 || event.Result == "persistence_error" {
 			return

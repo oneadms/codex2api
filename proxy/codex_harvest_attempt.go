@@ -73,9 +73,19 @@ func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account
 		return
 	}
 	selection, reason := (*harvestSelection)(nil), "rotation"
-	seed, releaseSeed := m.reuseCandidate(ctx, account, model, controls, budget, tried)
+	seed, releaseSeed := (*auth.CodexTicket)(nil), func() {}
+	if source != "manual" {
+		seed, releaseSeed = m.reuseCandidate(ctx, account, model, controls, budget, tried)
+	}
 	defer releaseSeed()
+	identity := gatewayIdentity(account)
+	var reuseRevision string
 	if seed != nil {
+		reuseRevision = seed.ReuseRevision
+		if !m.GatewayReuseCurrent(ctx, reuseRevision, account.ID()) {
+			event.Result = "cancelled"
+			return
+		}
 		ctx = context.WithValue(ctx, harvestSeedKey{}, seed)
 		proxyURL, reason = seed.HarvestProxyURL, "reuse"
 		event.NodeID, event.NodeName = seed.HarvestNodeID, seed.HarvestNodeName
@@ -123,6 +133,9 @@ func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account
 		if wait.Err() != nil {
 			return wait.Err()
 		}
+		if gatewayIdentity(m.Store.FindByID(account.ID())) != identity || (seed != nil && (!m.GatewayReuseCurrent(wait, reuseRevision, account.ID()) || !seed.Valid(time.Now(), 780))) {
+			return fmt.Errorf("账号身份、来源票或借票配置已变化")
+		}
 		currentScope, err := m.Scope(wait)
 		if err != nil || !auth.CodexTicketGateEnabled() || !harvestAccountEligible(account, currentScope, true) {
 			return fmt.Errorf("采票范围变化、账号忙碌或采票已关闭")
@@ -131,16 +144,29 @@ func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account
 		return nil
 	})
 	ctx = context.WithValue(ctx, harvestProtocolKey{}, controls.Transport)
-	ctx = context.WithValue(ctx, harvestEdgeKey{}, controls.EdgeIP)
+	edge := controls.EdgeIP
+	if seed != nil {
+		edge = seed.EdgeIP
+	}
+	ctx = context.WithValue(ctx, harvestEdgeKey{}, edge)
 	res := probeCodexTicketWithRefresh(ctx, m.Store, account, model, proxyURL, time.Duration(controls.Speed.AttemptTimeoutSeconds)*time.Second, budget)
 	event.HTTPStatus, event.Length = res.HTTPStatus, len(res.State)
 	if res.ObservedLength > 0 {
 		event.Length = res.ObservedLength
 	}
 	event.Result = res.Result
+	if res.Terminal {
+		event.Result = "terminal_error"
+	}
+	event.RetryAfterSeconds = int(res.RetryAfter.Seconds())
 	if ctx.Err() != nil {
 		event.Result = "cancelled"
 		event.Message = "任务已停止"
+		return
+	}
+	if res.Result == "success" && (gatewayIdentity(m.Store.FindByID(account.ID())) != identity || (seed != nil && !m.GatewayReuseCurrent(ctx, reuseRevision, account.ID()))) {
+		event.Result = "cancelled"
+		event.Message = "账号身份或借票配置已变化"
 		return
 	}
 	if res.Result == "success" {
@@ -170,7 +196,7 @@ func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account
 	}
 	summary := &auth.CodexTicketProbeSummary{Result: event.Result, HTTPStatus: res.HTTPStatus, CheckedAt: started}
 	if event.Result != "success" {
-		next := time.Now().Add(time.Duration(controls.Speed.CooldownSeconds) * time.Second)
+		next := time.Now().Add(max(time.Duration(controls.Speed.CooldownSeconds)*time.Second, res.RetryAfter))
 		summary.NextProbeAt = &next
 	}
 	m.Store.PublishCodexTicketProbe(account.ID(), model, summary)

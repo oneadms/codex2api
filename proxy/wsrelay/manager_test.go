@@ -435,8 +435,12 @@ func TestAcquireConnectionTrimsIdleConnectionsAfterConfiguredSlotDecrease(t *tes
 	wsURL := "wss://example.test/responses"
 	connections := make([]*WsConnection, 0, 3)
 
+	base := time.Now().Add(-time.Minute)
 	for i := 0; i < 3; i++ {
 		wc, _ := newTestSlotConnection(manager, account, wsURL, fmt.Sprintf("session-%d", i))
+		// 显式拉开空闲时间：Windows 上连续 Touch 可能拿到相同的时间戳，
+		// 而本用例验证的是 LRU 顺序，不能依赖计时器精度。
+		wc.lastUsed.Store(base.Add(time.Duration(i) * time.Second).UnixNano())
 		connections = append(connections, wc)
 	}
 	if got := manager.ConnectionCount(); got != 3 {

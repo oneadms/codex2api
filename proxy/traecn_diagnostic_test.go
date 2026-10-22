@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -49,7 +50,9 @@ func TestTraeCNDiagnosticCapturesThreeStages(t *testing.T) {
 			t.Fatalf("credential leaked in %s", file)
 		}
 		stat, _ := os.Stat(filepath.Join(capture, file))
-		if stat.Mode().Perm() != 0600 {
+		// Windows does not model POSIX permission bits; the capture directory
+		// is still created private via the same code path.
+		if runtime.GOOS != "windows" && stat.Mode().Perm() != 0600 {
 			t.Fatalf("permissions for %s: %v", file, stat.Mode())
 		}
 		switch file {

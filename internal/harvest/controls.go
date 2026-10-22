@@ -37,12 +37,13 @@ type CodexHarvestBound struct {
 }
 
 type CodexHarvestControls struct {
-	ReuseSourceAccountID int64             `json:"reuse_source_account_id"`
-	EdgeIP               string            `json:"edge_ip"`
-	Transport            string            `json:"transport"`
-	Version              int               `json:"version"`
-	NodeMemoryEnabled    bool              `json:"node_memory_enabled"`
-	Speed                CodexHarvestSpeed `json:"speed"`
+	Strategy          string            `json:"strategy"`
+	ProxyPoolID       int64             `json:"proxy_pool_id"`
+	EdgeIP            string            `json:"edge_ip"`
+	Transport         string            `json:"transport"`
+	Version           int               `json:"version"`
+	NodeMemoryEnabled bool              `json:"node_memory_enabled"`
+	Speed             CodexHarvestSpeed `json:"speed"`
 }
 
 type CodexHarvestRuntime struct {
@@ -150,6 +151,9 @@ func normalizeCodexHarvestControls(v *CodexHarvestControls) {
 	if v == nil {
 		return
 	}
+	if v.Strategy == "" {
+		v.Strategy = "refresh"
+	}
 	if v.Transport == "" {
 		v.Transport = "sse"
 	}
@@ -169,8 +173,11 @@ func NewCodexHarvestService(nodes CodexHarvestNodeRepository, settings SettingRe
 
 func ValidateCodexHarvestControls(v CodexHarvestControls) error {
 	normalizeCodexHarvestControls(&v)
-	if v.ReuseSourceAccountID < 0 {
-		return errors.New("来源账号 ID 无效")
+	if v.ProxyPoolID < 0 {
+		return errors.New("代理池 ID 无效")
+	}
+	if v.Strategy != "fixed" && v.Strategy != "refresh" {
+		return errors.New("票据策略必须是 fixed 或 refresh")
 	}
 	if err := ValidateEdgeIP(v.EdgeIP); err != nil {
 		return err

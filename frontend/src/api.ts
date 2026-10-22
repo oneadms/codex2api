@@ -1,6 +1,6 @@
 import { qualityTestFilterQuery, type QualityTestJob, type QualityTestJobsFilter, type QualityTestJobsResponse, type QualityTestPrompt } from './lib/qualityTest.ts'
 import type { DiagnosticSettings, DiagnosticStatus, DiagnosticHistoryItem, DiagnosticIncident, DiagnosticReport, diagnosticPayload } from './lib/diagnostics'
-import type { HarvestSnapshot, HarvestControls, HarvestControlSnapshot, HarvestScope, HarvestPage, HarvestNodeRecord, HarvestEvent, HarvestManualRequest, HarvestJob, MihomoStatus, MihomoAction } from './lib/codexHarvest'
+import type { HarvestSnapshot, HarvestControls, HarvestControlSnapshot, HarvestScope, HarvestPage, HarvestNodeRecord, HarvestEvent, HarvestManualRequest, HarvestJob, MihomoStatus, MihomoAction, GatewaySettings, GatewayRuntime, GatewayTestResult, GatewayHistoryRecord } from './lib/codexHarvest'
 import type {
   AccountEventTrendPoint,
   AccountPortalAuthURLResponse,
@@ -1161,6 +1161,15 @@ export const api = {
   kickHarvest: () => request('/codex-harvest/kick', { method: 'POST' }),
   getHarvestNodes: (offset = 0) => request<HarvestPage<HarvestNodeRecord>>(`/codex-harvest/nodes?offset=${offset}&limit=25`),
   resetHarvestNodes: (id: number) => request(`/codex-harvest/nodes/${id}`, { method: 'DELETE' }),
+  // 网关借票：GET 只读配置，PUT 带 revision 乐观锁（409 时提示刷新后放弃本地修改）。
+  getCodexGateway: () => request<GatewaySettings>('/codex-harvest/gateway'),
+  updateCodexGateway: (body: GatewaySettings) => request<GatewaySettings>('/codex-harvest/gateway', { method: 'PUT', body: JSON.stringify(body) }),
+  // /gateway/status 只返回缓存路由快照，轮询不会触发任何上游探测。
+  getCodexGatewayStatus: () => request<GatewayRuntime>('/codex-harvest/gateway/status'),
+  testCodexGateway: (action: 'prepare' | 'verify' | 'ws', account_id: number) =>
+    request<GatewayTestResult>('/codex-harvest/gateway/test', { method: 'POST', body: JSON.stringify({ action, account_id }) }),
+  getCodexGatewayHistory: (offset = 0, limit = 25) =>
+    request<HarvestPage<GatewayHistoryRecord>>(`/codex-harvest/gateway/history?offset=${offset}&limit=${limit}`),
   getHarvestEvents: (offset = 0, accountID = 0, jobID = '') => request<HarvestPage<HarvestEvent>>(`/codex-harvest/events?offset=${offset}&limit=25&account_id=${accountID}&job_id=${encodeURIComponent(jobID)}`),
   startManualHarvest: (body: HarvestManualRequest) => request<HarvestJob>('/codex-harvest/manual', { method: 'POST', body: JSON.stringify(body) }),
   stopManualHarvest: (id: string) => request(`/codex-harvest/manual/${encodeURIComponent(id)}`, { method: 'DELETE' }),

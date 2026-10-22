@@ -201,7 +201,9 @@ func applyCodexTurnStateInjectionHeader(ctx context.Context, headers http.Header
 		headers.Set(codexTurnStateHeader, value)
 		if ticket := codexTicketFromContext(ctx); ticket != nil {
 			headers.Set("Cookie", ticket.Cookie)
-			applyCodexTicketSession(headers, ticket.HarvestSessionID)
+			if ticket.Length != 780 {
+				applyCodexTicketSession(headers, ticket.HarvestSessionID)
+			}
 		}
 	}
 }

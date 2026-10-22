@@ -55,7 +55,9 @@ func TestCodexHarvest780Continuation(t *testing.T) {
 				}
 				issued := state
 				if n == 2 && tc.change == "state" {
-					issued = testTicketState(time.Now().Add(-time.Second), 33)
+					// 固定在过去，保证与首轮 state 不同；用 time.Now() 减去短间隔在
+					// 慢机器上可能落进同一个 Unix 秒，测试会随机退化成成功路径。
+					issued = testTicketState(time.Unix(1700000000, 0), 33)
 				}
 				w.Header().Set(codexTurnStateHeader, issued)
 				if n == 1 || tc.change == "cookie" || tc.change == "partial" {

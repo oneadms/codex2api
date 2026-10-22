@@ -33,6 +33,8 @@ type CodexHarvestManager struct {
 	cursor      uint64
 	paceMu      sync.Mutex
 	lastRequest time.Time
+	gatewayOnce sync.Once
+	gateway     *codexGatewayManager
 }
 
 var codexHarvester atomic.Pointer[CodexHarvestManager]
@@ -47,6 +49,7 @@ func ConfigureCodexHarvest(db *database.DB, store *auth.Store, dataDir string) *
 		jobs: map[string]*harvest.ManualJob{}, cancels: map[string]context.CancelFunc{}}
 	codexHarvester.Store(m)
 	registerCodexTicketFeedback(db, store)
+	m.gatewayManager().start()
 	return m
 }
 
@@ -96,11 +99,11 @@ func harvestAccountEligible(account *auth.Account, scope harvest.Scope, idle boo
 		for _, id := range scope.GroupIDs {
 			groups[id] = struct{}{}
 		}
-		if !account.InAnyGroup(groups) {
+		if !account.HarvestInGroups(groups) {
 			return false
 		}
 	}
-	return scope.AccountPolicy != "schedulable_only" || account.IsAvailable()
+	return scope.AccountPolicy != "schedulable_only" || account.IsAvailable() || account.HarvestOwnsPause()
 }
 
 func (m *CodexHarvestManager) ControlSnapshot(ctx context.Context) harvest.CodexHarvestControlSnapshot {
@@ -185,8 +188,16 @@ func (m *CodexHarvestManager) RunRound(ctx context.Context) {
 					auth.PublishCodexTicketToSharedPool(account, ticket)
 					refresh := time.Duration(controls.Speed.RefreshBeforeSeconds) * time.Second
 					// Cookie 的有效窗口比上游预设短，至少保留一半窗口用于正常业务。
-					refresh = min(refresh, auth.CodexTicketCookieFreshness/2)
-					if !ticket.NeedsRefresh(now, refresh) && ticket.Standby.Valid(now, ticket.Length) && (ticket.Standby.Transport == "" || ticket.Standby.Transport == controls.Transport) {
+					if ticket.Length == 780 {
+						refresh = min(refresh, 60*time.Second)
+					}
+					if controls.Strategy == "fixed" {
+						refresh = 0
+					}
+					if !ticket.NeedsRefresh(now, refresh) {
+						continue
+					}
+					if ticket.Standby.Valid(now, ticket.Length) && !ticket.Standby.NeedsRefresh(now, refresh) && ticket.Standby.Transport == controls.Transport {
 						continue
 					}
 				}
@@ -197,7 +208,10 @@ func (m *CodexHarvestManager) RunRound(ctx context.Context) {
 				for attempt := 0; attempt < controls.Speed.MaxNodeAttempts && budget > 0; attempt++ {
 					event := m.attempt(ctx, account, model, settings.HarvestProxyURL, controls, &budget, tried, nil, "auto", "", attempt+1)
 					m.Controls.SetRuntime(func(r *harvest.CodexHarvestRuntime) { r.RequestsUsed = r.RequestBudget - budget })
-					if event.Result == "success" || event.Result == "account_error" || event.Result == "skipped" || event.Result == "cancelled" || event.Result == "persistence_error" {
+					if event.Result == "account_error" {
+						return
+					}
+					if event.Result == "success" || event.Result == "terminal_error" || event.Result == "skipped" || event.Result == "cancelled" || event.Result == "persistence_error" {
 						break
 					}
 					if !harvestWait(ctx, time.Duration(controls.Speed.ProbeIntervalSeconds)*time.Second) {

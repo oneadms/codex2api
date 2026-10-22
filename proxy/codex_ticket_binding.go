@@ -9,7 +9,7 @@ import (
 )
 
 func CodexTicketSessionForRequest(ctx context.Context) string {
-	if ticket := codexTicketFromContext(ctx); ticket != nil {
+	if ticket := codexTicketFromContext(ctx); ticket != nil && ticket.Length != 780 {
 		return ticket.HarvestSessionID
 	}
 	return ""
@@ -45,7 +45,7 @@ func CodexTicketProxyForRequest(ctx context.Context, fallback string) string {
 // WS 的 turn-state 保留在帧内，以便同一连接上的后续请求更新票据。
 func ApplyCodexTicketRequestBody(ctx context.Context, body []byte, websocket bool) []byte {
 	ticket := codexTicketFromContext(ctx)
-	if ticket == nil || ticket.HarvestSessionID == "" {
+	if ticket == nil || ticket.Length == 780 || ticket.HarvestSessionID == "" {
 		return body
 	}
 	for _, key := range []string{"prompt_cache_key", "client_metadata", "device_id"} {

@@ -629,6 +629,7 @@ func (m *Manager) config(s saved) ([]byte, error) {
 		groups = append(groups, map[string]any{"name": collectionGroup(lane), "type": "select", "proxies": collectNames})
 		listeners = append(listeners, map[string]any{"name": collectionGroup(lane), "type": "mixed", "listen": "127.0.0.1", "port": collectPort + lane, "proxy": collectionGroup(lane)})
 	}
+	groups, listeners = appendGatewayListeners(groups, listeners, collectNames)
 	return json.Marshal(map[string]any{"mixed-port": 3101, "allow-lan": false, "bind-address": "127.0.0.1", "mode": "rule", "log-level": "silent", "external-controller": "127.0.0.1:9098", "secret": s.Secret, "proxies": s.Nodes, "proxy-groups": groups, "listeners": listeners, "rules": []string{"MATCH,CODEX-ROTATE"}})
 }
 
@@ -664,6 +665,9 @@ func (m *Manager) start(ctx context.Context, path, secret string) error {
 	ports := []string{"127.0.0.1:3101", "127.0.0.1:9098"}
 	for lane := 0; lane < MaxCollectLanes; lane++ {
 		ports = append(ports, fmt.Sprintf("127.0.0.1:%d", collectPort+lane))
+	}
+	for lane := 0; lane < GatewayLanes; lane++ {
+		ports = append(ports, fmt.Sprintf("127.0.0.1:%d", gatewayPort+lane))
 	}
 	for _, port := range ports {
 		ln, err := net.Listen("tcp", port)

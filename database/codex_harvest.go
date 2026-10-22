@@ -31,7 +31,7 @@ func (db *DB) ensureCodexHarvestSchema(ctx context.Context) error {
 			return err
 		}
 	}
-	return nil
+	return db.ensureCodexGatewaySchema(ctx)
 }
 
 // HarvestRepository 适配采票模块的独立接口，避免侵入通用设置及账号表。

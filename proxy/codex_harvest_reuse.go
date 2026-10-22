@@ -2,48 +2,65 @@ package proxy
 
 import (
 	"context"
-	"time"
-
 	"github.com/codex2api/auth"
 	"github.com/codex2api/internal/harvest"
 	"github.com/codex2api/internal/mihomo"
+	"slices"
+	"time"
 )
 
-// 快速复用只借来源的启动材料，目标仍使用自己的 OAuth、工作区及新会话。
+type gatewayReuseGuardKey struct{}
+type gatewayReuseGuard struct {
+	revision, identity string
+	targetID           int64
+}
+
 func (m *CodexHarvestManager) reuseCandidate(ctx context.Context, target *auth.Account, model string, controls harvest.CodexHarvestControls, budget *int, tried map[string]bool) (*auth.CodexTicket, func()) {
 	noop := func() {}
-	sourceID := controls.ReuseSourceAccountID
 	key := "reuse:" + model
-	if sourceID <= 0 || sourceID == target.ID() || controls.Transport != "sse" || auth.CodexTicketTargetLength(target.GetPlanType()) != 780 || tried[key] || *budget < 2 {
+	if target == nil || model != gatewayModel || controls.Transport != "sse" || auth.CodexTicketTargetLength(target.GetPlanType()) != 780 || tried[key] || *budget < 2 {
+		return nil, noop
+	}
+	v, err := m.GatewaySettings(ctx)
+	if err != nil || !gatewayUnified(v) || !slices.Contains(v.CookiePool.TargetAccountIDs, target.ID()) {
 		return nil, noop
 	}
 	tried[key] = true
-	source := m.Store.FindByID(sourceID)
-	scope, err := m.Scope(ctx)
-	if err != nil || !harvestAccountEligible(source, scope, true) {
-		return nil, noop
-	}
-	ticket := source.CodexTicketForModel(model, time.Now(), 780, "sse")
-	if ticket == nil && !source.CodexTicketProbeCoolingDown(model, time.Now()) && *budget >= 4 {
-		if _, busy := m.working.LoadOrStore(sourceID, true); !busy {
-			// 来源补票与目标验证共用原预算，来源继续遵守范围、跳过和冷却。
-			prepare, cancel := context.WithTimeout(ctx, 90*time.Second)
-			m.attempt(prepare, source, model, auth.ConfiguredCodexTicketSettings().HarvestProxyURL, controls, budget, map[string]bool{}, nil, "auto", "", 1)
-			cancel()
-			m.working.Delete(sourceID)
-			ticket = source.CodexTicketForModel(model, time.Now(), 780, "sse")
+	var ticket *auth.CodexTicket
+	sourceID := int64(0)
+	for _, id := range v.CookiePool.SourceAccountIDs {
+		if id == target.ID() {
+			continue
 		}
+		source := m.Store.FindByID(id)
+		if !gatewayAccountEligible(source) {
+			continue
+		}
+		t := source.CodexTicketForModel(model, time.Now(), 780, "sse")
+		if t == nil {
+			continue
+		}
+		if t.Standby != nil && t.Standby.Valid(time.Now(), 780) && t.Standby.Transport == "sse" && (t.Standby.Identity == "" || t.Standby.Identity == gatewayIdentity(source)) && t.Standby.EffectiveExpiry().After(t.EffectiveExpiry()) {
+			t = t.Standby
+		}
+		if time.Until(t.EffectiveExpiry()) <= 30*time.Second {
+			continue
+		}
+		ticket = t
+		sourceID = id
+		break
 	}
-	if ticket == nil || *budget < 2 {
+	if ticket == nil {
 		return nil, noop
 	}
-	var release func()
+	release := noop
 	if ticket.ManagedNode {
-		proxyURL, finish, err := mihomo.PinNode(ctx, ticket.HarvestNodeID, ticket.HarvestPoolID)
+		p, finish, err := mihomo.PinNode(ctx, ticket.HarvestNodeID, ticket.HarvestPoolID)
 		if err != nil {
 			return nil, noop
 		}
-		ticket.HarvestProxyURL, release = proxyURL, finish
+		ticket.HarvestProxyURL = p
+		release = finish
 	} else if ticket.HarvestNodeID != "" {
 		sidecar, err := mihomo.LoadDirectedSidecar(m.DataDir, ticket.HarvestProxyURL)
 		if err != nil || sidecar.PoolID != ticket.HarvestPoolID {
@@ -58,13 +75,12 @@ func (m *CodexHarvestManager) reuseCandidate(ctx context.Context, target *auth.A
 			return nil, noop
 		}
 		release = finish
-	} else {
-		release = noop
 	}
 	if ticket.HarvestProxyURL == "" {
 		release()
 		return nil, noop
 	}
 	ticket.SourceAccountID = sourceID
+	ticket.ReuseRevision = v.Revision
 	return ticket, release
 }

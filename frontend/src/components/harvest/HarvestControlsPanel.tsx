@@ -1,38 +1,63 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { api } from '@/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
-import { harvestSpeedFields, splitHarvestList, type HarvestControlSnapshot, type HarvestScope, type HarvestAccount } from '@/lib/codexHarvest'
-import { HarvestSection, type HarvestAction } from './shared'
+import { harvestSpeedFields, splitHarvestList, type HarvestControlSnapshot, type HarvestControls, type HarvestScope, type HarvestAccount } from '@/lib/codexHarvest'
+import { HarvestPill, HarvestSection, type HarvestAction } from './shared'
 
-export default function HarvestControlsPanel({ snapshot, scope, accounts, busy, onAction }: { snapshot: HarvestControlSnapshot; scope: HarvestScope; accounts: HarvestAccount[]; busy: boolean; onAction: HarvestAction }) {
+/**
+ * 采票控制。草稿独立保存：轮询刷新运行时但不覆盖未保存的 speed/transport 修改，
+ * 只有点击刷新或放弃修改才回读服务端值。strategy/proxy_pool_id 与 Go controls.go 对齐。
+ */
+export default function HarvestControlsPanel({ snapshot, scope, accounts, groups, busy, onAction }: { snapshot: HarvestControlSnapshot; scope: HarvestScope; accounts: HarvestAccount[]; groups: { id: number; name: string }[]; busy: boolean; onAction: HarvestAction }) {
   const { t } = useTranslation()
-  const [draft, setDraft] = useState(snapshot.settings)
-  const [scopeDraft, setScopeDraft] = useState(scope)
-  const [groups, setGroups] = useState(scope.group_ids.join(', '))
-  const saveScope = () => onAction(() => api.updateHarvestScope({ ...scopeDraft, skipped_account_ids: scope.skipped_account_ids, group_ids: splitHarvestList(groups).map(Number) }))
+  const [draft, setDraft] = useState<HarvestControls>(snapshot.settings)
+  const [scopeDraft, setScopeDraft] = useState<HarvestScope>(scope)
+  const [groupsText, setGroupsText] = useState(scope.group_ids.join(', '))
+  const [proxyPoolText, setProxyPoolText] = useState(String(snapshot.settings.proxy_pool_id ?? 0))
+  const touched = useRef(false)
+  const savedKey = JSON.stringify(snapshot.settings)
+  useEffect(() => {
+    // 服务端保存成功后（settings 与草稿一致或用户未改动）同步草稿。
+    if (!touched.current) { setDraft(snapshot.settings); setProxyPoolText(String(snapshot.settings.proxy_pool_id ?? 0)) }
+  }, [savedKey, snapshot.settings])
+  const markTouched = () => { touched.current = true }
+  const controlsDirty = JSON.stringify(draft) !== JSON.stringify(snapshot.settings)
+  const resetDraft = () => { touched.current = false; setDraft(snapshot.settings); setProxyPoolText(String(snapshot.settings.proxy_pool_id ?? 0)) }
+  const saveScope = () => onAction(() => api.updateHarvestScope({ ...scopeDraft, skipped_account_ids: scope.skipped_account_ids, group_ids: scopeDraft.mode === 'selected' ? splitHarvestList(groupsText).map(Number).filter(id => Number.isInteger(id) && id > 0) : [] }))
   return <div className="space-y-5">
-    <HarvestSection title={t('harvest.controls')} actions={<Button size="sm" variant="ghost" onClick={() => setDraft(snapshot.defaults)} disabled={busy}>{t('harvest.defaults')}</Button>}>
-      <div className="mb-5 flex flex-wrap gap-2">{Object.entries(snapshot.presets).map(([name, speed]) => <Button key={name} size="sm" variant={JSON.stringify(draft.speed) === JSON.stringify(speed) ? 'default' : 'outline'} disabled={busy} onClick={() => setDraft({ ...draft, speed })}>{t(`harvest.${name}`)}</Button>)}</div>
-      <form onSubmit={event => { event.preventDefault(); void onAction(() => api.updateHarvestControls(draft)) }}>
-        <label className="mb-4 block max-w-lg space-y-2 text-sm"><span>{t('harvest.transport')}</span><Select aria-label={t('harvest.transport')} disabled={busy} value={draft.transport} onValueChange={transport => setDraft({ ...draft, transport: transport as typeof draft.transport })} options={[{ value: 'sse', label: 'SSE / HTTP' }, { value: 'websocket', label: 'WebSocket' }]} /></label>
-        <p className="mb-4 text-xs leading-relaxed text-muted-foreground">{t('harvest.transportHint')}</p>
-        <label className="mb-4 block max-w-lg space-y-2 text-sm"><span>{t('harvest.reuseSource')}</span><Select aria-label={t('harvest.reuseSource')} disabled={busy} value={String(draft.reuse_source_account_id ?? 0)} onValueChange={value => setDraft({ ...draft, reuse_source_account_id: Number(value) })} options={[{ value: '0', label: t('harvest.selfCollection') }, ...accounts.filter(account => account.eligible).map(account => ({ value: String(account.id), label: `${account.email || 'Codex'} #${account.id}` }))]} /><span className="block text-xs leading-relaxed text-muted-foreground">{t('harvest.reuseHint')}</span></label>
-        <label className="mb-4 block max-w-lg space-y-2 text-sm"><span>{t('harvest.edgeIP')}</span><Input value={draft.edge_ip} disabled={busy} onChange={event => setDraft({ ...draft, edge_ip: event.target.value.trim() })} placeholder="104.18.0.1" /><span className="block text-xs leading-relaxed text-muted-foreground">{t('harvest.edgeHint')}</span></label>
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">{harvestSpeedFields.map(field => <label key={field} className="space-y-2 text-sm"><span>{t(`harvest.${field}`)}</span><Input type="number" required min={snapshot.bounds[field].min} max={snapshot.bounds[field].max} disabled={busy} value={draft.speed[field]} onChange={event => setDraft({ ...draft, speed: { ...draft.speed, [field]: Number(event.target.value) } })} /></label>)}</div>
+    <HarvestSection title={t('harvest.controls')} actions={<div className="flex flex-wrap items-center gap-2">
+      {controlsDirty && <HarvestPill>{t('harvest.unsaved')}</HarvestPill>}
+      <Button size="sm" variant="ghost" onClick={() => { resetDraft(); touched.current = false }} disabled={busy}>{t('harvest.defaults')}</Button>
+      {controlsDirty && <Button size="sm" variant="outline" disabled={busy} onClick={resetDraft}>{t('harvest.discard')}</Button>}
+    </div>}>
+      <form onSubmit={event => { event.preventDefault(); void onAction(async () => { await api.updateHarvestControls(draft); touched.current = false }) }}>
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          <label className="space-y-2 text-sm"><span>{t('harvest.transport')}</span><Select aria-label={t('harvest.transport')} disabled={busy} value={draft.transport} onValueChange={transport => { markTouched(); setDraft({ ...draft, transport: transport as typeof draft.transport }) }} options={[{ value: 'sse', label: 'SSE / HTTP' }, { value: 'websocket', label: 'WebSocket' }]} /></label>
+          <label className="space-y-2 text-sm"><span>{t('harvest.strategy')}</span><Select aria-label={t('harvest.strategy')} disabled={busy} value={draft.strategy} onValueChange={strategy => { markTouched(); setDraft({ ...draft, strategy: strategy as HarvestControls['strategy'] }) }} options={[{ value: 'refresh', label: t('harvest.strategyRefresh') }, { value: 'fixed', label: t('harvest.strategyFixed') }]} /><span className="block text-xs leading-relaxed text-muted-foreground">{t('harvest.strategyHint')}</span></label>
+          <label className="space-y-2 text-sm"><span>{t('harvest.proxyPool')}</span><Input inputMode="numeric" value={proxyPoolText} disabled={busy} onChange={event => { markTouched(); setProxyPoolText(event.target.value.replace(/[^0-9]/g, '')) }} onBlur={() => { const value = Number(proxyPoolText || '0'); setDraft(current => ({ ...current, proxy_pool_id: Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0 })); setProxyPoolText(String(Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0)) }} /><span className="block text-xs leading-relaxed text-muted-foreground">{t('harvest.proxyPoolHint')}</span></label>
+        </div>
+        <p className="my-4 text-xs leading-relaxed text-muted-foreground">{t('harvest.transportHint')}</p>
+        <label className="mb-4 block max-w-lg space-y-2 text-sm"><span>{t('harvest.edgeIP')}</span><Input value={draft.edge_ip} disabled={busy} onChange={event => { markTouched(); setDraft({ ...draft, edge_ip: event.target.value.trim() }) }} placeholder="104.18.0.1" /><span className="block text-xs leading-relaxed text-muted-foreground">{t('harvest.edgeHint')}</span></label>
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">{harvestSpeedFields.map(field => <label key={field} className="space-y-2 text-sm"><span>{t(`harvest.${field}`)}</span><Input type="number" required min={snapshot.bounds[field].min} max={snapshot.bounds[field].max} disabled={busy} value={draft.speed[field]} onChange={event => { markTouched(); setDraft({ ...draft, speed: { ...draft.speed, [field]: Number(event.target.value) } }) }} /></label>)}</div>
         <p className="mt-3 text-xs text-muted-foreground">{t('harvest.refreshHint')}</p>
-        <div className="mt-5 flex items-start justify-between gap-4 border-t pt-4"><div><label className="flex items-center gap-2 text-sm font-medium"><Switch checked={draft.node_memory_enabled} disabled={busy} onCheckedChange={node_memory_enabled => setDraft({ ...draft, node_memory_enabled })} />{t('harvest.learning')}</label><p className="mt-2 text-xs text-muted-foreground">{t('harvest.learningHint')}</p></div><Button type="submit" disabled={busy}>{t('harvest.save')}</Button></div>
+        <div className="mt-5 flex flex-wrap items-start justify-between gap-4 border-t pt-4"><div><label className="flex items-center gap-2 text-sm font-medium"><Switch checked={draft.node_memory_enabled} disabled={busy} onCheckedChange={node_memory_enabled => { markTouched(); setDraft({ ...draft, node_memory_enabled }) }} />{t('harvest.learning')}</label><p className="mt-2 text-xs text-muted-foreground">{t('harvest.learningHint')}</p></div><Button type="submit" disabled={busy || !controlsDirty}>{t('harvest.save')}</Button></div>
       </form>
       {!snapshot.available && <p className="mt-3 text-xs leading-relaxed text-amber-600">{t('harvest.unavailable')}</p>}
       {snapshot.settings_error && <p role="alert" className="mt-3 text-sm text-destructive">{snapshot.settings_error}</p>}
     </HarvestSection>
     <HarvestSection title={t('harvest.scope')}>
-      <div className="grid gap-4 sm:grid-cols-2"><Select aria-label={t('harvest.scope')} value={scopeDraft.mode} disabled={busy} onValueChange={mode => setScopeDraft({ ...scopeDraft, mode: mode as HarvestScope['mode'] })} options={['all', 'selected'].map(value => ({ value, label: t(`harvest.${value}`) }))} />
-        <Select aria-label={t('harvest.schedulable')} value={scopeDraft.account_policy} disabled={busy} onValueChange={account_policy => setScopeDraft({ ...scopeDraft, account_policy: account_policy as HarvestScope['account_policy'] })} options={[{ value: 'schedulable_only', label: t('harvest.schedulable') }, { value: 'prioritize_schedulable', label: t('harvest.prioritize') }]} /></div>
-      {scopeDraft.mode === 'selected' && <label className="mt-4 block space-y-2 text-sm"><span>{t('harvest.groupIDs')}</span><Input value={groups} disabled={busy} onChange={event => setGroups(event.target.value)} /></label>}
+      <div className="grid gap-4 sm:grid-cols-2">
+        <label className="space-y-2 text-sm"><span>{t('harvest.scopeMode')}</span><Select aria-label={t('harvest.scope')} value={scopeDraft.mode} disabled={busy} onValueChange={mode => setScopeDraft({ ...scopeDraft, mode: mode as HarvestScope['mode'] })} options={[{ value: 'all', label: t('harvest.scopeAll') }, { value: 'selected', label: t('harvest.scopeSelected') }]} /></label>
+        <label className="space-y-2 text-sm"><span>{t('harvest.scopePolicy')}</span><Select aria-label={t('harvest.schedulable')} value={scopeDraft.account_policy} disabled={busy} onValueChange={account_policy => setScopeDraft({ ...scopeDraft, account_policy: account_policy as HarvestScope['account_policy'] })} options={[{ value: 'schedulable_only', label: t('harvest.schedulable') }, { value: 'prioritize_schedulable', label: t('harvest.prioritize') }]} /></label>
+      </div>
+      {scopeDraft.mode === 'selected' && <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <label className="space-y-2 text-sm"><span>{t('harvest.groupIDs')}</span><Input value={groupsText} disabled={busy} onChange={event => setGroupsText(event.target.value)} placeholder="1, 2, 3" /></label>
+        <label className="space-y-2 text-sm"><span>{t('harvest.knownGroups')}</span><Select aria-label={t('harvest.knownGroups')} value="" disabled={busy} onValueChange={value => { const id = Number(value); if (id > 0 && !splitHarvestList(groupsText).map(Number).includes(id)) setGroupsText(prev => (prev.trim() ? `${prev}, ${id}` : String(id))) }} options={[{ value: '', label: t('harvest.addGroup') }, ...groups.map(group => ({ value: String(group.id), label: `${group.name} (#${group.id})` }))]} /></label>
+      </div>}
       <div className="mt-4 flex justify-end"><Button disabled={busy} onClick={() => void saveScope()}>{t('harvest.save')}</Button></div>
     </HarvestSection>
   </div>

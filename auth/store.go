@@ -221,8 +221,11 @@ type Account struct {
 	// CodexTickets / CodexTicketProbes 见 codex_ticket.go：后台自动打票捕获的
 	// 门票（按归一化模型名索引）与各模型最近一次探测结果。与上面的手工注入值
 	// 互补：手工值优先，无手工值时用自动门票。
-	CodexTickets      map[string]*CodexTicket
-	CodexTicketProbes map[string]*CodexTicketProbeSummary
+	HarvestSchedulingPaused bool
+	HarvestModelBlocked     bool
+	HarvestSchedulingGroups []int64
+	CodexTickets            map[string]*CodexTicket
+	CodexTicketProbes       map[string]*CodexTicketProbeSummary
 	// ClaudeFingerprintMode 见 claude_fingerprint_mode.go:Claude Code 出站身份头
 	// 收敛模式(preserve/force;空=跟随全局默认)。
 	ClaudeFingerprintMode string
@@ -671,6 +674,9 @@ func (a *Account) SupportsCodexModel(model string) bool {
 	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
+	if a.HarvestModelBlocked && strings.EqualFold(model, "gpt-6-astra") {
+		return false
+	}
 	if len(a.Models) == 0 {
 		return true
 	}
@@ -5662,6 +5668,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		CodexTurnState:               strings.TrimSpace(row.GetCredential(CodexTurnStateCredentialKey)),
 		CodexTurnStateModels:         NormalizeCodexTurnStateModels(row.GetCredential(CodexTurnStateModelsCredentialKey)),
 		CodexTurnStateSetAt:          ParseCodexTurnStateSetAt(row.GetCredential(CodexTurnStateSetAtCredentialKey)),
+		HarvestModelBlocked:          row.GetCredential("codex_harvest_model_blocked") == "true",
 		CodexTickets:                 codexTicketsFromRow(row),
 		CodexTicketProbes:            codexTicketProbesFromRow(row),
 		ClaudeFingerprintMode:        claudeFingerprintMode,

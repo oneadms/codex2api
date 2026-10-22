@@ -67,6 +67,8 @@ func codexTicketHarvestProbeBody(model string) []byte {
 
 // codexTicketHarvestResult 是一次打票的结果。Err 非空表示本轮未取到可用门票。
 type codexTicketHarvestResult struct {
+	Terminal       bool
+	RetryAfter     time.Duration
 	State          string
 	ProbeText      string
 	Cookies        codexTicketCookies
@@ -125,8 +127,11 @@ func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, p
 		if err != nil {
 			return codexHarvestResponse{}, err
 		}
-		applyCodexRequestHeaders(req, account, account.GetAccessToken(), sessionID, "", nil, nil)
+		if err := applyCodexRequestHeaders(req, account, account.GetAccessToken(), sessionID, "", nil, nil); err != nil {
+			return codexHarvestResponse{}, err
+		}
 		applyCodexTicketSession(req.Header, sessionID)
+		req.Header.Set("session-id", sessionID)
 		// 每个候选从空材料开始；仅续接本次刚采到的完整材料。
 		req.Header.Del("Cookie")
 		req.Header.Del(codexTurnStateHeader)
@@ -171,6 +176,8 @@ func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, p
 			return nil
 		}
 		failure.ObservedLength = len(p.State)
+		failure.RetryAfter = p.RetryAfter
+		failure.Terminal = p.Status == 400 || p.Status == 404 || p.Status == 422
 		return &failure
 	}
 	if failure := check(probe, err); failure != nil {
@@ -215,7 +222,8 @@ func fireCodexTicketHarvest(ctx context.Context, account *auth.Account, model, p
 	if !ticket.Valid(now, 0) {
 		return invalid("time", fmt.Sprintf("门票时效校验失败: issued_at=%s expires_at=%s now=%s age_seconds=%d", shape.IssuedAt.UTC().Format(time.RFC3339), ticket.ExpiresAt.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339), int64(now.Sub(shape.IssuedAt)/time.Second)))
 	}
-	binding := &auth.CodexTicket{HarvestProxyURL: proxyURL, HarvestSessionID: sessionID, ProbeVerified: verified, Transport: protocol, Acquisition: "self"}
+	edge, _ := ctx.Value(harvestEdgeKey{}).(string)
+	binding := &auth.CodexTicket{EdgeIP: edge, HarvestProxyURL: proxyURL, HarvestSessionID: sessionID, ProbeVerified: verified, Transport: protocol, Acquisition: "self"}
 	if seed != nil {
 		binding.Acquisition, binding.SourceAccountID = "reuse", seed.SourceAccountID
 		binding.HarvestNodeID, binding.HarvestNodeName, binding.HarvestPoolID, binding.ManagedNode = seed.HarvestNodeID, seed.HarvestNodeName, seed.HarvestPoolID, seed.ManagedNode

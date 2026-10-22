@@ -43,24 +43,25 @@ func (s Scope) Validate() error {
 
 // Event 只保存可诊断的摘要，禁止写入票据、Cookie、代理凭据和上游正文。
 type Event struct {
-	ID              int64     `json:"id"`
-	JobID           string    `json:"job_id,omitempty"`
-	AccountID       int64     `json:"account_id"`
-	Model           string    `json:"model"`
-	Source          string    `json:"source"`
-	Stage           string    `json:"stage"`
-	NodeID          string    `json:"node_id,omitempty"`
-	NodeName        string    `json:"node_name,omitempty"`
-	SelectionReason string    `json:"selection_reason,omitempty"`
-	Result          string    `json:"result"`
-	Message         string    `json:"message"`
-	HTTPStatus      int       `json:"http_status"`
-	Length          int       `json:"length"`
-	ExpectedLength  int       `json:"expected_length"`
-	CookieCount     int       `json:"cookie_count"`
-	LatencyMS       int64     `json:"latency_ms"`
-	Attempt         int       `json:"attempt"`
-	CreatedAt       time.Time `json:"created_at"`
+	RetryAfterSeconds int       `json:"retry_after_seconds,omitempty"`
+	ID                int64     `json:"id"`
+	JobID             string    `json:"job_id,omitempty"`
+	AccountID         int64     `json:"account_id"`
+	Model             string    `json:"model"`
+	Source            string    `json:"source"`
+	Stage             string    `json:"stage"`
+	NodeID            string    `json:"node_id,omitempty"`
+	NodeName          string    `json:"node_name,omitempty"`
+	SelectionReason   string    `json:"selection_reason,omitempty"`
+	Result            string    `json:"result"`
+	Message           string    `json:"message"`
+	HTTPStatus        int       `json:"http_status"`
+	Length            int       `json:"length"`
+	ExpectedLength    int       `json:"expected_length"`
+	CookieCount       int       `json:"cookie_count"`
+	LatencyMS         int64     `json:"latency_ms"`
+	Attempt           int       `json:"attempt"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 type EventPage struct {

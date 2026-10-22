@@ -155,20 +155,13 @@ func TestCodexHarvestRoundStandbyScopeAndManualBudget(t *testing.T) {
 	m.RunRound(t.Context())
 	m.RunRound(t.Context())
 	m.RunRound(t.Context())
-	if requests.Load() != 2 {
-		t.Fatalf("补齐主备票后仍在采票: %d", requests.Load())
+	// 主票仍新鲜时不再为了凑备用票而多打一次；备用票由下一次成功采票自然形成。
+	if requests.Load() != 1 {
+		t.Fatalf("主票仍有效时重复采票: %d", requests.Load())
 	}
 	ticket := account.CodexTicketSnapshot("gpt-6-astra")
-	if ticket == nil || ticket.Standby == nil || ticket.Standby.Cookie == ticket.Cookie {
-		t.Fatal("备用票快照缺失")
-	}
-	row, err := m.DB.GetAccountByID(t.Context(), account.ID())
-	if err != nil {
-		t.Fatal(err)
-	}
-	persisted := auth.ParseCodexTicket("gpt-6-astra", row.Credentials[auth.CodexTicketCredentialKey("gpt-6-astra")])
-	if persisted == nil || persisted.Standby == nil {
-		t.Fatal("备用票未持久化")
+	if ticket == nil || ticket.Standby != nil {
+		t.Fatalf("自动轮次不应强行补备用票: %+v", ticket)
 	}
 	job, err := m.StartManual(t.Context(), harvest.ManualRequest{AccountID: account.ID(), Models: []string{"gpt-6-astra"}, MaxAttempts: 2, NodeSwitchRule: "every_request", RateLimitCooldownSeconds: 1})
 	if err != nil {
@@ -186,6 +179,18 @@ func TestCodexHarvestRoundStandbyScopeAndManualBudget(t *testing.T) {
 	if len(jobs) != 1 || jobs[0].Running || jobs[0].Attempts != 1 || jobs[0].TicketsStored != 1 {
 		t.Fatalf("手动预算错误: %+v", jobs)
 	}
+	ticket = account.CodexTicketSnapshot("gpt-6-astra")
+	if ticket == nil || ticket.Standby == nil || ticket.Standby.Cookie == ticket.Cookie {
+		t.Fatal("备用票快照缺失")
+	}
+	row, err := m.DB.GetAccountByID(t.Context(), account.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted := auth.ParseCodexTicket("gpt-6-astra", row.Credentials[auth.CodexTicketCredentialKey("gpt-6-astra")])
+	if persisted == nil || persisted.Standby == nil {
+		t.Fatal("备用票未持久化")
+	}
 	events, err := m.Repository.Events(t.Context(), account.ID(), job.ID, 0, 25)
 	if err != nil || events.Total != 1 {
 		t.Fatalf("手动事件缺失: %v", err)
@@ -199,7 +204,7 @@ func TestCodexHarvestRoundStandbyScopeAndManualBudget(t *testing.T) {
 		t.Fatal("跳过账号仍能开始手动采票")
 	}
 	m.RunRound(t.Context())
-	if requests.Load() != 3 {
+	if requests.Load() != 2 {
 		t.Fatal("跳过账号仍发出了请求")
 	}
 }
@@ -220,8 +225,8 @@ func TestCodexTicketFeedbackCompletionAndDurableRevocation(t *testing.T) {
 	}
 	ObserveCodexTicketFeedbackFrame(ctx, []byte(`{"type":"response.completed"}`))
 	current := account.CodexTicketSnapshot("gpt-6-astra")
-	if current.State != next || !current.CookieCapturedAt.Equal(cookies.CapturedAt) || current.HarvestSessionID != "fresh-session" || current.Standby == nil {
-		t.Fatal("续票破坏了 Cookie 时间、会话或备用票")
+	if current.State != next || !current.CookieCapturedAt.Equal(cookies.CapturedAt) || current.HarvestSessionID != "fresh-session" || current.Revoked || current.Standby != nil {
+		t.Fatal("续票破坏了 Cookie 时间、会话或主备票语义")
 	}
 	observeCodexTicketFeedback(account, next, testTicketState(now, 11), 200, cookies, current)
 	row, err := m.DB.GetAccountByID(t.Context(), account.ID())
@@ -229,8 +234,8 @@ func TestCodexTicketFeedbackCompletionAndDurableRevocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	saved := auth.ParseCodexTicket("gpt-6-astra", row.Credentials[auth.CodexTicketCredentialKey("gpt-6-astra")])
-	if saved == nil || saved.State != old || saved.Standby != nil {
-		t.Fatal("非目标票据未触发持久化备用票提升")
+	if saved == nil || saved.State != next || !saved.Revoked || saved.Standby != nil {
+		t.Fatal("无效回票未撤销当前票据")
 	}
 }
 

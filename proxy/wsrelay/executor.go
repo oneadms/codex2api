@@ -128,6 +128,21 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		return nil, fmt.Errorf("无可用 access_token")
 	}
 
+	gatewayTurn, gatewayErr := proxy.BeginCodexGatewayWSTurn(ctx, account, requestBody, ginHeaders, apiKey, effectiveProxyURL(account, proxyOverride))
+	if gatewayErr != nil {
+		return nil, gatewayErr
+	}
+	gatewayHandedOff := false
+	defer func() {
+		if gatewayTurn != nil && !gatewayHandedOff {
+			gatewayTurn.Finish(true)
+		}
+	}()
+	if gatewayTurn != nil {
+		ctx = gatewayTurn.Context(ctx)
+		proxyOverride = gatewayTurn.ProxyURL()
+	}
+
 	// 准备请求体
 	wsBody := e.prepareWebsocketBody(requestBody, sessionID)
 	wsBody = proxy.ApplyCodexTicketRequestBody(ctx, wsBody, true)
@@ -166,6 +181,9 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		return nil, err
 	}
 	proxy.ApplyCodexTurnStateInjectionHeader(ctx, headers)
+	if gatewayTurn != nil {
+		gatewayTurn.Apply(headers)
+	}
 	// 握手头在复用连接上不会重发；每轮必须把最终状态同步到 response.create。
 	if state := headers.Get("X-Codex-Turn-State"); state != "" {
 		wsBody, _ = sjson.SetBytes(wsBody, "client_metadata.x-codex-turn-state", state)
@@ -200,6 +218,10 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	// 同线程上的后台副请求（request_kind=memory、guardian 子代理）另成一道，
 	// 不与用户在飞轮次同键排队；Desktop 走 HTTP 时元数据只在请求体里。
 	poolSessionID := proxy.ResolveCodexWebsocketTransportSessionKeyWithBody(sessionID, ginHeaders, wsBody)
+	if gatewayTurn != nil {
+		poolSessionID = gatewayTurn.PoolKey()
+		poolRouteKey = gatewayTurn.PoolKey()
+	}
 	// Cookie 只在握手时发送。换 Cookie 后必须换连接，帧内更新 turn state 无法替代握手。
 	cookieKey := websocketCookieKey(headers.Get("Cookie"), proxy.CodexTicketSessionForRequest(ctx))
 	poolSessionID = withWebsocketCookieKey(poolSessionID, cookieKey)
@@ -217,6 +239,9 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 			model: gjson.GetBytes(wsBody, "model").String(), url: wsURL, proxyURL: effectiveProxyURL(account, proxyOverride),
 		})
 		if err2 != nil {
+			if gatewayTurn != nil {
+				return nil, fmt.Errorf("固定 WebSocket 原连接不可用，不能切换连接续接")
+			}
 			return nil, err2
 		}
 	}
@@ -257,6 +282,13 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		proxy.RecordUpstreamUserAgent(ctx, wc.upstreamUserAgent)
 	}
 
+	if gatewayTurn != nil {
+		if err := gatewayTurn.BindConnection(fmt.Sprintf("%p", wc)); err != nil {
+			wc.session.RemovePendingRequest(pr.RequestID)
+			e.manager.DiscardConnection(wc)
+			return nil, err
+		}
+	}
 	// 发送请求，失败时最多重试 2 次（重建连接）。
 	// 用 DiscardConnection 按连接指针精确清理：续链亲和取回的连接其 PoolKey
 	// 可能与当前请求的 proxy 组合不同，按参数重算 key 会漏删。
@@ -272,6 +304,9 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	if sendErr != nil && gjson.GetBytes(wsBody, "previous_response_id").String() != "" {
 		wc.session.RemovePendingRequest(pr.RequestID)
 		e.manager.DiscardConnection(wc)
+		if gatewayTurn != nil {
+			return nil, fmt.Errorf("固定 WebSocket 原连接发送失败")
+		}
 		return nil, &proxy.ResponsesContinuationLostError{Reason: "original_connection_send_failed"}
 	}
 	for retries := 0; shouldRetryWebsocketSendError(sendErr) && retries < 2; retries++ {
@@ -302,7 +337,16 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	// 启动心跳
 	e.manager.StartHeartbeat(wc)
 
+	if gatewayTurn != nil {
+		if err := gatewayTurn.BindConnection(fmt.Sprintf("%p", wc)); err != nil {
+			wc.session.RemovePendingRequest(pr.RequestID)
+			e.manager.DiscardConnection(wc)
+			return nil, err
+		}
+	}
+	gatewayHandedOff = true
 	return &WsResponse{
+		gatewayTurn:     gatewayTurn,
 		conn:            wc,
 		pendingReq:      pr,
 		sessionID:       poolSessionID,
@@ -485,6 +529,7 @@ func (e *Executor) sendRequest(wc *WsConnection, body []byte, requestID string) 
 
 // WsResponse WebSocket 响应包装器
 type WsResponse struct {
+	gatewayTurn *proxy.GatewayWSTurn
 	model       string
 	conn        *WsConnection
 	pendingReq  *PendingRequest
@@ -578,6 +623,9 @@ func (r *WsResponse) handleMessage(payload []byte, callback func(data []byte) bo
 	// 标准化完成事件类型
 	payload = normalizeCompletionEvent(payload)
 
+	if r.gatewayTurn != nil {
+		r.gatewayTurn.Observe(payload)
+	}
 	// 终态先记录绑定与完成状态，再交给下游。
 	eventType := gjson.GetBytes(payload, "type").String()
 	terminal := isReadLeaseTerminal(payload)
@@ -711,6 +759,12 @@ func (r *WsResponse) Close() error {
 	}
 
 	r.closed = true
+	if r.gatewayTurn != nil {
+		if !r.gatewayTurn.CanRetain() {
+			r.connBroken = true
+		}
+		r.gatewayTurn.Finish(r.connBroken || !r.streamCompleted)
+	}
 
 	// 移除等待请求
 	if r.conn != nil && r.conn.session != nil && r.pendingReq != nil {

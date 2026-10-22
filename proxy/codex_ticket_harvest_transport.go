@@ -17,13 +17,14 @@ import (
 const codexHarvestMaxResponse = 1 << 20
 
 type codexHarvestResponse struct {
-	Status    int
-	State     string
-	Text      string
-	Model     string
-	Cookies   codexTicketCookies
-	Terminal  bool
-	Completed bool
+	RetryAfter time.Duration
+	Status     int
+	State      string
+	Text       string
+	Model      string
+	Cookies    codexTicketCookies
+	Terminal   bool
+	Completed  bool
 }
 
 // 两次探测都使用独立连接，保持同一出口、会话和协议，不进入业务连接池。
@@ -35,7 +36,7 @@ func performCodexHarvestTransport(req *http.Request, body []byte, client *http.C
 			return codexHarvestResponse{}, err
 		}
 		defer resp.Body.Close()
-		out := codexHarvestResponse{Status: resp.StatusCode, State: observedCodexTurnState(resp.Header.Get(codexTurnStateHeader))}
+		out := codexHarvestResponse{Status: resp.StatusCode, RetryAfter: codexHarvestRetryAfter(resp.Header.Get("Retry-After")), State: observedCodexTurnState(resp.Header.Get(codexTurnStateHeader))}
 		if resp.StatusCode != http.StatusOK {
 			return out, nil
 		}
@@ -75,7 +76,7 @@ func performCodexHarvestTransport(req *http.Request, body []byte, client *http.C
 			if resp.Body != nil {
 				resp.Body.Close()
 			}
-			return codexHarvestResponse{Status: resp.StatusCode}, nil
+			return codexHarvestResponse{Status: resp.StatusCode, RetryAfter: codexHarvestRetryAfter(resp.Header.Get("Retry-After"))}, nil
 		}
 		return codexHarvestResponse{}, fmt.Errorf("WebSocket 采票连接失败")
 	}
@@ -181,9 +182,26 @@ func consumeCodexHarvestEvent(frame []byte, out *codexHarvestResponse) error {
 		if status == 0 {
 			status = int(event.Get("error.status").Int())
 		}
-		code := event.Get("error.code").String()
-		if code == "rate_limit_exceeded" || code == "usage_limit_reached" {
+		upstreamError := event.Get("error")
+		if event.Get("type").String() == "response.failed" {
+			upstreamError = event.Get("response.error")
+		}
+		if status == 0 {
+			status = int(upstreamError.Get("status").Int())
+		}
+		code := upstreamError.Get("code").String()
+		if code == "" {
+			code = upstreamError.Get("type").String()
+		}
+		switch code {
+		case "rate_limit_exceeded", "usage_limit_reached", "rate_limit_error":
 			status = 429
+		case "authentication_error", "invalid_api_key":
+			status = 401
+		case "permission_denied":
+			status = 403
+		case "invalid_request_error", "invalid_request", "invalid_argument", "model_not_found", "unsupported_model", "invalid_model", "insufficient_quota":
+			status = 400
 		}
 		if status >= 400 && status <= 599 {
 			out.Status = status

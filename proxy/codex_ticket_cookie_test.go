@@ -183,12 +183,12 @@ func TestCodexTicketFeedbackPersistsCookiePair(t *testing.T) {
 	}
 	newer := testTicketState(now.Add(time.Second), auth.CodexTicketPersonalBlocks)
 	observeCodexTicketFeedback(account, state, newer, http.StatusOK, codexTicketCookies{})
-	if ticket := account.CodexTicketForModel("gpt-5.5", time.Now(), 292); ticket == nil || ticket.State != state {
-		t.Fatal("feedback without a cookie must not replace a usable pair")
+	if ticket := account.CodexTicketForModel("gpt-5.5", time.Now(), 292); ticket == nil || ticket.State != newer || ticket.Cookie != "ticket=new" {
+		t.Fatal("state rotation without a new cookie must keep the existing pair")
 	}
-	observeCodexTicketFeedback(account, state, newer, http.StatusUnauthorized, codexTicketCookies{Header: "ticket=rejected"})
-	if ticket := account.CodexTicketForModel("gpt-5.5", time.Now(), 292); ticket != nil && ticket.State == newer {
-		t.Fatal("authentication failure must not publish the response ticket")
+	observeCodexTicketFeedback(account, newer, "", http.StatusUnauthorized, codexTicketCookies{Header: "ticket=rejected"})
+	if ticket := account.CodexTicketForModel("gpt-5.5", time.Now(), 292); ticket != nil {
+		t.Fatal("authentication failure must revoke the injected ticket")
 	}
 }
 

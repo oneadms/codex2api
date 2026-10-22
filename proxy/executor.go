@@ -642,6 +642,15 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	if blocked, ok := CodexTicketGateBlocked(ctx, account, codexClientModelFromContext(ctx), strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())); ok {
 		return nil, ErrCodexTicketUnavailable(blocked)
 	}
+	if !wantWebsocket {
+		var gatewayRelease func()
+		var gatewayErr error
+		ctx, proxyOverride, gatewayRelease, gatewayErr = prepareCodexGatewayHTTP(ctx, account, requestBody, proxyOverride)
+		if gatewayErr != nil {
+			return nil, gatewayErr
+		}
+		defer func() { retainCodexGatewayHTTP(ctx, upstreamResponse, gatewayRelease) }()
+	}
 	poolRouteKey := ""
 	if wantWebsocket {
 		sessionID = strings.TrimSpace(sessionID)
@@ -812,6 +821,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 			return nil, err
 		}
 		applyCodexTurnStateInjectionHeader(ctx, req.Header)
+		ApplyCodexGatewayCookie(ctx, req.Header)
 		// Content-Encoding 在通用头装配之后设置：真实客户端也是在编码完成时才补这个头
 		// （codex-rs/http-client/src/request.rs prepare_encoded_json），且账号自定义头
 		// 不该有能力声明一个与实际字节不符的编码。
@@ -844,7 +854,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 			pipeline.Release()
 			log.Printf("[image-pipeline] job=%d stage=waiting_upstream request_bytes=%d", pipeline.jobID, req.ContentLength)
 		}
-		resp, err := doTracedUpstreamRequest(client, req, account, proxyURL)
+		resp, err := doTracedUpstreamRequest(gatewayHTTPClient(ctx, client), req, account, proxyURL)
 		if err != nil {
 			if shouldRecyclePooledClient(err) {
 				recyclePooledClient(account, proxyURL)
@@ -932,7 +942,7 @@ func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, r
 		if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(body, "model").String()); err != nil {
 			return nil, err
 		}
-		resp, err := doTracedUpstreamRequest(client, req, account, proxyURL)
+		resp, err := doTracedUpstreamRequest(gatewayHTTPClient(ctx, client), req, account, proxyURL)
 		if err != nil {
 			if shouldRecyclePooledClient(err) {
 				recyclePooledClient(account, proxyURL)
@@ -1242,6 +1252,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 		return nil, err
 	}
 	applyCodexTurnStateInjectionHeader(ctx, req.Header)
+	ApplyCodexGatewayCookie(ctx, req.Header)
 	// routing hint 由网关按最终出站 body 合成，须在账号自定义头之后设置。
 	ApplyCodexRoutingHint(req.Header, account, requestBody)
 
@@ -1251,7 +1262,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(requestBody, "model").String()); err != nil {
 		return nil, err
 	}
-	resp, err := doTracedUpstreamRequest(client, req, account, proxyURL)
+	resp, err := doTracedUpstreamRequest(gatewayHTTPClient(ctx, client), req, account, proxyURL)
 	if err != nil {
 		if shouldRecyclePooledClient(err) {
 			recyclePooledClient(account, proxyURL)

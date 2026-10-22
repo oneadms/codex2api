@@ -63,14 +63,14 @@ func TestCodexHarvestReuseStoresOnlyTargetOwnedState(t *testing.T) {
 	}
 }
 
-func TestCodexHarvestReusePreparationSharesBudgetAndScope(t *testing.T) {
+func TestCodexManualHarvestDoesNotPrepareOrBorrowSources(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		budget    int
 		skipped   bool
 		wantReuse bool
 	}{
-		{"prepare source", 4, false, true},
+		{"manual remains self collection", 4, false, false},
 		{"skip source", 4, true, false},
 		{"insufficient preparation budget", 3, false, false},
 	} {
@@ -120,7 +120,7 @@ func TestCodexHarvestReusePreparationSharesBudgetAndScope(t *testing.T) {
 			settings := auth.ConfiguredCodexTicketSettings()
 			settings.TargetLength, settings.HarvestProxyURL = 780, server.URL
 			auth.SetConfiguredCodexTicketSettings(settings)
-			controls := harvest.CodexHarvestControls{Transport: "sse", ReuseSourceAccountID: id, Speed: harvest.CodexHarvestSpeed{AttemptTimeoutSeconds: 3, CooldownSeconds: 1}}
+			controls := harvest.CodexHarvestControls{Transport: "sse", Speed: harvest.CodexHarvestSpeed{AttemptTimeoutSeconds: 3, CooldownSeconds: 1}}
 			budget := tc.budget
 			event := m.attempt(t.Context(), target, "gpt-6-astra", server.URL, controls, &budget, map[string]bool{}, nil, "manual", "", 1)
 			ticket := target.CodexTicketForModel("gpt-6-astra", time.Now(), 780, "sse")

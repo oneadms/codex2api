@@ -163,6 +163,8 @@ type CodexTicket struct {
 	// CookieCapturedAt 独立计时，业务换票不能延长未更新的 Cookie。
 	CookieCapturedAt time.Time `json:"cookie_captured_at,omitempty"`
 	// 打票出口与会话随票保存，热备切换和业务续票必须沿用同一份快照。
+	EdgeIP           string `json:"edge_ip,omitempty"`
+	ReuseRevision    string `json:"-"`
 	HarvestProxyURL  string `json:"harvest_proxy_url,omitempty"`
 	HarvestSessionID string `json:"harvest_session_id,omitempty"`
 	HarvestNodeID    string `json:"harvest_node_id,omitempty"`
@@ -343,8 +345,9 @@ func (a *Account) CodexTicketForModel(model string, now time.Time, targetLen int
 	if ticket == nil {
 		return nil
 	}
+	identity := CodexTicketIdentity(a.EffectiveAccountID(), a.ticketEmail())
 	compatible := func(t *CodexTicket) bool {
-		return t.Valid(now, targetLen) && (len(protocols) == 0 || t.Transport == "" || t.Transport == protocols[0])
+		return t != nil && (t.Identity == "" || t.Identity == identity) && t.Valid(now, targetLen) && (len(protocols) == 0 || t.Transport == "" || t.Transport == protocols[0])
 	}
 	if compatible(ticket) {
 		return ticket
@@ -354,6 +357,8 @@ func (a *Account) CodexTicketForModel(model string, now time.Time, targetLen int
 	}
 	return nil
 }
+
+func (a *Account) ticketEmail() string { a.mu.RLock(); defer a.mu.RUnlock(); return a.Email }
 
 // CodexTicketInjection 返回该账号本次请求该注入的门票。
 // 仅查询账号自己的门票；需要共享池回退时使用 CodexTicketInjectionWithShared。
@@ -630,6 +635,7 @@ type codexTicketCredentialSource interface {
 // setCodexTicketsFromRowLocked 从凭据行装载门票与探测摘要。调用方必须持有 a.mu 写锁。
 // 每次都整体重建：账号凭据被外部改写（重新授权、导入备份）后，内存里的旧票必须消失。
 func (a *Account) setCodexTicketsFromRowLocked(row codexTicketCredentialSource) {
+	a.HarvestModelBlocked = row.GetCredential("codex_harvest_model_blocked") == "true"
 	a.CodexTickets = codexTicketsFromRow(row)
 	a.CodexTicketProbes = codexTicketProbesFromRow(row)
 }
@@ -741,6 +747,33 @@ func (s *Store) PublishCodexTicket(id int64, ticket *CodexTicket) {
 		previous.Standby = nil
 		next.Standby = &previous
 	}
+	account.CodexTickets[key] = &next
+	account.mu.Unlock()
+	PublishCodexTicketToSharedPool(account, &next)
+}
+
+// AdoptCodexTicket 原样替换该模型上的运行时门票。业务响应回带的新状态是同一张
+// 门票的续期，不是新采到的票：既不能把旧状态降级成备用票，也不能覆盖现有备用票。
+func (s *Store) AdoptCodexTicket(id int64, ticket *CodexTicket) {
+	if s == nil || ticket == nil {
+		return
+	}
+	account := s.FindByID(id)
+	if account == nil {
+		return
+	}
+	account.mu.Lock()
+	if account.CodexTickets == nil {
+		account.CodexTickets = map[string]*CodexTicket{}
+	}
+	key := NormalizeCodexTicketModel(ticket.Model)
+	if key == "" {
+		account.mu.Unlock()
+		return
+	}
+	next := *ticket
+	next.Model = key
+	next.Standby = cloneCodexTicket(ticket.Standby)
 	account.CodexTickets[key] = &next
 	account.mu.Unlock()
 	PublishCodexTicketToSharedPool(account, &next)
