@@ -67,6 +67,73 @@ func TestGatewayWSCompletedNullErrorIsSuccess(t *testing.T) {
 	}
 }
 
+func TestGatewayWSSyntheticProbeSkipsFixedAnchor(t *testing.T) {
+	_, _, target := newGatewayWSUnitFixture(t)
+	probeCtx := WithCodexSyntheticProbe(t.Context())
+	// 合成探针（测连/批量测试/模型探测）没有 API Key 与显式客户端会话标识：
+	// 固定会话判定必须放行到普通转发路径，而不是在锚点准入处报错。
+	required, err := CodexGatewayWSRequired(probeCtx, target, gatewayModel)
+	if err != nil || required {
+		t.Fatalf("synthetic probe must not require a fixed WS session: required=%v err=%v", required, err)
+	}
+	turn, err := BeginCodexGatewayWSTurn(probeCtx, target, []byte(`{"model":"gpt-6-astra"}`), nil, "", "")
+	if err != nil || turn != nil {
+		t.Fatalf("synthetic probe must not create a fixed WS turn: turn=%v err=%v", turn, err)
+	}
+	// 业务流量不受影响：无 API Key/会话标识的普通请求仍必须被锚点准入拒绝。
+	if turn, err := BeginCodexGatewayWSTurn(t.Context(), target, []byte(`{"model":"gpt-6-astra"}`), nil, "", ""); err == nil || turn != nil {
+		t.Fatal("unauthenticated business traffic must still be rejected by anchor admission")
+	} else {
+		var fixed *CodexGatewayWSError
+		if !errors.As(err, &fixed) {
+			t.Fatalf("expected CodexGatewayWSError, got %v", err)
+		}
+	}
+	required, err = CodexGatewayWSRequired(t.Context(), target, gatewayModel)
+	if err != nil || !required {
+		t.Fatalf("business traffic must still require the fixed WS session: required=%v err=%v", required, err)
+	}
+}
+
+func TestGatewayWSSyntheticProbeRequestBypassesAnchor(t *testing.T) {
+	m, _, target := newGatewayWSUnitFixture(t)
+	previous := WebsocketExecuteFunc
+	t.Cleanup(func() { WebsocketExecuteFunc = previous })
+	calls := 0
+	WebsocketExecuteFunc = func(ctx context.Context, a *auth.Account, body []byte, session, proxyURL, key string, cfg *DeviceProfileConfig, headers http.Header, pool string) (*http.Response, error) {
+		calls++
+		if _, err := BeginCodexGatewayWSTurn(ctx, a, body, headers, key, proxyURL); err != nil {
+			return nil, err
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(""))}, nil
+	}
+	// 模拟测连入口：合成探针上下文 + 空 API Key + 无会话头 + 强制 WS。
+	probeCtx := WithCodexSyntheticProbe(t.Context())
+	body := []byte(`{"model":"gpt-6-astra","input":"offline","store":false,"stream":true}`)
+	response, err := ExecuteRequest(probeCtx, target, body, "", "", "", nil, nil, true)
+	if err != nil {
+		t.Fatalf("synthetic probe was rejected by fixed WS anchor admission: %v", err)
+	}
+	response.Body.Close()
+	if calls != 1 {
+		t.Fatalf("executor calls=%d", calls)
+	}
+	for _, row := range m.GatewaySnapshot(t.Context()).WS {
+		if row.ActiveSessions != 0 {
+			t.Fatal("synthetic probe leaked a fixed WS session")
+		}
+	}
+	// 不带标记的同样请求（业务流量）必须仍被锚点准入拒绝。
+	if _, err = ExecuteRequest(t.Context(), target, body, "", "", "", nil, nil, true); err == nil {
+		t.Fatal("unauthenticated business traffic bypassed the fixed WS anchor")
+	} else {
+		var fixed *CodexGatewayWSError
+		if !errors.As(err, &fixed) {
+			t.Fatalf("expected CodexGatewayWSError, got %v", err)
+		}
+	}
+}
+
 func TestGatewayWSExplicitScopeAndExecutionLanes(t *testing.T) {
 	_, _, target := newGatewayWSUnitFixture(t)
 	firstHeaders := http.Header{"Session-Id": {"shared"}, "Thread-Id": {"thread-a"}}

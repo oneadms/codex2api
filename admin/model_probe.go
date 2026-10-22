@@ -199,7 +199,7 @@ func (h *Handler) probeAccountModel(ctx context.Context, account *auth.Account, 
 	if account != nil && account.IsClaudeOAuth() {
 		return h.probeClaudeAccountModel(ctx, account, model)
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, batchTestAccountTimeout)
+	probeCtx, cancel := context.WithTimeout(proxy.WithCodexSyntheticProbe(ctx), batchTestAccountTimeout)
 	defer cancel()
 
 	payload := buildConnectionTestPayload(h.store, model)

@@ -234,6 +234,9 @@ func (h *Handler) executeModelDetectorProbe(ctx context.Context, account *auth.A
 	var response *http.Response
 	var requestErr error
 	proxyURL := h.store.ResolveProxyForAccount(account)
+	// 降智检测是内部合成探针：没有下游 API Key 与显式客户端会话标识，
+	// 不占用固定 WebSocket 会话锚点。
+	ctx = proxy.WithCodexSyntheticProbe(ctx)
 	if account.IsOpenAIResponsesAPI() {
 		response, requestErr = proxy.ExecuteOpenAIResponsesRequest(ctx, account, payload, proxyURL, nil)
 	} else {

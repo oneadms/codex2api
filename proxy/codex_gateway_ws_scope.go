@@ -25,6 +25,32 @@ func (e *CodexGatewayWSError) Error() string { return "固定 WebSocket 会话�
 
 type codexGatewayWSClientScopeKey struct{}
 
+// codexSyntheticProbeKey marks request contexts produced by internal synthetic
+// probes (admin connection tests, batch tests, model probes). Those probes
+// have no downstream API key and no explicit client session/thread identity,
+// so they can never own a fixed gateway WS anchor. They must fall through to
+// the ordinary transport instead of failing on the anchor admission check.
+type codexSyntheticProbeKey struct{}
+
+// WithCodexSyntheticProbe declares that this request is an internal synthetic
+// probe rather than authenticated business traffic.
+func WithCodexSyntheticProbe(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, codexSyntheticProbeKey{}, true)
+}
+
+// codexSyntheticProbeFromContext reports whether the request context was
+// marked as an internal synthetic probe.
+func codexSyntheticProbeFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	probe, _ := ctx.Value(codexSyntheticProbeKey{}).(bool)
+	return probe
+}
+
 // Capture the client identity before fingerprint/payload/cache-key rewriting.
 // An explicitly captured empty scope must stay empty throughout the attempt.
 func withCodexGatewayWSClientScope(ctx context.Context, headers http.Header, body []byte) context.Context {
@@ -80,6 +106,12 @@ func codexGatewayWSClientScope(headers http.Header, body []byte) string {
 func CodexGatewayWSRequired(ctx context.Context, account *auth.Account, model string) (bool, error) {
 	m := codexHarvester.Load()
 	if m == nil || account == nil || !account.SupportsCodexTickets() || model != gatewayModel {
+		return false, nil
+	}
+	// 内部合成探针（测连/批量测试/模型探测）没有下游 API Key 和显式客户端
+	// 会话标识，永远拿不到固定会话锚点。这里直接判 false，让它们回落普通
+	// 转发路径，而不是在锚点准入处报“需要 API Key 和显式客户端会话标识”。
+	if codexSyntheticProbeFromContext(ctx) {
 		return false, nil
 	}
 	settings, err := m.GatewaySettings(ctx)

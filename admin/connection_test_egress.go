@@ -11,9 +11,11 @@ import (
 
 // prepareCodexConnectionTestContext 按已保存配置固定测连出口，避免处理请求的
 // 实例尚未同步内存配置时直连。配置读取或校验失败必须中止，不能猜测出口。
+// 返回的上下文同时声明这是内部合成探针：测连/批量测试没有下游 API Key 与
+// 显式客户端会话标识，不能占用固定 WebSocket 会话锚点。
 func (h *Handler) prepareCodexConnectionTestContext(ctx context.Context, account *auth.Account) (context.Context, error) {
 	if !proxy.AccountSupportsResin(account) {
-		return ctx, nil
+		return proxy.WithCodexSyntheticProbe(ctx), nil
 	}
 	cfg := proxy.GetResinConfig()
 	if h != nil && h.db != nil {
@@ -34,5 +36,5 @@ func (h *Handler) prepareCodexConnectionTestContext(ctx context.Context, account
 	ctx = proxy.WithResinConfig(ctx, cfg)
 	// 后台测连没有用户会话，与用量维护一样选择默认平台。
 	ctx = proxy.WithResinPlatform(ctx, proxy.ResinPlatformForSessionFromContext(ctx, ""))
-	return proxy.WithFreshCodexConnection(ctx), nil
+	return proxy.WithFreshCodexConnection(proxy.WithCodexSyntheticProbe(ctx)), nil
 }

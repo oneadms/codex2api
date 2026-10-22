@@ -157,6 +157,9 @@ func (h *Handler) runChannelMonitorAccount(ctx context.Context, accountID int64,
 	if !healthDue && !billingDue {
 		return nil
 	}
+	// 渠道监控是内部合成探针：没有下游 API Key 与显式客户端会话标识，
+	// 不占用固定 WebSocket 会话锚点。
+	ctx = proxy.WithCodexSyntheticProbe(ctx)
 	account, _, err := h.loadChannelMonitorAccount(ctx, accountID)
 	if err != nil {
 		return err

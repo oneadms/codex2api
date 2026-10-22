@@ -273,6 +273,11 @@ func BeginCodexGatewayWSTurn(ctx context.Context, a *auth.Account, body []byte, 
 	if m == nil || a == nil || !a.SupportsCodexTickets() || gjson.GetBytes(body, "model").String() != gatewayModel {
 		return nil, nil
 	}
+	// 防御纵深：合成探针即使绕过 CodexGatewayWSRequired 也必须在这里放行到
+	// 普通路径。锚点键由 API Key + 客户端会话标识构成，合成探针两者皆无。
+	if codexSyntheticProbeFromContext(ctx) {
+		return nil, nil
+	}
 	v, err := m.GatewaySettings(ctx)
 	if err != nil {
 		return nil, err
