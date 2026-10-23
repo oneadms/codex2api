@@ -47,6 +47,10 @@ func (t *GatewayWSTurn) discardSession() {
 // passes previous_response_id explicitly, and removes its private test session.
 // TestGateway's action == "ws" branch should call this, not the HTTP route probe.
 func (m *CodexHarvestManager) TestGatewayWS(ctx context.Context, accountID int64) error {
+	return m.testGatewayWebsocket(ctx, accountID, true)
+}
+
+func (m *CodexHarvestManager) testGatewayWebsocket(ctx context.Context, accountID int64, fixed bool) error {
 	a := m.Store.FindByID(accountID)
 	if !gatewayAccountEligible(a) {
 		return errors.New("account_unavailable")
@@ -59,21 +63,29 @@ func (m *CodexHarvestManager) TestGatewayWS(ctx context.Context, accountID int64
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	for _, model := range models {
-		if err := m.testGatewayWSModel(ctx, a, model); err != nil {
+		if err := m.testGatewayWSModel(ctx, a, model, fixed); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// 每个配置模型独立验收两轮原连接续聊，不能用另一个模型的成功结果代替。
-func (m *CodexHarvestManager) testGatewayWSModel(ctx context.Context, a *auth.Account, model string) error {
-	enabled, err := CodexGatewayWSRequired(ctx, a, model)
-	if err != nil {
-		return err
-	}
-	if !enabled || WebsocketExecuteFunc == nil {
+// 每个配置模型独立验证；固定会话额外验收第二轮原连接续聊。
+func (m *CodexHarvestManager) testGatewayWSModel(ctx context.Context, a *auth.Account, model string, fixed bool) error {
+	if WebsocketExecuteFunc == nil {
 		return errors.New("websocket_disabled")
+	}
+	if fixed {
+		enabled, err := CodexGatewayWSRequired(ctx, a, model)
+		if err != nil {
+			return err
+		}
+		if !enabled {
+			return errors.New("websocket_disabled")
+		}
+	} else {
+		// 普通验证沿用测试连接入口，不要求固定会话，也不创建续聊锚点。
+		ctx = WithFreshCodexConnection(WithCodexSyntheticProbe(ctx))
 	}
 	trace := &gatewayWSDiagnostic{}
 	ctx = context.WithValue(ctx, gatewayWSDiagnosticKey{}, trace)
@@ -88,12 +100,17 @@ func (m *CodexHarvestManager) testGatewayWSModel(ctx context.Context, a *auth.Ac
 	session := "gateway-ws-test-" + NewUpstreamSessionUUID()
 	headers := http.Header{"Session-Id": []string{session}}
 	previous, connectionID := "", ""
-	for round := 0; round < 2; round++ {
+	rounds := 1
+	if fixed {
+		rounds = 2
+	}
+	for round := 0; round < rounds; round++ {
+		requestCtx := BeginCodexGatewayWSObservation(ctx, a, model)
 		body := codexTicketHarvestProbeBody(model)
 		if previous != "" {
 			body, _ = sjson.SetBytes(body, "previous_response_id", previous)
 		}
-		response, err := ExecuteRequest(ctx, a, body, session, "", session, nil, headers, true)
+		response, err := ExecuteRequest(requestCtx, a, body, session, "", session, nil, headers, true)
 		if err != nil {
 			return errors.New("target_probe_failed")
 		}
@@ -112,14 +129,29 @@ func (m *CodexHarvestManager) testGatewayWSModel(ctx context.Context, a *auth.Ac
 			turn = trace.turns[round]
 		}
 		trace.mu.Unlock()
-		if turn == nil {
+		if fixed && turn == nil {
 			return errors.New("target_probe_failed") // A stub/HTTP fallback is not WS evidence.
 		}
-		turn.mu.Lock()
-		qualified, id, connID := turn.done && turn.success, turn.responseID, turn.connectionID
-		turn.mu.Unlock()
-		if !qualified || id == "" || connID == "" || (round > 0 && connID != connectionID) {
-			return errors.New("target_probe_failed")
+		id, connID := "", ""
+		if fixed {
+			turn.mu.Lock()
+			qualified := turn.done && turn.success
+			id, connID = turn.responseID, turn.connectionID
+			turn.mu.Unlock()
+			if !qualified || id == "" || connID == "" || (round > 0 && connID != connectionID) {
+				return errors.New("target_probe_failed")
+			}
+		} else {
+			observation := gatewayWSObservationFromContext(requestCtx)
+			if observation == nil {
+				return errors.New("target_probe_failed")
+			}
+			observation.mu.Lock()
+			qualified := observation.connected && observation.completed
+			observation.mu.Unlock()
+			if !qualified {
+				return errors.New("target_probe_failed")
+			}
 		}
 		text := ""
 		_ = ReadSSEStream(strings.NewReader(string(raw)), func(frame []byte) bool {

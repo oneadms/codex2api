@@ -33,7 +33,7 @@ before(async () => {
               return structuredClone(window.__settings);
             },
             testCodexGateway: async (action, account_id) => { window.__diagnostics.push({action,account_id}); return { action, account_id, success:true, reason:'success', duration_ms:1, checked_at:new Date().toISOString() } },
-            getCodexGatewayHistory: async () => ({items:[],total:0}),
+            getCodexGatewayHistory: async () => ({items:structuredClone(window.__history ?? []),total:(window.__history ?? []).length}),
             listProxies: async () => ({proxies: window.__proxies}),
           }
         `
@@ -232,6 +232,41 @@ test('WS diagnostic is available before any business session exists', async t =>
   await button.click()
   await page.waitForFunction(() => window.__diagnostics.length === 1)
   assert.deepEqual(await page.evaluate(() => window.__diagnostics[0]), {action:'ws',account_id:3})
+})
+
+test('borrowing history shows the actual source, cookie sending and request outcome separately', async t => {
+  const page = await fixture(t)
+  await page.evaluate(() => {
+    const base = { source_account_id: 1, target_account_id: 3, gateway: 'gateway.example', transport: 'websocket', checked_at: new Date().toISOString() }
+    window.__history = [
+      { ...base, id: 1, action: 'ws_test', model: 'gpt-6-astra', borrow_status: 'borrowed', borrowed_cookie_sent: true, success: true, reason: 'success', proxy_node: 'Tokyo source' },
+      { ...base, id: 2, action: 'ws_request', model: 'gpt-6.1-sol', borrow_status: 'borrowed', borrowed_cookie_sent: true, success: false, reason: 'request_failed' },
+      { ...base, id: 3, action: 'ws_request', model: 'gpt-6-sol', borrow_status: 'continued', success: true, reason: 'success' },
+      { ...base, id: 4, source_account_id: 0, action: 'ws_test', model: 'gpt-6-astra', borrow_status: 'unavailable', success: true, reason: 'success' },
+      { ...base, id: 5, source_account_id: 0, action: 'verify', success: false, reason: 'target_probe_failed' },
+    ]
+  })
+  await page.getByRole('button', { name: harvestEn.show, exact: true }).click()
+  const table = page.getByRole('table').filter({ has: page.getByRole('columnheader', { name: harvestEn.borrowStatus, exact: true }) })
+  const rows = table.locator('tbody tr')
+  await rows.first().getByText(harvestEn.borrowCookieSent, { exact: true }).waitFor()
+  assert.equal(await rows.count(), 5)
+  await rows.nth(0).getByText('#1', { exact: true }).waitFor()
+  await rows.nth(0).getByText('#3', { exact: true }).waitFor()
+  await rows.nth(0).getByText(harvestEn.historyActions.ws_test, { exact: true }).waitFor()
+  await rows.nth(0).getByText('Tokyo source', { exact: true }).waitFor()
+  await rows.nth(1).getByRole('cell', { name: /^gpt-6\.1-sol/ }).waitFor()
+  await rows.nth(1).getByText(harvestEn.borrowStatuses.borrowed, { exact: true }).waitFor()
+  await rows.nth(1).getByText(harvestEn.failed, { exact: true }).waitFor()
+  await rows.nth(2).getByText(harvestEn.borrowCookieContinued, { exact: true }).waitFor()
+  await rows.nth(3).getByText(harvestEn.borrowStatuses.unavailable, { exact: true }).waitFor()
+  await rows.nth(3).getByText(harvestEn.success, { exact: true }).waitFor()
+  assert.equal(await rows.nth(4).getByText(harvestEn.borrowCookieSent, { exact: true }).count(), 0)
+
+  // 首页保持展开时自动载入新结果，不需要再点击测试。
+  await page.evaluate(() => window.__history.unshift({ ...window.__history[0], id: 6, source_account_id: 2 }))
+  await table.getByText('#2', { exact: true }).waitFor()
+  assert.deepEqual(await page.evaluate(() => window.__diagnostics), [])
 })
 
 test('proxy picker selects real proxy IDs, rejects disabled rows and hides credentials', async t => {

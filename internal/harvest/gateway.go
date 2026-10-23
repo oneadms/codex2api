@@ -160,14 +160,20 @@ type GatewayTestResult struct {
 	CheckedAt  time.Time `json:"checked_at"`
 }
 type GatewayHistoryRecord struct {
-	ID              int64     `json:"id"`
-	SourceAccountID int64     `json:"source_account_id"`
-	TargetAccountID int64     `json:"target_account_id"`
-	Gateway         string    `json:"gateway"`
-	Action          string    `json:"action"`
-	Success         bool      `json:"success"`
-	Reason          string    `json:"reason"`
-	CheckedAt       time.Time `json:"checked_at"`
+	ID                 int64     `json:"id"`
+	SourceAccountID    int64     `json:"source_account_id"`
+	TargetAccountID    int64     `json:"target_account_id"`
+	Gateway            string    `json:"gateway"`
+	Action             string    `json:"action"`
+	Success            bool      `json:"success"`
+	Reason             string    `json:"reason"`
+	CheckedAt          time.Time `json:"checked_at"`
+	Model              string    `json:"model,omitempty"`
+	Transport          string    `json:"transport,omitempty"`
+	BorrowStatus       string    `json:"borrow_status,omitempty"`
+	BorrowedCookieSent bool      `json:"borrowed_cookie_sent,omitempty"`
+	ProxyNode          string    `json:"proxy_node,omitempty"`
+	DurationMS         int64     `json:"duration_ms,omitempty"`
 }
 type GatewayHistoryPage struct {
 	Items []GatewayHistoryRecord `json:"items"`

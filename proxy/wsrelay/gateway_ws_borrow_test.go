@@ -22,7 +22,7 @@ import (
 
 func TestGatewayWSBorrowCookieWithMissingTargetTicket(t *testing.T) {
 	for _, model := range []string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol"} {
-		for _, mode := range []string{"ordinary", "fixed", "node-fixed", "connection-test", "diagnostic"} {
+		for _, mode := range []string{"ordinary", "fixed", "node-fixed", "connection-test", "connection-test-skipped", "verify-target", "diagnostic", "upstream-error"} {
 			t.Run(model+"/"+mode, func(t *testing.T) {
 				manager, sourceID, targetID := newGatewayManager(t)
 				policy := auth.ConfiguredCodexTicketSettings()
@@ -36,6 +36,13 @@ func TestGatewayWSBorrowCookieWithMissingTargetTicket(t *testing.T) {
 				target.Mu().Lock()
 				target.PlanType, target.AccountID = "team5x", "target-workspace"
 				target.Mu().Unlock()
+				if mode == "connection-test-skipped" {
+					scope := harvest.DefaultScope()
+					scope.SkippedAccountIDs = []int64{targetID}
+					if err := manager.SaveScope(t.Context(), scope); err != nil {
+						t.Fatal(err)
+					}
+				}
 				seedGatewayWSTicket(t, source)
 				cookie, _ := (&http.Request{Header: http.Header{"Cookie": {source.CodexTicketSnapshot("gpt-6-astra").Cookie}}}).Cookie("__oailb")
 				var expectedCookie atomic.Value
@@ -71,6 +78,10 @@ func TestGatewayWSBorrowCookieWithMissingTargetTicket(t *testing.T) {
 							t.Error("续聊没有回到原连接")
 						}
 						previous = fmt.Sprintf("borrow_%d", requests.Add(1))
+						if mode == "upstream-error" {
+							_ = conn.WriteJSON(map[string]any{"type": "response.failed", "response": map[string]any{"model": model, "status": "failed", "error": map[string]any{"code": "server_error", "message": "private-upstream-error"}}})
+							continue
+						}
 						_ = conn.WriteJSON(map[string]any{"type": "response.completed", "response": map[string]any{
 							"id": previous, "model": model, "status": "completed", "error": nil,
 							"output": []any{map[string]any{"content": []any{map[string]any{"type": "output_text", "text": "OK"}}}},
@@ -94,7 +105,7 @@ func TestGatewayWSBorrowCookieWithMissingTargetTicket(t *testing.T) {
 				v := harvest.DefaultGatewaySettings()
 				v.CookiePool.Enabled = true
 				v.CookiePool.SourceAccountIDs, v.CookiePool.TargetAccountIDs = []int64{sourceID}, []int64{targetID}
-				v.WSSession.Enabled = mode != "ordinary"
+				v.WSSession.Enabled = mode != "ordinary" && mode != "verify-target" && mode != "upstream-error"
 				v.WSSession.AccountIDs = []int64{targetID}
 				v.Revision, v.RouteRevision = "borrow-test", "borrow-test"
 				raw, _ := json.Marshal(v)
@@ -130,6 +141,54 @@ func TestGatewayWSBorrowCookieWithMissingTargetTicket(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 				defer cancel()
 				ctx = proxy.WithResinConfig(ctx, &proxy.ResinConfig{BaseURL: "http://127.0.0.1:1", PlatformName: "must-not-override-source"})
+				// 逐次核对历史，握手借用与上游请求结果必须分别保留。
+				assertHistory := func(statuses ...string) {
+					t.Helper()
+					page, err := manager.Repository.GatewayHistory(t.Context(), 0, 25)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var records []harvest.GatewayHistoryRecord
+					for _, record := range page.Items {
+						if record.Action == "ws_request" || record.Action == "ws_test" {
+							records = append(records, record)
+						}
+					}
+					if len(records) != len(statuses) {
+						t.Fatalf("记录数不符: got %d want %d: %+v", len(records), len(statuses), records)
+					}
+					for i, status := range statuses {
+						record := records[i]
+						if record.BorrowStatus != status || record.Model != model || record.Transport != "websocket" || record.TargetAccountID != targetID || record.BorrowedCookieSent != (status == "borrowed") {
+							t.Fatalf("借用记录与真实请求不符: %+v", record)
+						}
+						if status != "unavailable" && record.SourceAccountID != sourceID {
+							t.Fatalf("来源账号不符: %+v", record)
+						}
+						if record.Success != (status != "unavailable" && mode != "upstream-error") {
+							t.Fatalf("请求结果不符: %+v", record)
+						}
+						if strings.HasPrefix(mode, "connection-test") || mode == "diagnostic" || mode == "verify-target" {
+							if record.Action != "ws_test" {
+								t.Fatalf("测试入口未标记为 WS 测试: %+v", record)
+							}
+						}
+					}
+					raw, _ := json.Marshal(page)
+					for _, secret := range []string{cookie.Value, "ws-token", "private-upstream-error"} {
+						if strings.Contains(string(raw), secret) {
+							t.Fatal("历史不得保存 Cookie 值、登录凭据或上游错误正文")
+						}
+					}
+				}
+				if mode == "verify-target" {
+					result, err := manager.TestGateway(ctx, "verify", targetID)
+					if err != nil || !result.Success || dials.Load() != 1 || requests.Load() != 1 {
+						t.Fatalf("不开固定会话也应完成 WS 目标验证: %+v %v", result, err)
+					}
+					assertHistory("borrowed")
+					return
+				}
 				if mode == "diagnostic" {
 					if err := manager.TestGatewayWS(ctx, target.ID()); err != nil {
 						t.Fatalf("%s 借路由诊断失败: %v", model, err)
@@ -137,10 +196,11 @@ func TestGatewayWSBorrowCookieWithMissingTargetTicket(t *testing.T) {
 					if dials.Load() != 1 || requests.Load() != 2 || target.CodexTicketSnapshot(model) != nil {
 						t.Fatal("诊断必须借路由在同一连接完成两轮，不生成目标完整票")
 					}
+					assertHistory("continued", "borrowed")
 					return
 				}
 				headers, key := http.Header{"Session-Id": {"borrow-session"}}, "borrow-key"
-				if mode == "connection-test" {
+				if strings.HasPrefix(mode, "connection-test") {
 					ctx, headers, key = proxy.WithCodexSyntheticProbe(ctx), nil, ""
 				}
 				first, err := proxy.ExecuteRequest(ctx, target, requestBody("first", ""), "", "", key, nil, headers, true)
@@ -148,6 +208,10 @@ func TestGatewayWSBorrowCookieWithMissingTargetTicket(t *testing.T) {
 					t.Fatalf("目标无票时未借用 WS 路由: %v", err)
 				}
 				body, err := readAllHTTPBody(first)
+				if mode == "upstream-error" {
+					assertHistory("borrowed")
+					return
+				}
 				if err != nil || gatewayWSResponseID(body) == "" {
 					t.Fatalf("借路由响应失败: %v %s", err, body)
 				}
@@ -166,6 +230,9 @@ func TestGatewayWSBorrowCookieWithMissingTargetTicket(t *testing.T) {
 					if nodeSelections != nil && nodeSelections.Load() != 1 {
 						t.Fatalf("建立连接时未锁定来源节点: %d", nodeSelections.Load())
 					}
+					assertHistory("continued", "borrowed")
+				} else {
+					assertHistory("borrowed")
 				}
 				if target.CodexTicketSnapshot(model) != nil {
 					t.Fatal("借路由不能把来源完整票保存成目标票")
@@ -192,6 +259,7 @@ func TestGatewayWSBorrowCookieWithMissingTargetTicket(t *testing.T) {
 					if err == nil || !strings.Contains(err.Error(), "codex_ticket_unavailable") || requests.Load() != 2 {
 						t.Fatalf("没有来源时应继续缺票拦截: %v", err)
 					}
+					assertHistory("unavailable", "borrowed", "borrowed")
 				}
 			})
 		}

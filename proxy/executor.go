@@ -651,6 +651,14 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	}
 	defer func() { retainCodexTicketEgress(ctx, upstreamResponse, ticketRelease) }()
 	usingWebsocket := wantWebsocket && WebsocketExecuteFunc != nil
+	if usingWebsocket {
+		ctx = BeginCodexGatewayWSObservation(ctx, account, gjson.GetBytes(requestBody, "model").String())
+		defer func() {
+			if upstreamResponse == nil || upstreamErr != nil {
+				FinishCodexGatewayWSObservation(ctx, true)
+			}
+		}()
+	}
 	fixedGatewayWS := false
 	if usingWebsocket {
 		var err error

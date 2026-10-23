@@ -530,6 +530,13 @@ func (g *codexGatewayManager) verify(ctx context.Context, v harvest.GatewaySetti
 	}
 	protocol := "sse"
 	if gatewayUnified(v) {
+		controls, _, err := g.owner.Controls.Controls(ctx)
+		if err != nil {
+			return err
+		}
+		if controls.Transport == "websocket" {
+			return g.owner.testGatewayWebsocket(ctx, id, false)
+		}
 		if t := a.CodexTicketForModel(gatewayModel, time.Now(), 780, protocol); t != nil {
 			return nil
 		}
@@ -540,10 +547,6 @@ func (g *codexGatewayManager) verify(ctx context.Context, v harvest.GatewaySetti
 			return errors.New("target_validation_in_progress")
 		}
 		defer g.owner.harvestMu.Unlock()
-		controls, _, _ := g.owner.Controls.Controls(ctx)
-		if controls.Transport != "sse" {
-			return errors.New("websocket_ticket_unavailable")
-		}
 		if a.CodexTicketProbeCoolingDown(gatewayModel, time.Now()) {
 			return errors.New("source_probe_cooldown")
 		}

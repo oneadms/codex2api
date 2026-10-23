@@ -115,6 +115,12 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = proxy.BeginCodexGatewayWSObservation(ctx, account, gjson.GetBytes(requestBody, "model").String())
+	defer func() {
+		if response == nil || requestErr != nil {
+			proxy.FinishCodexGatewayWSObservation(ctx, true)
+		}
+	}()
 	ctx = proxy.WithResinConfig(ctx, proxy.ResinConfigFromContext(ctx))
 	viaResin := proxy.IsResinEnabledForContext(ctx)
 	freshConnection := proxy.FreshCodexConnection(ctx)
@@ -294,6 +300,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	if err2 != nil {
 		return nil, err2
 	}
+	proxy.ObserveCodexGatewayWSHandshake(ctx, headers, gatewayTurn != nil && gjson.GetBytes(wsBody, "previous_response_id").String() != "")
 	// AcquireConnection 可能按 busy overflow 策略落到 <lane>#ovf-N；
 	// response_id 续链绑定和发送失败后的重拨都必须使用实际槽位，不能继续
 	// 记录调用前的 base lane。普通、stateless slot 与 preferred 路径在这里
@@ -659,6 +666,7 @@ func (r *WsResponse) handleMessage(payload []byte, callback func(data []byte) bo
 
 	// 标准化完成事件类型
 	payload = normalizeCompletionEvent(payload)
+	proxy.ObserveCodexGatewayWSFrame(r.ctx, payload)
 
 	if r.gatewayTurn != nil {
 		r.gatewayTurn.Observe(payload)
@@ -796,6 +804,7 @@ func (r *WsResponse) Close() error {
 	}
 
 	r.closed = true
+	defer func() { proxy.FinishCodexGatewayWSObservation(r.ctx, r.connBroken || !r.streamCompleted) }()
 	if r.gatewayRelease != nil {
 		defer r.gatewayRelease()
 	}

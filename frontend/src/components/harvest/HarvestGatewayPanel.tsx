@@ -116,6 +116,24 @@ export default function HarvestGatewayPanel({ accounts, busy, onAction }: { acco
     } catch (err) { setError(getGatewayError(err, t)) }
   }, [t])
 
+  useEffect(() => {
+    if (!historyOpen || historyOffset !== 0) return
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout>
+    const refresh = async () => {
+      try {
+        const page = await api.getCodexGatewayHistory(0)
+        if (!stopped) setHistory(page)
+      } catch (err) {
+        if (!stopped) setError(getGatewayError(err, t))
+      } finally {
+        if (!stopped) timer = setTimeout(() => void refresh(), 5000)
+      }
+    }
+    timer = setTimeout(() => void refresh(), 5000)
+    return () => { stopped = true; clearTimeout(timer) }
+  }, [historyOpen, historyOffset, t])
+
   const update = (patch: (current: GatewaySettings) => GatewaySettings) => {
     markTouched()
     setDraft(current => current ? patch(current) : current)
@@ -277,13 +295,16 @@ export default function HarvestGatewayPanel({ accounts, busy, onAction }: { acco
       <p className="mb-3 flex items-center gap-1.5 text-xs leading-relaxed text-muted-foreground"><ShieldCheck className="size-3.5 shrink-0" />{t('harvest.historyMasked')}</p>
       {historyOpen && (history === null ? <div role="status" className="flex items-center gap-2 py-6 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin motion-reduce:animate-none" />{t('common.loading')}</div>
         : history.items.length === 0 ? <p className="py-6 text-sm text-muted-foreground">{t('harvest.noRecords')}</p>
-        : <div className="overflow-x-auto"><table className={harvestTableClass}><thead><tr>{['time', 'action', 'source', 'target', 'gatewayHost', 'result'].map(col => <th key={col}>{t(`harvest.${col}`)}</th>)}</tr></thead>
+        : <div className="overflow-x-auto"><table className={harvestTableClass}><thead><tr>{['time', 'action', 'source', 'target', 'model', 'borrowStatus', 'borrowedCookie', 'gatewayHost', 'result'].map(col => <th key={col}>{t(`harvest.${col}`)}</th>)}</tr></thead>
           <tbody>{history.items.map(record => <tr key={record.id}>
             <td className="whitespace-nowrap text-xs">{harvestTime(record.checked_at)}</td>
             <td className="whitespace-nowrap text-xs">{t(`harvest.historyActions.${record.action}`, { defaultValue: record.action })}</td>
-            <td className="font-mono text-xs">#{record.source_account_id || '—'}</td>
-            <td className="font-mono text-xs">#{record.target_account_id}</td>
-            <td className="max-w-40 break-all font-mono text-xs">{record.gateway || '—'}</td>
+            <td className="font-mono text-xs">{record.source_account_id ? `#${record.source_account_id}` : '—'}</td>
+            <td className="font-mono text-xs">{record.target_account_id ? `#${record.target_account_id}` : '—'}</td>
+            <td className="whitespace-nowrap font-mono text-xs">{record.model || '—'}{record.transport && <span className="block text-muted-foreground">{record.transport.toUpperCase()}</span>}</td>
+            <td className="text-xs">{record.borrow_status ? t(`harvest.borrowStatuses.${record.borrow_status}`, { defaultValue: record.borrow_status }) : '—'}</td>
+            <td className="text-xs">{!record.borrow_status ? '—' : record.borrowed_cookie_sent ? t('harvest.borrowCookieSent') : record.borrow_status === 'continued' ? t('harvest.borrowCookieContinued') : t('harvest.borrowCookieNotSent')}</td>
+            <td className="max-w-40 break-all font-mono text-xs">{record.gateway || '—'}{record.proxy_node && <span className="block text-muted-foreground">{record.proxy_node}</span>}</td>
             <td><HarvestPill good={record.success}>{t(record.success ? 'harvest.success' : 'harvest.failed')}</HarvestPill><span className="mt-1 block text-xs text-muted-foreground">{t(`harvest.gatewayReasons.${record.reason}`, { defaultValue: record.reason })}</span></td>
           </tr>)}</tbody></table>
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground"><span>{t('harvest.total', { count: history.total })}</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={historyOffset === 0} onClick={() => void loadHistory(Math.max(0, historyOffset - 25))}>{t('harvest.previous')}</Button><Button size="sm" variant="outline" disabled={historyOffset + 25 >= history.total} onClick={() => void loadHistory(historyOffset + 25)}>{t('harvest.next')}</Button></div></div>

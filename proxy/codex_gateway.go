@@ -280,6 +280,8 @@ func (g *codexGatewayManager) start() {
 	g.owner.DB.RunBackgroundTask(func(ctx context.Context) {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
+		historyCleanup := time.NewTicker(time.Minute)
+		defer historyCleanup.Stop()
 		for {
 			select {
 			case <-ctx.Done():
@@ -292,6 +294,11 @@ func (g *codexGatewayManager) start() {
 				sample, cancel := context.WithTimeout(ctx, 4*time.Second)
 				g.owner.ObserveHarvestCoverage(sample)
 				g.owner.SyncHarvestScheduling(sample)
+				cancel()
+			case <-historyCleanup.C:
+				// 请求记录按既有保留期清理，避免业务流量使历史表持续增长。
+				query, cancel := context.WithTimeout(ctx, 3*time.Second)
+				_ = g.owner.Repository.PruneGatewayHistory(query)
 				cancel()
 			}
 		}

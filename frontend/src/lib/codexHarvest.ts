@@ -104,6 +104,7 @@ export interface GatewayTestResult { action: 'prepare' | 'verify' | 'ws'; accoun
 export interface GatewayHistoryRecord {
   id: number; source_account_id: number; target_account_id: number; gateway: string; action: string
   success: boolean; reason: string; checked_at: string
+  model?: string; transport?: string; borrow_status?: string; borrowed_cookie_sent?: boolean; proxy_node?: string; duration_ms?: number
 }
 
 export const harvestSpeedFields: (keyof HarvestSpeed)[] = ['round_interval_seconds', 'probe_interval_seconds', 'attempt_timeout_seconds', 'cooldown_seconds', 'max_requests_per_round', 'max_node_attempts', 'refresh_before_seconds']
