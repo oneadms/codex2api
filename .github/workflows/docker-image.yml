@@ -25,6 +25,7 @@ env:
   IMAGE_NAME: oneadms/codex2api
 
 jobs:
+  # 三类检查使用独立 runner 并行执行，全部成功后才构建镜像。
   harvest-check:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -45,14 +46,50 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+          cache: false
+      # 普通测试和 race 分开缓存；按提交保存，并复用上一提交的编译结果。
+      - name: Cache Go modules and build outputs
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-docker-go-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-docker-go-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum') }}-
       - name: Validate Mihomo and harvest integration on Linux
         run: go test -count=1 -timeout 8m ./internal/mihomo ./internal/harvest ./internal/util/logredact ./internal/diag ./api ./auth ./database ./proxy ./proxy/wsrelay ./admin
       - name: Validate harvest persistence in isolated PostgreSQL
         env:
           CODEX2API_TEST_POSTGRES_DSN: postgres://codex2api_test:test-only@localhost:5432/codex2api_test?sslmode=disable
         run: go test -count=1 -timeout 2m ./database -run '^TestCodex(HarvestPersistence|GatewaySettingsPersistence)$'
+
+  harvest-race:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Cache Go modules and build outputs
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-docker-go-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-docker-go-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum') }}-
       - name: Validate harvest concurrency
         run: go test -race -count=1 -timeout 5m ./internal/harvest ./internal/mihomo ./proxy ./proxy/wsrelay ./admin ./database -run 'TestCodexGateway|TestGateway|TestCodexHarvest|TestCodexTicketHTTPFeedback|TestCodexTicketFeedbackCompletion|TestHarvestNodeRanking|TestUseOnce|TestCountry'
+
+  harvest-frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -64,8 +101,9 @@ jobs:
       - name: Validate harvest settings and proxy selection in Chromium
         working-directory: frontend
         run: npx playwright install --with-deps chromium && npm run test:harvest
+
   docker:
-    needs: harvest-check
+    needs: [harvest-check, harvest-race, harvest-frontend]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
