@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/codex2api/auth"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -50,15 +51,30 @@ func (m *CodexHarvestManager) TestGatewayWS(ctx context.Context, accountID int64
 	if !gatewayAccountEligible(a) {
 		return errors.New("account_unavailable")
 	}
-	enabled, err := CodexGatewayWSRequired(ctx, a, gatewayModel)
+	models := []string{gatewayModel}
+	settings := auth.ConfiguredCodexTicketSettings()
+	if auth.CodexTicketGateEnabled() && settings.TargetLength == 780 {
+		models = settings.Models
+	}
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	for _, model := range models {
+		if err := m.testGatewayWSModel(ctx, a, model); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// 每个配置模型独立验收两轮原连接续聊，不能用另一个模型的成功结果代替。
+func (m *CodexHarvestManager) testGatewayWSModel(ctx context.Context, a *auth.Account, model string) error {
+	enabled, err := CodexGatewayWSRequired(ctx, a, model)
 	if err != nil {
 		return err
 	}
 	if !enabled || WebsocketExecuteFunc == nil {
 		return errors.New("websocket_disabled")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
-	defer cancel()
 	trace := &gatewayWSDiagnostic{}
 	ctx = context.WithValue(ctx, gatewayWSDiagnosticKey{}, trace)
 	defer func() {
@@ -73,7 +89,7 @@ func (m *CodexHarvestManager) TestGatewayWS(ctx context.Context, accountID int64
 	headers := http.Header{"Session-Id": []string{session}}
 	previous, connectionID := "", ""
 	for round := 0; round < 2; round++ {
-		body := codexTicketHarvestProbeBody(gatewayModel)
+		body := codexTicketHarvestProbeBody(model)
 		if previous != "" {
 			body, _ = sjson.SetBytes(body, "previous_response_id", previous)
 		}

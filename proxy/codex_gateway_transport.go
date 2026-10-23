@@ -21,9 +21,12 @@ type gatewayRequestKey struct{}
 type gatewayRequest struct {
 	route          gatewayRoute
 	revision       string
+	accountID      int64
+	model          string
+	websocket      bool
 	effectiveProxy string
 	proxyBound     bool // true with an empty proxy means explicitly direct
-	fresh          bool // a managed selector must not reuse an HTTP transport
+	fresh          bool // HTTP 换节点时不复用连接，普通 WS 借路由时必须重发握手 Cookie
 }
 
 // CodexGatewayEgressFromContext binds the Cookie to the exit actually selected
@@ -71,19 +74,33 @@ func gatewayHTTPClient(ctx context.Context, c *http.Client) *http.Client {
 	return &copy
 }
 func prepareCodexGatewayHTTP(ctx context.Context, a *auth.Account, body []byte, proxy string) (context.Context, string, func(), error) {
+	return prepareCodexGatewayRequest(ctx, a, body, proxy, false)
+}
+
+func prepareCodexGatewayRequest(ctx context.Context, a *auth.Account, body []byte, proxy string, websocket bool) (context.Context, string, func(), error) {
 	noop := func() {}
 	m := codexHarvester.Load()
-	if m == nil || a == nil || !a.SupportsCodexTickets() || gjson.GetBytes(body, "model").String() != gatewayModel || CodexTurnStateInjectionFromContext(ctx) != "" {
+	model := auth.NormalizeCodexTicketModel(gjson.GetBytes(body, "model").String())
+	if m == nil || a == nil || !a.SupportsCodexTickets() || (model != gatewayModel && (!websocket || !auth.CodexTicketModelGated(model))) || CodexTurnStateInjectionFromContext(ctx) != "" {
 		return ctx, proxy, noop, nil
 	}
-	if bound, ok := ctx.Value(gatewayRequestKey{}).(gatewayRequest); ok && bound.proxyBound {
+	if bound, ok := ctx.Value(gatewayRequestKey{}).(gatewayRequest); ok && bound.proxyBound && bound.accountID == a.ID() && bound.model == model && bound.websocket == websocket {
 		return ctx, bound.effectiveProxy, noop, nil
 	}
 	v, err := m.GatewaySettings(ctx)
 	if err != nil {
 		return ctx, proxy, noop, err
 	}
-	if !v.CookiePool.Enabled || !slices.Contains(v.CookiePool.TargetAccountIDs, a.ID()) || gatewayUnified(v) {
+	if !v.CookiePool.Enabled || !slices.Contains(v.CookiePool.TargetAccountIDs, a.ID()) {
+		return ctx, proxy, noop, nil
+	}
+	if gatewayUnified(v) {
+		if websocket && auth.CodexTicketModelGated(model) {
+			return m.prepareStoredGatewayWebsocket(ctx, a, v, model, proxy)
+		}
+		return ctx, proxy, noop, nil
+	}
+	if model != gatewayModel {
 		return ctx, proxy, noop, nil
 	}
 	g := m.gatewayManager()
@@ -109,14 +126,14 @@ func prepareCodexGatewayHTTP(ctx context.Context, a *auth.Account, body []byte, 
 		}
 		return ctx, proxy, noop, nil
 	}
-	bound := gatewayRequest{route: r, revision: gatewayRouteRevision(v), effectiveProxy: effective, proxyBound: true, fresh: r.nodeID != ""}
+	bound := gatewayRequest{route: r, revision: gatewayRouteRevision(v), accountID: a.ID(), model: model, websocket: websocket, effectiveProxy: effective, proxyBound: true, fresh: r.nodeID != "" || websocket}
 	return context.WithValue(ctx, gatewayRequestKey{}, bound), effective, release, nil
 }
 
 // PrepareCodexGatewayWebsocket also covers non-fixed WS traffic. It runs before
 // URL rewriting/dialer resolution and keeps the lease until the response closes.
 func PrepareCodexGatewayWebsocket(ctx context.Context, a *auth.Account, body []byte, proxyURL string) (context.Context, string, func(), error) {
-	return prepareCodexGatewayHTTP(ctx, a, body, proxyURL)
+	return prepareCodexGatewayRequest(ctx, a, body, proxyURL, true)
 }
 
 type gatewayLeaseBody struct {
@@ -157,20 +174,25 @@ type gatewayAnchor struct {
 // GatewayWSTurn is an opt-in fixed-session turn, independent of ordinary WS
 // pooling. It never contains source OAuth or source turn-state.
 type GatewayWSTurn struct {
-	g                        *codexGatewayManager
-	key, revision, identity  string
-	accountID                int64
-	anchor                   *gatewayAnchor
-	mu                       sync.Mutex
-	done                     bool
-	responseID, connectionID string
-	success                  bool
-	release                  func()
+	g                              *codexGatewayManager
+	key, revision, identity, model string
+	accountID                      int64
+	anchor                         *gatewayAnchor
+	mu                             sync.Mutex
+	done                           bool
+	responseID, connectionID       string
+	success                        bool
+	release                        func()
 }
+
+type gatewayWSTurnKey struct{}
 
 func (t *GatewayWSTurn) ProxyURL() string { return t.anchor.proxy }
 func (t *GatewayWSTurn) PoolKey() string  { return "gateway:" + t.key + ":" + t.anchor.nonce }
 func (t *GatewayWSTurn) Context(ctx context.Context) context.Context {
+	if current, _ := ctx.Value(gatewayWSTurnKey{}).(*GatewayWSTurn); current == t {
+		return ctx
+	}
 	if t.anchor.egress != nil {
 		ctx = context.WithValue(ctx, gatewayRequestKey{}, *t.anchor.egress)
 	}
@@ -184,7 +206,7 @@ func (t *GatewayWSTurn) Context(ctx context.Context) context.Context {
 		}
 	}
 	t.mu.Unlock()
-	return next
+	return context.WithValue(next, gatewayWSTurnKey{}, t)
 }
 func (t *GatewayWSTurn) CanRetain() bool {
 	t.mu.Lock()
@@ -222,7 +244,7 @@ func (t *GatewayWSTurn) Observe(frame []byte) {
 	switch e.Get("type").String() {
 	case "response.completed", "response.done":
 		t.responseID = e.Get("response.id").String()
-		t.success = t.responseID != "" && e.Get("response.model").String() == gatewayModel && e.Get("response.status").String() == "completed" && !e.Get("response.error").IsObject()
+		t.success = t.responseID != "" && auth.NormalizeCodexTicketModel(e.Get("response.model").String()) == t.model && e.Get("response.status").String() == "completed" && !e.Get("response.error").IsObject()
 	case "error", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
 		t.success = false
 	}
@@ -270,8 +292,13 @@ func gatewayWSIdentity(a *auth.Account) string {
 }
 func BeginCodexGatewayWSTurn(ctx context.Context, a *auth.Account, body []byte, headers http.Header, apiKey, proxy string) (*GatewayWSTurn, error) {
 	m := codexHarvester.Load()
-	if m == nil || a == nil || !a.SupportsCodexTickets() || gjson.GetBytes(body, "model").String() != gatewayModel {
+	model := auth.NormalizeCodexTicketModel(gjson.GetBytes(body, "model").String())
+	if m == nil || a == nil || !a.SupportsCodexTickets() || (model != gatewayModel && !auth.CodexTicketModelGated(model)) {
 		return nil, nil
+	}
+	// 公共执行器先准备固定会话再检查缺票，WS 执行器沿用同一轮，避免重复占用锚点。
+	if turn, _ := ctx.Value(gatewayWSTurnKey{}).(*GatewayWSTurn); turn != nil && turn.accountID == a.ID() && turn.model == model {
+		return turn, nil
 	}
 	// 防御纵深：合成探针即使绕过 CodexGatewayWSRequired 也必须在这里放行到
 	// 普通路径。锚点键由 API Key + 客户端会话标识构成，合成探针两者皆无。
@@ -303,7 +330,8 @@ func BeginCodexGatewayWSTurn(ctx context.Context, a *auth.Account, body []byte, 
 		groupScope = string(raw)
 	}
 	revision := gatewayRouteRevision(v)
-	keyHash := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%s\x00%s", apiKey, a.ID(), scope, identity, revision, groupScope)))
+	// 同一客户端切换模型时分别保留原连接，响应锚点不能跨模型续接。
+	keyHash := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%s\x00%s\x00%s", apiKey, a.ID(), scope, identity, revision, groupScope, model)))
 	key := hex.EncodeToString(keyHash[:])
 	previous := gjson.GetBytes(body, "previous_response_id").String()
 	g := m.gatewayManager()
@@ -340,9 +368,9 @@ func BeginCodexGatewayWSTurn(ctx context.Context, a *auth.Account, body []byte, 
 	if discardPrevious != nil {
 		discardPrevious()
 	}
-	turn := &GatewayWSTurn{g: g, key: key, revision: revision, identity: identity, accountID: a.ID(), anchor: anchor, release: func() {}}
+	turn := &GatewayWSTurn{g: g, key: key, revision: revision, identity: identity, model: model, accountID: a.ID(), anchor: anchor, release: func() {}}
 	if previous == "" {
-		prepared, effective, release, err := prepareCodexGatewayHTTP(ctx, a, body, proxy)
+		prepared, effective, release, err := PrepareCodexGatewayWebsocket(ctx, a, body, proxy)
 		if err != nil {
 			turn.Finish(true)
 			return nil, err

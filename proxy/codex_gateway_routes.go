@@ -308,15 +308,15 @@ func (g *codexGatewayManager) prepareSources(ctx context.Context, v harvest.Gate
 	}
 	return errors.New("no_qualified_source_route")
 }
-func gatewayStoredDonor(a *auth.Account, now time.Time) *auth.CodexTicket {
+func gatewayStoredDonor(a *auth.Account, model string, now time.Time, protocol string) *auth.CodexTicket {
 	if !gatewayAccountEligible(a) {
 		return nil
 	}
-	t := a.CodexTicketForModel(gatewayModel, now, 780, "sse")
-	if t == nil {
+	t := a.CodexTicketForModel(model, now, 780, protocol)
+	if t == nil || auth.NormalizeCodexTicketModel(t.Model) != model || t.Transport != protocol {
 		return nil
 	}
-	if t.Standby.Valid(now, 780) && t.Standby.Transport == "sse" && (t.Standby.Identity == "" || t.Standby.Identity == gatewayIdentity(a)) && t.Standby.EffectiveExpiry().After(t.EffectiveExpiry()) {
+	if t.Standby.Valid(now, 780) && t.Standby.Model == model && t.Standby.Transport == protocol && (t.Standby.Identity == "" || t.Standby.Identity == gatewayIdentity(a)) && t.Standby.EffectiveExpiry().After(t.EffectiveExpiry()) {
 		t = t.Standby
 	}
 	if t.EffectiveExpiry().Sub(now) <= 30*time.Second {
@@ -332,6 +332,15 @@ func (g *codexGatewayManager) prepareStoredSources(ctx context.Context, v harves
 	defer g.owner.harvestMu.RUnlock()
 	controls, _, _ := g.owner.Controls.Controls(ctx)
 	budget := controls.Speed.MaxRequestsPerRound
+	for _, model := range auth.ConfiguredCodexTicketSettings().Models {
+		if err := g.prepareStoredModelSources(ctx, v, model, controls, &budget); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (g *codexGatewayManager) prepareStoredModelSources(ctx context.Context, v harvest.GatewaySettings, model string, controls harvest.CodexHarvestControls, budget *int) error {
 	for _, id := range v.CookiePool.SourceAccountIDs {
 		if !g.current(ctx, v) {
 			return errors.New("configuration_changed")
@@ -340,22 +349,22 @@ func (g *codexGatewayManager) prepareStoredSources(ctx context.Context, v harves
 		if !gatewayAccountEligible(a) {
 			continue
 		}
-		if gatewayStoredDonor(a, time.Now()) != nil {
+		if gatewayStoredDonor(a, model, time.Now(), controls.Transport) != nil {
 			return nil
 		}
-		if budget < 2 {
-			break
+		if *budget < 2 {
+			continue
 		}
 		scope, err := g.owner.Scope(ctx)
-		if err != nil || !harvestAccountEligible(a, scope, true) || a.CodexTicketProbeCoolingDown(gatewayModel, time.Now()) {
+		if err != nil || !harvestAccountEligible(a, scope, true) || a.CodexTicketProbeCoolingDown(model, time.Now()) {
 			continue
 		}
 		if _, busy := g.owner.working.LoadOrStore(id, true); busy {
 			continue
 		}
-		g.owner.attempt(ctx, a, gatewayModel, auth.ConfiguredCodexTicketSettings().HarvestProxyURL, controls, &budget, map[string]bool{}, nil, "auto", "", 1)
+		g.owner.attempt(ctx, a, model, auth.ConfiguredCodexTicketSettings().HarvestProxyURL, controls, budget, map[string]bool{}, nil, "auto", "", 1)
 		g.owner.working.Delete(id)
-		if gatewayStoredDonor(a, time.Now()) != nil {
+		if gatewayStoredDonor(a, model, time.Now(), controls.Transport) != nil {
 			return nil
 		}
 	}

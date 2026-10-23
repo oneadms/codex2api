@@ -7,7 +7,7 @@ import (
 
 const ScopeKey = "codex_harvest_scope_v1"
 
-// Scope 只限制采票范围，不改变账号的业务调度资格。
+// Scope 管理采票范围；显式跳过名单同时豁免缺票拦截，其余范围条件不改变业务调度资格。
 type Scope struct {
 	Mode              string  `json:"mode"`
 	GroupIDs          []int64 `json:"group_ids"`

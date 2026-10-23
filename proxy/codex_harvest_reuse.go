@@ -18,7 +18,7 @@ type gatewayReuseGuard struct {
 func (m *CodexHarvestManager) reuseCandidate(ctx context.Context, target *auth.Account, model string, controls harvest.CodexHarvestControls, budget *int, tried map[string]bool) (*auth.CodexTicket, func()) {
 	noop := func() {}
 	key := "reuse:" + model
-	if target == nil || model != gatewayModel || controls.Transport != "sse" || auth.CodexTicketTargetLength(target.GetPlanType()) != 780 || tried[key] || *budget < 2 {
+	if target == nil || model != gatewayModel || !auth.CodexTicketModelGated(model) || controls.Transport != "sse" || auth.CodexTicketTargetLength(target.GetPlanType()) != 780 || tried[key] || *budget < 2 {
 		return nil, noop
 	}
 	v, err := m.GatewaySettings(ctx)

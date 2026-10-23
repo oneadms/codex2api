@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -156,7 +157,8 @@ func codexTicketForProtocol(account *auth.Account, protocol string, models ...st
 }
 
 // CodexTicketGateBlocked 判定本次是否应被 FailClosed 门控拒绝：开关打开、已配置代理
-// 与名单、请求模型命中门控名单、且无手工注入值也没有可用门票。返回命中的门控模型。
+// 与名单、请求模型命中门控名单、未显式跳过采票、且无手工注入值、可用门票或已绑定的 WS 借路由。
+// 返回命中的门控模型。
 // 手工注入优先于自动门票，所以手工值存在时绝不门控。
 func CodexTicketGateBlocked(ctx context.Context, account *auth.Account, clientModel, upstreamModel string) (string, bool) {
 	if !account.SupportsCodexTickets() || !auth.CodexTicketGateEnabled() || !auth.ConfiguredCodexTicketSettings().FailClosed {
@@ -176,17 +178,29 @@ func CodexTicketGateBlocked(ctx context.Context, account *auth.Account, clientMo
 		return "", false
 	}
 	targetLen := auth.CodexTicketTargetLength(account.GetPlanType())
+	prepared := false
 	if ctx != nil {
-		if _, prepared := ctx.Value(codexTurnStateInjectionKey{}).(string); prepared {
-			// 门控必须检查本次实际选中的票，不能因共享池刚好换票而放行未注入的请求。
-			if ticket := codexTicketFromContext(ctx); ticket != nil && ticket.Valid(time.Now(), targetLen) {
-				return "", false
-			}
-			return gated[0], true
-		}
+		_, prepared = ctx.Value(codexTurnStateInjectionKey{}).(string)
 	}
-	if _, ok := account.CodexTicketInjectionWithShared(time.Now(), targetLen, gated...); ok {
+	if prepared {
+		// 门控必须检查本次实际选中的票，不能因共享池刚好换票而放行未注入的请求。
+		if ticket := codexTicketFromContext(ctx); ticket != nil && ticket.Valid(time.Now(), targetLen) {
+			return "", false
+		}
+	} else if _, ok := account.CodexTicketInjectionWithShared(time.Now(), targetLen, gated...); ok {
 		return "", false
+	}
+	if codexGatewayWebsocketBorrowReady(ctx, account, upstreamModel) {
+		return "", false
+	}
+	// 仅在缺票时读取显式跳过名单；忙碌、冷却等采票条件不能成为出站豁免。
+	if m := codexHarvester.Load(); m != nil && m.Repository != nil {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if scope, err := m.Scope(ctx); err == nil && slices.Contains(scope.SkippedAccountIDs, account.ID()) {
+			return "", false
+		}
 	}
 	return gated[0], true
 }

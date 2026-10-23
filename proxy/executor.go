@@ -650,28 +650,47 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		return nil, ticketErr
 	}
 	defer func() { retainCodexTicketEgress(ctx, upstreamResponse, ticketRelease) }()
-	// FailClosed 门控：门控模型上没有可用门票时拒绝出站。放在注入之后——注入已经
-	// 决定过本次取值，这里只对"确实没注入到东西"的请求收口。裸打上游会让上游把
-	// 无票请求当成异常行为，宁可报错也不发。
-	if blocked, ok := CodexTicketGateBlocked(ctx, account, codexClientModelFromContext(ctx), strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())); ok {
-		return nil, ErrCodexTicketUnavailable(blocked, wantWebsocket && WebsocketExecuteFunc != nil)
-	}
+	usingWebsocket := wantWebsocket && WebsocketExecuteFunc != nil
 	fixedGatewayWS := false
-	if wantWebsocket {
+	if usingWebsocket {
 		var err error
 		fixedGatewayWS, err = CodexGatewayWSRequired(ctx, account, gjson.GetBytes(requestBody, "model").String())
 		if err != nil {
 			return nil, err
 		}
 	}
-	if !fixedGatewayWS {
+	if fixedGatewayWS {
+		// 仅缺票且具备固定会话身份时提前借路由；已有票的会话仍由 WS 执行器建立。
+		if _, blocked := CodexTicketGateBlocked(ctx, account, codexClientModelFromContext(ctx), strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())); blocked && apiKey != "" {
+			turn, err := BeginCodexGatewayWSTurn(ctx, account, requestBody, headers, apiKey, proxyOverride)
+			if err != nil {
+				return nil, err
+			}
+			if turn != nil {
+				ctx, proxyOverride = turn.Context(ctx), turn.ProxyURL()
+				defer func() {
+					if upstreamResponse == nil || upstreamErr != nil {
+						turn.Finish(true)
+					}
+				}()
+			}
+		}
+	} else {
 		var gatewayRelease func()
 		var gatewayErr error
-		ctx, proxyOverride, gatewayRelease, gatewayErr = prepareCodexGatewayHTTP(ctx, account, requestBody, proxyOverride)
+		if usingWebsocket {
+			ctx, proxyOverride, gatewayRelease, gatewayErr = PrepareCodexGatewayWebsocket(ctx, account, requestBody, proxyOverride)
+		} else {
+			ctx, proxyOverride, gatewayRelease, gatewayErr = prepareCodexGatewayHTTP(ctx, account, requestBody, proxyOverride)
+		}
 		if gatewayErr != nil {
 			return nil, gatewayErr
 		}
 		defer func() { retainCodexGatewayHTTP(ctx, upstreamResponse, gatewayRelease) }()
+	}
+	// 完成票据注入和路由绑定后再检查缺票；仅已取得可用来源的 WS 借路由可以放行。
+	if blocked, ok := CodexTicketGateBlocked(ctx, account, codexClientModelFromContext(ctx), strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())); ok {
+		return nil, ErrCodexTicketUnavailable(blocked, usingWebsocket)
 	}
 	poolRouteKey := ""
 	if wantWebsocket {

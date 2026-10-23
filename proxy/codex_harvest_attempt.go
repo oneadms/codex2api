@@ -88,7 +88,7 @@ func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account
 	var reuseRevision string
 	if seed != nil {
 		reuseRevision = seed.ReuseRevision
-		if !m.GatewayReuseCurrent(ctx, reuseRevision, account.ID()) {
+		if !m.GatewayReuseCurrent(ctx, reuseRevision, account.ID(), model) {
 			event.Result = "cancelled"
 			return
 		}
@@ -151,7 +151,7 @@ func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account
 		if wait.Err() != nil {
 			return wait.Err()
 		}
-		if !m.harvestAdmitted(wait, account, identity, model) || (selection != nil && selection.proxyID > 0 && !m.harvestProxyCurrent(wait, selection.proxyID, proxyURL)) || (seed != nil && (!m.GatewayReuseCurrent(wait, reuseRevision, account.ID()) || !seed.Valid(time.Now(), 780))) {
+		if !m.harvestAdmitted(wait, account, identity, model) || (selection != nil && selection.proxyID > 0 && !m.harvestProxyCurrent(wait, selection.proxyID, proxyURL)) || (seed != nil && (!m.GatewayReuseCurrent(wait, reuseRevision, account.ID(), model) || !seed.Valid(time.Now(), 780))) {
 			denied = true
 			return fmt.Errorf("账号身份、来源票、代理或采票配置已变化")
 		}
@@ -179,7 +179,7 @@ func (m *CodexHarvestManager) attempt(ctx context.Context, account *auth.Account
 		event.Message = "任务已停止"
 		return
 	}
-	if res.Result == "success" && (!m.harvestAdmitted(ctx, account, identity, model) || (selection != nil && selection.proxyID > 0 && !m.harvestProxyCurrent(ctx, selection.proxyID, proxyURL)) || (seed != nil && !m.GatewayReuseCurrent(ctx, reuseRevision, account.ID()))) {
+	if res.Result == "success" && (!m.harvestAdmitted(ctx, account, identity, model) || (selection != nil && selection.proxyID > 0 && !m.harvestProxyCurrent(ctx, selection.proxyID, proxyURL)) || (seed != nil && !m.GatewayReuseCurrent(ctx, reuseRevision, account.ID(), model))) {
 		event.Result = "cancelled"
 		event.Message = "账号身份或借票配置已变化"
 		return

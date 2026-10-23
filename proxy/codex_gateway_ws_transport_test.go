@@ -59,7 +59,7 @@ func TestGatewayWSCompletedNullErrorIsSuccess(t *testing.T) {
 		{`{"type":"response.completed","response":{"id":"r","model":"gpt-6-astra","status":"completed","error":{"code":"failed"}}}`, false},
 		{`{"type":"response.failed","response":{"id":"r"}}`, false},
 	} {
-		turn := &GatewayWSTurn{anchor: &gatewayAnchor{expires: time.Now().Add(time.Minute)}}
+		turn := &GatewayWSTurn{model: gatewayModel, anchor: &gatewayAnchor{expires: time.Now().Add(time.Minute)}}
 		turn.Observe([]byte(tc.terminal))
 		if turn.CanRetain() != tc.retain {
 			t.Fatalf("retain=%v for %s", turn.CanRetain(), tc.terminal)

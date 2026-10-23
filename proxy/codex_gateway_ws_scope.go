@@ -105,7 +105,8 @@ func codexGatewayWSClientScope(headers http.Header, body []byte) string {
 // replay/fallback logic, not just by the low-level connection helper.
 func CodexGatewayWSRequired(ctx context.Context, account *auth.Account, model string) (bool, error) {
 	m := codexHarvester.Load()
-	if m == nil || account == nil || !account.SupportsCodexTickets() || model != gatewayModel {
+	model = auth.NormalizeCodexTicketModel(model)
+	if m == nil || account == nil || !account.SupportsCodexTickets() || (model != gatewayModel && !auth.CodexTicketModelGated(model)) {
 		return false, nil
 	}
 	// 内部合成探针（测连/批量测试/模型探测）没有下游 API Key 和显式客户端

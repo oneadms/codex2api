@@ -227,12 +227,12 @@ func (m *CodexHarvestManager) SaveGatewaySettings(ctx context.Context, v harvest
 	KickCodexTicketHarvest()
 	return v, nil
 }
-func (m *CodexHarvestManager) GatewayReuseCurrent(ctx context.Context, revision string, targetID int64) bool {
+func (m *CodexHarvestManager) GatewayReuseCurrent(ctx context.Context, revision string, targetID int64, model string) bool {
 	v, err := m.GatewaySettings(ctx)
-	return err == nil && gatewayRouteRevision(v) == revision && gatewayUnified(v) && slices.Contains(v.CookiePool.TargetAccountIDs, targetID)
+	return err == nil && gatewayRouteRevision(v) == revision && gatewayUnified(v) && auth.CodexTicketModelGated(model) && slices.Contains(v.CookiePool.TargetAccountIDs, targetID)
 }
 func gatewayUnified(v harvest.GatewaySettings) bool {
-	return v.CookiePool.Enabled && auth.CodexTicketGateEnabled() && auth.ConfiguredCodexTicketSettings().TargetLength == 780 && auth.CodexTicketModelGated(gatewayModel)
+	return v.CookiePool.Enabled && auth.CodexTicketGateEnabled() && auth.ConfiguredCodexTicketSettings().TargetLength == 780
 }
 func gatewayIdentity(a *auth.Account) string {
 	if a == nil {
@@ -333,7 +333,17 @@ func (m *CodexHarvestManager) GatewaySnapshot(ctx context.Context) harvest.Gatew
 				return row
 			}
 			controls, _, _ := m.Controls.Controls(ctx)
-			t := a.CodexTicketForModel(gatewayModel, now, 780, controls.Transport)
+			// 账号汇总只有一行：全部配置模型都有票才就绪，并显示最早失效的一张。
+			var t *auth.CodexTicket
+			for _, model := range auth.ConfiguredCodexTicketSettings().Models {
+				current := a.CodexTicketForModel(model, now, 780, controls.Transport)
+				if current == nil {
+					return row
+				}
+				if t == nil || current.EffectiveExpiry().Before(t.EffectiveExpiry()) {
+					t = current
+				}
+			}
 			if t != nil {
 				expiry := t.EffectiveExpiry()
 				row.State = "ready"
