@@ -39,6 +39,7 @@ const (
 
 	// Server errors
 	ErrorCodeNoAvailableAccount              = "no_available_account"
+	ErrorCodeCodexTicketUnavailable          = "codex_ticket_unavailable"
 	ErrorCodeAccountPoolConcurrencySaturated = "account_pool_concurrency_saturated"
 	ErrorCodeInternalError                   = "internal_error"
 
@@ -238,15 +239,19 @@ func ErrNoAvailableAccount() *Error {
 }
 
 // ErrCodexTicketUnavailable creates a fail-closed error for gated models that have
-// no usable turn-state ticket. 503 + Retryable so callers back off rather than
-// burning the account with a request the upstream is known to reject.
-func ErrCodexTicketUnavailable(model string) *Error {
-	message := "No turn-state ticket available for this model, please retry later"
+// no usable turn-state ticket for the selected protocol. 503 + Retryable lets
+// callers try another eligible account without treating it as an upstream fault.
+func ErrCodexTicketUnavailable(model string, websocket bool) *Error {
+	protocol := "SSE"
+	if websocket {
+		protocol = "WebSocket"
+	}
+	message := fmt.Sprintf("No %s turn-state ticket available for this model, please retry later", protocol)
 	if strings.TrimSpace(model) != "" {
-		message = fmt.Sprintf("No turn-state ticket available for model %q, please retry later", strings.TrimSpace(model))
+		message = fmt.Sprintf("No %s turn-state ticket available for model %q, please retry later", protocol, strings.TrimSpace(model))
 	}
 	return &Error{
-		Code:       ErrorCodeNoAvailableAccount,
+		Code:       ErrorCodeCodexTicketUnavailable,
 		Message:    message,
 		Type:       ErrorTypeServerError,
 		Retryable:  true,

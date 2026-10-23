@@ -7,6 +7,8 @@ import (
 	"github.com/codex2api/api"
 )
 
+const unavailableContinuationAccountMessage = "The account for this conversation is no longer available. Start a new conversation."
+
 // ResponsesContinuationLostError 表示连接内续链状态已失效；不能携带旧 ID 重拨。
 type ResponsesContinuationLostError struct {
 	Reason string

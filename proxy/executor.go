@@ -654,7 +654,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// 决定过本次取值，这里只对"确实没注入到东西"的请求收口。裸打上游会让上游把
 	// 无票请求当成异常行为，宁可报错也不发。
 	if blocked, ok := CodexTicketGateBlocked(ctx, account, codexClientModelFromContext(ctx), strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())); ok {
-		return nil, ErrCodexTicketUnavailable(blocked)
+		return nil, ErrCodexTicketUnavailable(blocked, wantWebsocket && WebsocketExecuteFunc != nil)
 	}
 	fixedGatewayWS := false
 	if wantWebsocket {
@@ -1246,7 +1246,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	// FailClosed 门控与 ExecuteRequest 同源：compact 也是打到同一个上游回合状态校验，
 	// 无票同样会被拒，必须在发出前拦下。
 	if blocked, ok := CodexTicketGateBlocked(ctx, account, codexClientModelFromContext(ctx), strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())); ok {
-		return nil, ErrCodexTicketUnavailable(blocked)
+		return nil, ErrCodexTicketUnavailable(blocked, false)
 	}
 
 	existingCacheKey := strings.TrimSpace(gjson.GetBytes(requestBody, "prompt_cache_key").String())

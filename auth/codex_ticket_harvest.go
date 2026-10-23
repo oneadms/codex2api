@@ -31,11 +31,17 @@ func (a *Account) supportsCodexTicketsLocked() bool {
 // must never be sent to the Codex endpoint. Token-only imports and accounts that
 // still need their first refresh are both supported.
 func (a *Account) CanHarvestCodexTicket(now time.Time) bool {
-	if a == nil || (atomic.LoadInt32(&a.Disabled) != 0 && !a.HarvestOwnsPause()) || atomic.LoadInt32(&a.DispatchPaused) != 0 {
+	if a == nil || atomic.LoadInt32(&a.Disabled) != 0 {
 		return false
 	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
+	// Ticket-pool scheduling pauses business dispatch via DispatchPaused. Its
+	// own pause must still permit replenishment; a manual pause or the separate
+	// hard-disable flag must never be bypassed by the harvesting ownership bit.
+	if atomic.LoadInt32(&a.DispatchPaused) != 0 && !a.HarvestSchedulingPaused {
+		return false
+	}
 	if !a.supportsCodexTicketsLocked() {
 		return false
 	}

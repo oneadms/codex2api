@@ -596,6 +596,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		return writeResponsesWSError(conn, nativeResponsesWSContextError(responsesWSContextUnavailable(http.StatusServiceUnavailable, "context_commit_pending")))
 	}
 	turnReplay := newResponsesWSReplaySource(codexBody, respCacheOwner)
+	if sourceID := nativeWSReplayAccountID(turnReplay); sourceID > 0 && h.store.FindByID(sourceID) == nil {
+		return writeResponsesWSRecoveryError(conn, nativeResponsesWSContextError(responsesWSContextUnavailable(http.StatusConflict, "bound_account_unavailable")))
+	}
 	accountFilter = nativeWSReplayAccountFilter(accountFilter, turnReplay)
 	degradeContinuation := func(reason string, attempt int) *api.APIError {
 		if fixedGatewayRequest {
@@ -669,6 +672,10 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		if account == nil {
 			if c.Request.Context().Err() != nil {
 				return errResponsesWSClientGone
+			}
+			var lost *ResponsesContinuationLostError
+			if errors.As(selectionErr, &lost) {
+				return writeResponsesWSRecoveryError(conn, nativeResponsesWSContextError(responsesWSContextUnavailable(http.StatusConflict, lost.Reason)))
 			}
 			if selectionAPIError := schedulerSelectionAPIError(selectionErr); selectionAPIError != nil {
 				apiErr = selectionAPIError
@@ -816,6 +823,26 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				h.store.Release(account)
 				// A model-specific budget must not close the connection for other models.
 				return writeResponsesWSError(conn, quotaErr.apiErr)
+			}
+			var ticketErr *Error
+			if errors.As(reqErr, &ticketErr) && ticketErr.Code == ErrorCodeCodexTicketUnavailable {
+				ttftGuard.Stop()
+				upstreamCancel()
+				h.store.Release(account)
+				// This is local admission, not a transport or lost-connection failure.
+				// Try another eligible account within the normal retry budget, but
+				// never migrate a pinned continuation or wait for an excluded pool.
+				retryExclusions.MarkHard(account.ID())
+				if retryEnabled && !fixedGatewayRequest && !preserveContinuationBinding() &&
+					h.store.HasDispatchCandidate(affinityKey, apiKeyID, retryExclusions.ForSelection(), accountFilter, false, dispatchPolicy) &&
+					shouldRetryRequestError(reqErr, &generalRetries, maxRetries, continuousRetryPolicy) {
+					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					continue
+				}
+				if !claimContinuousRetrySuccessContext(c.Request.Context()) {
+					return errResponsesWSClientGone
+				}
+				return writeResponsesWSError(conn, api.NewAPIError(api.ErrorCode(ticketErr.Code), ticketErr.Message, api.ErrorTypeServer))
 			}
 			var fixedErr *CodexGatewayWSError
 			if fixedGatewayRequest || errors.As(reqErr, &fixedErr) {

@@ -40,23 +40,31 @@ type nativeWSSharedWrite struct {
 	record   nativeWSSharedContext
 }
 
-func nativeWSReplayAccountFilter(filter auth.AccountFilter, source *responsesWSReplaySource) auth.AccountFilter {
+// nativeWSReplayAccountID identifies the account that owns opaque history.
+// The same requirement is used for selection and for detecting a deleted owner.
+func nativeWSReplayAccountID(source *responsesWSReplaySource) int64 {
 	if source == nil || source.previous == nil || source.previous.nativeProvenance == nil {
-		return filter
+		return 0
 	}
 	previous := source.previous
-	hasOpaque := false
+	if previous.nativeProvenance.accountID <= 0 {
+		return 0
+	}
 	for _, item := range previous.Items {
 		if strings.Contains(string(item), `"encrypted_content"`) {
-			hasOpaque = true
-			break
+			return previous.nativeProvenance.accountID
 		}
 	}
-	if !hasOpaque || previous.nativeProvenance.accountID <= 0 {
+	return 0
+}
+
+func nativeWSReplayAccountFilter(filter auth.AccountFilter, source *responsesWSReplaySource) auth.AccountFilter {
+	accountID := nativeWSReplayAccountID(source)
+	if accountID <= 0 {
 		return filter
 	}
 	return func(account *auth.Account) bool {
-		return account.ID() == previous.nativeProvenance.accountID && (filter == nil || filter(account))
+		return account != nil && account.ID() == accountID && (filter == nil || filter(account))
 	}
 }
 

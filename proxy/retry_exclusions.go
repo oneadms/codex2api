@@ -554,6 +554,12 @@ func (h *Handler) nextRetryAccountWithGuard(ctx context.Context, affinityKey str
 		var stickyProxyURL string
 		var guard auth.SessionAffinityGuard
 		if preserveBinding {
+			// Stateful continuation cannot migrate to another account. A deleted
+			// binding cannot recover when a slot is released, so queueing it only
+			// hides the lost context behind a misleading selection timeout.
+			if boundID, bound := h.store.SessionAffinityAccountID(affinityKey); bound && h.store.FindByID(boundID) == nil {
+				return nil, "", auth.SessionAffinityGuard{}, &ResponsesContinuationLostError{Reason: "bound_account_unavailable"}
+			}
 			account, stickyProxyURL = h.store.NextForContinuationWithDispatch(affinityKey, apiKeyID, exclude, filter, policy)
 		} else {
 			account, stickyProxyURL, guard = h.nextAccountForSessionWithDispatchGuard(affinityKey, apiKeyID, exclude, filter, policy)

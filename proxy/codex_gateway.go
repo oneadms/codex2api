@@ -153,7 +153,31 @@ func (m *CodexHarvestManager) SaveGatewaySettings(ctx context.Context, v harvest
 	if err != nil {
 		return v, err
 	}
+	if v.Revision != current.Revision {
+		return v, ErrGatewayRevisionConflict
+	}
 	v.Normalize()
+	if err = v.Validate(); err != nil {
+		return v, err
+	}
+	// A deleted account can remain in a saved selection (including disabled
+	// sections). Remove only stale references already present in this revision;
+	// newly submitted unknown IDs must still fail validation below.
+	prune := func(ids, previous []int64) []int64 {
+		return slices.DeleteFunc(slices.Clone(ids), func(id int64) bool {
+			a := m.Store.FindByID(id)
+			return (a == nil || !a.SupportsCodexTickets()) && slices.Contains(previous, id)
+		})
+	}
+	v.CookiePool.SourceAccountIDs = prune(v.CookiePool.SourceAccountIDs, current.CookiePool.SourceAccountIDs)
+	v.CookiePool.TargetAccountIDs = prune(v.CookiePool.TargetAccountIDs, current.CookiePool.TargetAccountIDs)
+	v.WSSession.AccountIDs = prune(v.WSSession.AccountIDs, current.WSSession.AccountIDs)
+	if len(v.WSSession.AccountIDs) == 0 {
+		v.WSSession.Enabled = false
+	}
+	if len(v.CookiePool.SourceAccountIDs) == 0 || len(v.CookiePool.TargetAccountIDs) == 0 {
+		v.CookiePool.Enabled, v.WSSession.Enabled = false, false
+	}
 	if err = v.Validate(); err != nil {
 		return v, err
 	}

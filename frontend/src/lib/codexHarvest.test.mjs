@@ -1,7 +1,34 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeGatewaySettings, toggleGatewayAccount, validateGatewaySettings } from './codexHarvest.ts'
-import { harvestEn, harvestZh } from '../locales/harvest.ts'
+import { harvestTicketVerification, normalizeGatewaySettings, toggleGatewayAccount, validateGatewaySettings } from './codexHarvest.ts'
+import { harvestEn, harvestZh, harvestZhTW } from '../locales/harvest.ts'
+
+// probe_verified survives expiry/revocation; it is not current ticket readiness.
+const ticketStatusCases = [
+  { name: 'usable verified ticket', ticket: { ready: true, probe_verified: true, length: 780 }, key: 'probeVerified', good: true },
+  { name: 'expired ticket retains verification history', ticket: { ready: false, probe_verified: true, remaining_seconds: 0 }, key: 'probePreviouslyVerified', good: false },
+  { name: 'revoked ticket is not currently verified and usable', ticket: { ready: false, probe_verified: true, revoked: true }, key: 'probePreviouslyVerified', good: false },
+  { name: 'identity mismatch with fresh cookies remains unavailable', ticket: { ready: false, probe_verified: true, cookie_expired: false }, key: 'probePreviouslyVerified', good: false },
+  { name: 'no ticket is not waiting for a continuation check', ticket: { ready: false, probe_verified: false }, key: 'probeNoRecord', good: false },
+  { name: 'failed probe is not a running continuation check', ticket: { ready: false, probe_verified: false, probe: { result: 'invalid_state' } }, key: 'probeNoRecord', good: false },
+  { name: 'valid 292 ticket needs no continuation check', ticket: { ready: true, probe_verified: false, length: 292 }, key: 'probeNotRequired', good: false },
+  { name: 'valid 332 ticket needs no continuation check', ticket: { ready: true, probe_verified: false, length: 332 }, key: 'probeNotRequired', good: false },
+  { name: '780 ticket without verification is never labeled passed', ticket: { ready: true, probe_verified: false, length: 780 }, key: 'probeNoRecord', good: false },
+  { name: 'usable standby takes priority over revoked primary', ticket: { ready: true, probe_verified: true, revoked: true, length: 780 }, key: 'probeVerified', good: true },
+]
+
+for (const { name, ticket, key, good } of ticketStatusCases) {
+  test(`ticket verification display: ${name}`, () => {
+    assert.deepEqual(harvestTicketVerification(ticket), { labelKey: `harvest.${key}`, good })
+  })
+}
+
+test('ticket holding and verification labels exist in all harvest locales', () => {
+  const keys = ['ticketHolding', 'ticketHeld', 'ticketUnavailable', 'ticketStatusHint', 'probeHistory', ...ticketStatusCases.map(tc => tc.key)]
+  for (const [language, locale] of Object.entries({ zh: harvestZh, en: harvestEn, 'zh-TW': harvestZhTW })) {
+    for (const key of keys) assert.ok(locale[key], `${language} ${key}`)
+  }
+})
 
 test('gateway settings normalize to the backend defaults without legacy fields', () => {
   const settings = normalizeGatewaySettings(null)

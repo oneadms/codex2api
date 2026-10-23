@@ -43,12 +43,26 @@ before(async () => {
           import i18next from 'i18next'; import {initReactI18next} from 'react-i18next';
           import GatewayPanel from '@/components/harvest/HarvestGatewayPanel.tsx';
           import ProxyPicker from '@/components/harvest/HarvestProxyPicker.tsx';
+          import AccountsPanel from '@/components/harvest/HarvestAccountsPanel.tsx';
           import {harvestEn} from '@/locales/harvest.ts';
           i18next.use(initReactI18next).init({lng:'en', fallbackLng:'en', resources:{en:{translation:{harvest:harvestEn,common:{loading:'Loading'}}}}, interpolation:{escapeValue:false}}).then(() => {
             const root = createRoot(document.getElementById('root'));
             const accounts = [1,2,3].map(id => ({id,email:'account-'+id,group_ids:[],eligible:true,skipped:false,busy:false,tickets:[]}));
+            function Gateway() {
+              const [rows,setRows] = React.useState(accounts);
+              window.__setGatewayAccounts = setRows;
+              return React.createElement(GatewayPanel,{accounts:rows,busy:false,onAction:fn=>fn()});
+            }
             function Picker() { const [selected,setSelected] = React.useState([]); return React.createElement(ProxyPicker,{selected,disabled:false,onChange:ids=>{window.__selected=ids;setSelected(ids)}}) }
-            root.render(window.__component === 'picker' ? React.createElement(Picker) : React.createElement(GatewayPanel,{accounts,busy:false,onAction:fn=>fn()}));
+            function Accounts() {
+              const [rows,setRows] = React.useState(window.__accounts);
+              window.__setAccounts = setRows;
+              return React.createElement(AccountsPanel,{accounts:rows,busy:false,onSkipChange:(id,skipped)=>{
+                window.__skipChanges.push({id,skipped});
+                setRows(current=>current.map(account=>account.id===id ? {...account,skipped} : account));
+              }});
+            }
+            root.render(window.__component === 'accounts' ? React.createElement(Accounts) : window.__component === 'picker' ? React.createElement(Picker) : React.createElement(Gateway));
           });
         `
       },
@@ -60,7 +74,7 @@ before(async () => {
 })
 after(async () => { await browser?.close() })
 
-async function fixture(t, component = 'gateway') {
+async function fixture(t, component = 'gateway', ticketOverrides = []) {
   const page = await browser.newPage()
   const errors = []
   page.on('pageerror', error => errors.push(error.message))
@@ -68,9 +82,14 @@ async function fixture(t, component = 'gateway') {
   t.after(async () => { await page.close(); assert.deepEqual(errors, []) })
   await page.route('http://harvest.test/**', route => route.fulfill({contentType:'text/html',body:'<!doctype html><div id="root"></div>'}))
   await page.goto('http://harvest.test/')
-  await page.evaluate(component => {
+  await page.evaluate(({ component, ticketOverrides }) => {
     window.__component = component
-    window.__writes = []; window.__diagnostics = []; window.__selected = []
+    window.__writes = []; window.__diagnostics = []; window.__selected = []; window.__skipChanges = []
+    window.__accounts = ticketOverrides.map((ticket, index) => ({
+      id: index + 1, email: 'account-' + (index + 1), group_ids: [], eligible: true, skipped: false, busy: false,
+      tickets: [{ model: 'gpt-6-astra', ready: false, probe_verified: false, revoked: false, length: 0, remaining_seconds: 0,
+        cookie_count: 0, cookie_remaining_seconds: 0, cookie_expired: false, egress_bound: false, session_bound: false, standby_ready: false, ...ticket }],
+    }))
     window.__settings = {
       cookie_pool:{enabled:true,source_account_ids:[1],target_account_ids:[3],ip_affinity:false,rotate_nodes:false,max_node_attempts:3,node_cooldown_seconds:3600,ttl_seconds:230},
       ws_session:{enabled:true,account_ids:[3],ttl_seconds:3600},
@@ -81,11 +100,67 @@ async function fixture(t, component = 'gateway') {
       {id:11,label:'Proxy beta',enabled:true,test_status:'ok',test_location:'London',url:'http://private:credential@proxy2.invalid'},
       {id:12,label:'Proxy disabled',enabled:false,test_status:'ok',test_location:'',url:'http://proxy3.invalid'},
     ]
-  }, component)
+  }, { component, ticketOverrides })
   await page.addScriptTag({content:script})
   await page.waitForFunction(() => document.getElementById('root').childElementCount > 0).catch(async error => { t.diagnostic(JSON.stringify({scriptSize:script.length, html:await page.content()})); throw error })
   return page
 }
+
+test('account table separates current holdings from historical verification', async t => {
+  const cases = [
+    { ticket: { ready: true, probe_verified: true, length: 780, remaining_seconds: 90, transport: 'sse' }, label: harvestEn.probeVerified, good: true },
+    { ticket: { ready: false, probe_verified: true, transport: 'websocket' }, label: harvestEn.probePreviouslyVerified },
+    { ticket: { ready: false, probe_verified: true, revoked: true }, label: harvestEn.probePreviouslyVerified },
+    { ticket: { ready: false, probe_verified: true, cookie_expired: true }, label: harvestEn.probePreviouslyVerified },
+    { ticket: { ready: false, probe_verified: false }, label: harvestEn.probeNoRecord },
+    { ticket: { ready: true, probe_verified: false, length: 292 }, label: harvestEn.probeNotRequired },
+    { ticket: { ready: true, probe_verified: false, length: 332 }, label: harvestEn.probeNotRequired },
+    { ticket: { ready: true, probe_verified: true, revoked: true, length: 780 }, label: harvestEn.probeVerified, good: true },
+  ]
+  const page = await fixture(t, 'accounts', cases.map(tc => tc.ticket))
+  const headings = await page.getByRole('columnheader').allTextContents()
+  assert.ok(headings.indexOf(harvestEn.ticketHolding) < headings.indexOf(harvestEn.probeHistory))
+  await page.getByText(harvestEn.ticketStatusHint, { exact: true }).waitFor()
+  for (const [index, { ticket, label, good }] of cases.entries()) {
+    const row = page.getByRole('row').filter({ has: page.getByText(`account-${index + 1}`, { exact: true }) })
+    await row.getByText(ticket.ready ? harvestEn.ticketHeld : harvestEn.ticketUnavailable, { exact: true }).waitFor()
+    const badge = row.getByText(label, { exact: true })
+    await badge.waitFor()
+    assert.equal((await badge.getAttribute('class')).includes('text-emerald-700'), !!good)
+    assert.equal(await row.getByText(harvestEn.probePending, { exact: true }).count(), 0)
+  }
+  assert.deepEqual(await page.evaluate(() => window.__diagnostics), [])
+})
+
+test('ticket expiry removes positive verification styling and fresh tickets restore it', async t => {
+  const page = await fixture(t, 'accounts', [{ ready: true, probe_verified: true, length: 780, remaining_seconds: 90 }])
+  await page.getByText(harvestEn.probeVerified, { exact: true }).waitFor()
+  // Simulate the next polling snapshot retaining probe_verified after expiry.
+  await page.evaluate(() => window.__setAccounts(rows => rows.map(account => ({
+    ...account, tickets: account.tickets.map(ticket => ({ ...ticket, ready: false, remaining_seconds: 0, cookie_expired: true })),
+  }))))
+  await page.getByText(harvestEn.probePreviouslyVerified, { exact: true }).waitFor()
+  assert.equal(await page.getByText(harvestEn.ticketUnavailable, { exact: true }).count(), 1)
+  assert.equal(await page.getByText(harvestEn.probeVerified, { exact: true }).count(), 0)
+  assert.equal(await page.locator('tbody .text-emerald-700').count(), 0)
+  await page.evaluate(() => window.__setAccounts(rows => rows.map(account => ({
+    ...account, tickets: account.tickets.map(ticket => ({ ...ticket, ready: true, remaining_seconds: 120, cookie_expired: false })),
+  }))))
+  await page.getByText(harvestEn.probeVerified, { exact: true }).waitFor()
+  assert.equal(await page.getByText(harvestEn.ticketHeld, { exact: true }).count(), 1)
+  await page.getByRole('switch', { name: `${harvestEn.skip} #1`, exact: true }).click()
+  assert.deepEqual(await page.evaluate(() => window.__skipChanges), [{ id: 1, skipped: true }])
+})
+
+test('account table tolerates missing ticket lists and empty accounts', async t => {
+  const page = await fixture(t, 'accounts', [{}])
+  await page.getByText('account-1', { exact: true }).waitFor()
+  await page.evaluate(() => window.__setAccounts(rows => rows.map(account => ({ ...account, tickets: null }))))
+  await page.waitForFunction(() => !document.body.textContent.includes('No passed check recorded'))
+  assert.equal(await page.getByText(harvestEn.probePending, { exact: true }).count(), 0)
+  await page.evaluate(() => window.__setAccounts([]))
+  await page.getByText(harvestEn.noAccounts, { exact: true }).waitFor()
+})
 
 test('stale draft keeps its own revision and cannot overwrite a concurrent save', async t => {
   const page = await fixture(t)
@@ -101,6 +176,52 @@ test('stale draft keeps its own revision and cannot overwrite a concurrent save'
   await page.getByRole('button',{name:harvestEn.reloadDraft,exact:true}).click()
   await page.getByRole('button',{name:harvestEn.save,exact:true}).waitFor()
   await page.waitForFunction(() => !document.body.textContent.includes('Unsaved changes'))
+})
+
+test('disabling the cookie pool also disables dependent WS sessions on save', async t => {
+  const page = await fixture(t)
+  await page.getByRole('switch', { name: harvestEn.cookiePool, exact: true }).click()
+  assert.equal(await page.getByRole('switch', { name: harvestEn.wsSession, exact: true }).isChecked(), false)
+  await page.getByRole('button', { name: harvestEn.save, exact: true }).click()
+  await page.waitForFunction(() => window.__writes.length === 1)
+  const value = await page.evaluate(() => window.__writes[0])
+  assert.equal(value.cookie_pool.enabled, false)
+  assert.equal(value.ws_session.enabled, false)
+})
+
+test('deleted selected target stays removable and cannot be restored by WS normalization', async t => {
+  const page = await fixture(t)
+  const targets = page.getByTestId(`harvest-account-picker-${harvestEn.targets}`)
+  await targets.getByRole('checkbox', { name: /#3/ }).waitFor()
+  await page.evaluate(() => window.__setGatewayAccounts(rows => rows.filter(account => account.id !== 3)))
+  await targets.getByText(harvestEn.accountMissing, { exact: false }).waitFor()
+  // Keep borrowing enabled with a replacement, then remove the stale selection.
+  await targets.getByRole('checkbox', { name: /#2/ }).check()
+  await targets.getByRole('checkbox', { name: /#3/ }).click()
+  await page.getByRole('button', { name: harvestEn.save, exact: true }).click()
+  await page.waitForFunction(() => window.__writes.length === 1)
+  const value = await page.evaluate(() => window.__writes[0])
+  assert.deepEqual(value.cookie_pool.target_account_ids, [2])
+  assert.deepEqual(value.ws_session.account_ids, [])
+  assert.equal(value.ws_session.enabled, false)
+})
+
+test('deleted selected source stays removable when the account list becomes empty', async t => {
+  const page = await fixture(t)
+  await page.getByRole('switch', { name: harvestEn.cookiePool, exact: true }).click()
+  await page.evaluate(() => window.__setGatewayAccounts([]))
+  for (const label of [harvestEn.sources, harvestEn.targets]) {
+    const picker = page.getByTestId(`harvest-account-picker-${label}`)
+    await picker.getByText(harvestEn.accountMissing, { exact: false }).waitFor()
+    await picker.getByRole('checkbox').click()
+  }
+  await page.getByRole('button', { name: harvestEn.save, exact: true }).click()
+  await page.waitForFunction(() => window.__writes.length === 1)
+  const value = await page.evaluate(() => window.__writes[0])
+  assert.deepEqual(value.cookie_pool.source_account_ids, [])
+  assert.deepEqual(value.cookie_pool.target_account_ids, [])
+  assert.deepEqual(value.ws_session.account_ids, [])
+  assert.equal(value.cookie_pool.enabled, false)
 })
 
 test('WS diagnostic is available before any business session exists', async t => {

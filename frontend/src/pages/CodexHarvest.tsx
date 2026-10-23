@@ -5,14 +5,14 @@ import { api } from '@/api'
 import PageHeader from '@/components/PageHeader'
 import CodexTicketSettings from '@/components/CodexTicketSettings'
 import { Button } from '@/components/ui/button'
-import { Switch } from '@/components/ui/switch'
+import HarvestAccountsPanel from '@/components/harvest/HarvestAccountsPanel'
 import MihomoPanel from '@/components/harvest/MihomoPanel'
 import HarvestControlsPanel from '@/components/harvest/HarvestControlsPanel'
 import HarvestGatewayPanel from '@/components/harvest/HarvestGatewayPanel'
 import HarvestManualPanel from '@/components/harvest/HarvestManualPanel'
 import HarvestRecordsPanel from '@/components/harvest/HarvestRecordsPanel'
 import HarvestCoverageCard from '@/components/harvest/HarvestCoverageCard'
-import { HarvestPill, HarvestSection, harvestTableClass, harvestTime, type HarvestAction } from '@/components/harvest/shared'
+import { HarvestPill, HarvestSection, harvestTime, type HarvestAction } from '@/components/harvest/shared'
 import type { HarvestSnapshot, MihomoStatus } from '@/lib/codexHarvest'
 import { getErrorMessage } from '@/utils/error'
 import { useToast } from '@/hooks/useToast'
@@ -92,17 +92,7 @@ export default function CodexHarvest() {
           </HarvestSection>
           <HarvestSection title={t('harvest.coverageTitle')}><HarvestCoverageCard coverage={snapshot.coverage} /></HarvestSection>
         </div>
-        <HarvestSection title={t('harvest.accounts')}>
-          <p className="mb-4 text-xs leading-relaxed text-muted-foreground">{t('harvest.binding')}</p>
-          {snapshot.accounts.length === 0 ? <p className="py-6 text-sm text-muted-foreground">{t('harvest.noAccounts')}</p> : <div className="overflow-x-auto"><table className={harvestTableClass}><thead><tr>{['account', 'model', 'probeStage', 'tickets', 'cookies', 'standby', 'skip'].map(key => <th key={key}>{t(`harvest.${key}`)}</th>)}</tr></thead><tbody>{snapshot.accounts.map(account => <tr key={account.id}><td className="min-w-40 max-w-64 break-words"><span>{account.email || 'Codex'}</span><span className="mt-1 block text-xs text-muted-foreground">#{account.id} {account.busy ? `· ${t('harvest.busyAccount')}` : ''}</span></td>
-            <td className="whitespace-nowrap font-mono text-xs">{(account.tickets ?? []).map(ticket => <div className="py-2" key={ticket.model}>{ticket.model}</div>)}</td>
-            <td>{(account.tickets ?? []).map(ticket => <div className="flex items-center gap-2 py-1.5" key={ticket.model}><HarvestPill good={ticket.probe_verified}>{t(ticket.probe_verified ? 'harvest.probeVerified' : 'harvest.probePending')}</HarvestPill><span className="text-xs text-muted-foreground">{ticket.transport?.toUpperCase() || '—'}</span></div>)}</td>
-            <td>{(account.tickets ?? []).map(ticket => <div className="flex items-center gap-2 py-1.5" key={ticket.model}><HarvestPill good={ticket.ready}>{t(ticket.ready ? 'harvest.ready' : 'harvest.empty')}</HarvestPill><span className="whitespace-nowrap font-mono text-xs">{ticket.ready ? `${ticket.remaining_seconds}s` : '—'}</span></div>)}</td>
-            <td>{(account.tickets ?? []).map(ticket => <div className="whitespace-nowrap py-2 font-mono text-xs" key={ticket.model}>{ticket.cookie_count || 0} · {ticket.cookie_expired ? t('harvest.expired') : `${ticket.cookie_remaining_seconds || 0}s`}</div>)}</td>
-            <td>{(account.tickets ?? []).map(ticket => <div className="py-1.5" key={ticket.model}><HarvestPill good={ticket.standby_ready}>{t(ticket.standby_ready ? 'harvest.ready' : 'harvest.empty')}</HarvestPill></div>)}</td>
-            <td><Switch aria-label={`${t('harvest.skip')} #${account.id}`} disabled={busy} checked={account.skipped} onCheckedChange={value => void onAction(() => api.updateHarvestScope({ ...snapshot.scope, skipped_account_ids: value ? [...snapshot.scope.skipped_account_ids, account.id] : snapshot.scope.skipped_account_ids.filter(id => id !== account.id) }))} /></td>
-          </tr>)}</tbody></table></div>}
-        </HarvestSection>
+        <HarvestAccountsPanel accounts={snapshot.accounts} busy={busy} onSkipChange={(accountID, skipped) => void onAction(() => api.updateHarvestScope({ ...snapshot.scope, skipped_account_ids: skipped ? [...snapshot.scope.skipped_account_ids, accountID] : snapshot.scope.skipped_account_ids.filter(id => id !== accountID) }))} />
         <HarvestRecordsPanel accounts={snapshot.accounts} busy={busy} onAction={onAction} />
       </>}
       {tab === 'policy' && <HarvestSection title={t('harvest.kernelQuick')} actions={<HarvestPill good={mihomo.running}>{t(mihomo.running ? 'harvest.running' : 'harvest.stopped')}</HarvestPill>}><MihomoPanel status={mihomo} busy={busy} onAction={async action => { const success = await onAction(action); if (success) setConfigRevision(value => value + 1); return success }} /></HarvestSection>}

@@ -29,6 +29,22 @@ export interface HarvestTicket {
   egress_bound: boolean; session_bound: boolean; standby_ready: boolean
   probe?: { result: string; http_status: number; checked_at: string; next_probe_at?: string }
 }
+// probe_verified records a past check, while ready includes current validity and
+// account identity (and may refer to a usable standby rather than the primary).
+export function harvestTicketVerification(ticket: HarvestTicket): { labelKey: string; good: boolean } {
+  if (ticket.probe_verified) {
+    return {
+      labelKey: ticket.ready ? 'harvest.probeVerified' : 'harvest.probePreviouslyVerified',
+      good: ticket.ready,
+    }
+  }
+  if (ticket.ready && (ticket.length === 292 || ticket.length === 332)) {
+    return { labelKey: 'harvest.probeNotRequired', good: false }
+  }
+  // A missing verification marker does not mean a probe is running or queued.
+  return { labelKey: 'harvest.probeNoRecord', good: false }
+}
+
 export interface HarvestAccount { id: number; email: string; group_ids: number[]; eligible: boolean; skipped: boolean; busy: boolean; tickets: HarvestTicket[] | null }
 export interface HarvestEvent {
   id: number; job_id?: string; account_id: number; model: string; source: string; stage: string

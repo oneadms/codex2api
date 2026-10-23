@@ -2091,6 +2091,9 @@ func sendResponseContextUnavailable(c *gin.Context, status int, reason string) {
 	code := api.ErrCodeResponseContextUnavailable
 	errType := api.ErrorTypeInvalidRequest
 	message := "Previous response context is unavailable"
+	if reason == "bound_account_unavailable" {
+		message = unavailableContinuationAccountMessage
+	}
 	if status == http.StatusServiceUnavailable {
 		code = api.ErrCodeServiceUnavailable
 		errType = api.ErrorTypeServer
@@ -4259,6 +4262,17 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 		if account == nil {
 			if attempt == 0 {
 				markTraeCNResumeRetrySafe(c, true)
+			}
+			var lost *ResponsesContinuationLostError
+			if errors.As(selectionErr, &lost) {
+				if !claimContinuousRetryTerminal(c, continuousRetryProtocolResponses) {
+					return
+				}
+				if isStream && writeCommittedResponsesRetryError(c, unavailableContinuationAccountMessage) {
+					return
+				}
+				sendResponseContextUnavailable(c, http.StatusConflict, lost.Reason)
+				return
 			}
 			if writeSchedulerQueueError(c, selectionErr, continuousRetryProtocolResponses) {
 				return

@@ -141,7 +141,7 @@ export default function HarvestGatewayPanel({ accounts, busy, onAction }: { acco
           <div className="rounded-lg border border-border p-4">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div><h4 className="text-sm font-medium">{t('harvest.cookiePool')}</h4><p className="mt-1 max-w-xl text-xs leading-relaxed text-muted-foreground">{t('harvest.cookiePoolHint')}</p></div>
-            <label className="flex items-center gap-2 text-sm"><Switch aria-label={t('harvest.cookiePool')} checked={draft.cookie_pool.enabled} disabled={busy || saving} onCheckedChange={enabled => update(current => ({ ...current, cookie_pool: { ...current.cookie_pool, enabled } }))} />{t(draft.cookie_pool.enabled ? 'harvest.enabled' : 'harvest.disabled')}</label>
+            <label className="flex items-center gap-2 text-sm"><Switch aria-label={t('harvest.cookiePool')} checked={draft.cookie_pool.enabled} disabled={busy || saving} onCheckedChange={enabled => update(current => ({ ...current, cookie_pool: { ...current.cookie_pool, enabled }, ws_session: { ...current.ws_session, enabled: enabled && current.ws_session.enabled } }))} />{t(draft.cookie_pool.enabled ? 'harvest.enabled' : 'harvest.disabled')}</label>
           </div>
           <div className="mt-4 grid gap-4 lg:grid-cols-2">
             <HarvestAccountPicker label={t('harvest.sources')} accounts={accounts} selected={draft.cookie_pool.source_account_ids}
@@ -151,7 +151,11 @@ export default function HarvestGatewayPanel({ accounts, busy, onAction }: { acco
             <HarvestAccountPicker label={t('harvest.targets')} accounts={accounts} selected={draft.cookie_pool.target_account_ids}
               blocked={[...draft.cookie_pool.source_account_ids]}
               disabled={busy || saving}
-              onToggle={id => update(current => ({ ...current, cookie_pool: { ...current.cookie_pool, target_account_ids: toggleList(current.cookie_pool.target_account_ids, id, current.cookie_pool.source_account_ids, current.ws_session.account_ids) } }))} />
+              onToggle={id => update(current => {
+                const target_account_ids = toggleList(current.cookie_pool.target_account_ids, id, current.cookie_pool.source_account_ids)
+                const account_ids = current.ws_session.account_ids.filter(accountID => target_account_ids.includes(accountID))
+                return { ...current, cookie_pool: { ...current.cookie_pool, target_account_ids }, ws_session: { ...current.ws_session, account_ids, enabled: current.ws_session.enabled && account_ids.length > 0 } }
+              })} />
           </div>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
             <label className="flex items-center justify-between gap-4 rounded-lg border border-border p-3 text-sm"><span>{t('harvest.ipAffinity')}<span className="mt-1 block text-xs font-normal text-muted-foreground">{t('harvest.ipAffinityHint')}</span></span><Switch aria-label={t('harvest.ipAffinity')} checked={draft.cookie_pool.ip_affinity} disabled={busy || saving} onCheckedChange={enabled => update(current => ({ ...current, cookie_pool: { ...current.cookie_pool, ip_affinity: enabled, rotate_nodes: enabled ? current.cookie_pool.rotate_nodes : false } }))} /></label>
@@ -167,7 +171,7 @@ export default function HarvestGatewayPanel({ accounts, busy, onAction }: { acco
           <div className="rounded-lg border border-border p-4">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div><h4 className="text-sm font-medium">{t('harvest.wsSession')}</h4><p className="mt-1 max-w-xl text-xs leading-relaxed text-muted-foreground">{t('harvest.wsSessionHint')}</p></div>
-            <label className="flex items-center gap-2 text-sm"><Switch aria-label={t('harvest.wsSession')} checked={draft.ws_session.enabled} disabled={busy || saving} onCheckedChange={enabled => update(current => ({ ...current, ws_session: { ...current.ws_session, enabled } }))} />{t(draft.ws_session.enabled ? 'harvest.enabled' : 'harvest.disabled')}</label>
+            <label className="flex items-center gap-2 text-sm"><Switch aria-label={t('harvest.wsSession')} checked={draft.ws_session.enabled} disabled={busy || saving} onCheckedChange={enabled => update(current => ({ ...current, ws_session: { ...current.ws_session, enabled }, cookie_pool: { ...current.cookie_pool, enabled: enabled || current.cookie_pool.enabled } }))} />{t(draft.ws_session.enabled ? 'harvest.enabled' : 'harvest.disabled')}</label>
           </div>
           <div className="mt-4"><HarvestAccountPicker label={t('harvest.wsAccounts')} accounts={accounts} selected={draft.ws_session.account_ids}
             blocked={[...draft.cookie_pool.source_account_ids]}
