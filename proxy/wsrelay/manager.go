@@ -145,7 +145,9 @@ func configureWebsocketDialerProxy(dialer *websocket.Dialer, rawProxyURL string)
 	if parsed.Scheme == "socks5h" {
 		parsed.Scheme = "socks5"
 	}
-	if parsed.Scheme == "http" || parsed.Scheme == "https" {
+	// HTTP 代理沿用 Gorilla 的 CONNECT，以保留已有拨号钩子；
+	// HTTPS 代理需要先完成代理侧 TLS，再建立上游隧道。
+	if parsed.Scheme == "https" {
 		dialer.Proxy = nil
 		dialer.NetDialContext = security.NewHTTPConnectDialer(parsed).DialContext
 		return nil
