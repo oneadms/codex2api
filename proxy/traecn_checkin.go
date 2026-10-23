@@ -129,7 +129,7 @@ func runTraeCNCheckin(ctx context.Context, store *auth.Store, account *auth.Acco
 		account.Mu().RUnlock()
 	}
 	// 刷新令牌、查询状态和领取共用同一份 Resin 配置，避免热更新时中途切换出口。
-	ctx = WithResinConfig(ctx, ResinConfigFromContext(ctx))
+	ctx = withTraeCNResinContext(ctx)
 	viaResin := IsResinEnabledForContext(ctx) && account.ID() > 0
 	outcome.Egress = traeCNCheckinEgressLabel(proxyOverride)
 	if viaResin {
@@ -156,29 +156,19 @@ func runTraeCNCheckin(ctx context.Context, store *auth.Store, account *auth.Acco
 	if host == "" {
 		host = TraeCNCheckinHost
 	}
-	var client *http.Client
-	if viaResin {
-		client = getResinHTTPClient(account)
-	} else {
-		client = getPooledClient(account, proxyOverride)
-	}
 	post := func(path string) (gjson.Result, error) {
 		requestCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
 		body, _ := json.Marshal(map[string]any{"req_source": 1})
-		endpoint := host + path
-		if viaResin {
-			endpoint = BuildReverseProxyURLForContext(ctx, endpoint, ResinPlatformFromContext(ctx))
-		}
+		egress := ResolveCodexEgressForContext(ctx, account, host+path, proxyOverride)
+		endpoint := egress.URL
 		req, requestErr := http.NewRequestWithContext(requestCtx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if requestErr != nil {
 			return gjson.Result{}, requestErr
 		}
 		req.Header = auth.TraeCNCheckinHeaders(account, accessToken, uuid.NewString())
-		if viaResin {
-			req.Header.Set("X-Resin-Account", ResinAccountID(account))
-		}
-		resp, requestErr := client.Do(req)
+		egress.ApplyHeaders(req.Header)
+		resp, requestErr := egress.Client().Do(req)
 		if requestErr != nil {
 			// http.Client 的错误包含完整请求地址，Resin 路径中的访问令牌不能写入日志。
 			if viaResin {

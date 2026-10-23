@@ -9604,11 +9604,15 @@ type settingsResponse struct {
 	CodexModelMapping                 string   `json:"codex_model_mapping"`
 	PayloadRules                      string   `json:"payload_rules"`
 	ReasoningEffortModels             string   `json:"reasoning_effort_models"`
+	ResinMode                         string   `json:"resin_mode"`
 	ResinURL                          string   `json:"resin_url"`
 	ResinPlatformName                 string   `json:"resin_platform_name"`
+	ResinCodexPlatformName            string   `json:"resin_codex_platform_name"`
+	ResinTraeCNPlatformName           string   `json:"resin_traecn_platform_name"`
 	// CodexEgress 是后端权威的"Codex 渠道当前由谁承担出站"摘要:Resin 启用时代理池与
 	// proxy_url 对 Codex 不生效,界面据此标注,避免三套配置并存看不出谁在生效(issue #679)。
 	CodexEgress                        proxy.CodexEgressSummary         `json:"codex_egress"`
+	TraeCNEgress                       proxy.CodexEgressSummary         `json:"traecn_egress"`
 	PromptFilterEnabled                bool                             `json:"prompt_filter_enabled"`
 	PromptFilterMode                   string                           `json:"prompt_filter_mode"`
 	PromptFilterThreshold              int                              `json:"prompt_filter_threshold"`
@@ -9783,8 +9787,11 @@ type updateSettingsReq struct {
 	CodexModelMapping                   *string                          `json:"codex_model_mapping"`
 	PayloadRules                        *string                          `json:"payload_rules"`
 	ReasoningEffortModels               *string                          `json:"reasoning_effort_models"`
+	ResinMode                           *string                          `json:"resin_mode"`
 	ResinURL                            *string                          `json:"resin_url"`
 	ResinPlatformName                   *string                          `json:"resin_platform_name"`
+	ResinCodexPlatformName              *string                          `json:"resin_codex_platform_name"`
+	ResinTraeCNPlatformName             *string                          `json:"resin_traecn_platform_name"`
 	PromptFilterEnabled                 *bool                            `json:"prompt_filter_enabled"`
 	PromptFilterMode                    *string                          `json:"prompt_filter_mode"`
 	PromptFilterThreshold               *int                             `json:"prompt_filter_threshold"`
@@ -10457,7 +10464,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	dbSettings, _ := h.db.GetSystemSettings(ctx)
 	_, adminAuthSource := h.resolveAdminSecret(c.Request.Context())
 	adminSecret := ""
-	var resinURL, resinPlatformName string
+	resinMode := auth.ResinModeReverse
+	var resinURL, resinPlatformName, resinCodexPlatformName, resinTraeCNPlatformName string
 	branding := brandingFromSettings(dbSettings)
 	showFullUsageNumbers := false
 	showUpstreamModelMismatch := true
@@ -10468,8 +10476,11 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		adminSecret = dbSettings.AdminSecret
 	}
 	if dbSettings != nil {
+		resinMode = dbSettings.ResinMode
 		resinURL = dbSettings.ResinURL
 		resinPlatformName = dbSettings.ResinPlatformName
+		resinCodexPlatformName = dbSettings.ResinCodexPlatformName
+		resinTraeCNPlatformName = dbSettings.ResinTraeCNPlatformName
 		showFullUsageNumbers = dbSettings.ShowFullUsageNumbers
 		showUpstreamModelMismatch = dbSettings.ShowUpstreamModelMismatch
 		publicKeyUsagePageEnabled = dbSettings.PublicKeyUsagePageEnabled
@@ -10633,9 +10644,13 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		CodexModelMapping:                   h.store.GetCodexModelMapping(),
 		PayloadRules:                        h.store.GetPayloadRules(),
 		ReasoningEffortModels:               h.store.GetReasoningEffortModels(),
+		ResinMode:                           resinMode,
 		ResinURL:                            resinURL,
 		ResinPlatformName:                   resinPlatformName,
+		ResinCodexPlatformName:              resinCodexPlatformName,
+		ResinTraeCNPlatformName:             resinTraeCNPlatformName,
 		CodexEgress:                         proxy.CurrentCodexEgressSummary(),
+		TraeCNEgress:                        proxy.CurrentTraeCNEgressSummary(),
 		PromptFilterEnabled:                 promptFilterCfg.Enabled,
 		PromptFilterMode:                    promptFilterCfg.Mode,
 		PromptFilterThreshold:               promptFilterCfg.Threshold,
@@ -10985,18 +11000,30 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "读取现有设置失败："+settingsErr.Error())
 		return
 	}
-	resinUpdateRequested := req.ResinURL != nil || req.ResinPlatformName != nil
+	resinUpdateRequested := req.ResinMode != nil || req.ResinURL != nil || req.ResinPlatformName != nil || req.ResinCodexPlatformName != nil || req.ResinTraeCNPlatformName != nil
 	if resinUpdateRequested {
 		candidate := &proxy.ResinConfig{}
 		if existingSettings != nil {
+			candidate.Mode = existingSettings.ResinMode
 			candidate.BaseURL = existingSettings.ResinURL
 			candidate.PlatformName = existingSettings.ResinPlatformName
+			candidate.CodexPlatformName = existingSettings.ResinCodexPlatformName
+			candidate.TraeCNPlatformName = existingSettings.ResinTraeCNPlatformName
+		}
+		if req.ResinMode != nil {
+			candidate.Mode = *req.ResinMode
 		}
 		if req.ResinURL != nil {
 			candidate.BaseURL = *req.ResinURL
 		}
 		if req.ResinPlatformName != nil {
 			candidate.PlatformName = *req.ResinPlatformName
+		}
+		if req.ResinCodexPlatformName != nil {
+			candidate.CodexPlatformName = *req.ResinCodexPlatformName
+		}
+		if req.ResinTraeCNPlatformName != nil {
+			candidate.TraeCNPlatformName = *req.ResinTraeCNPlatformName
 		}
 		if err := proxy.ValidateResinConfig(candidate); err != nil {
 			writeError(c, http.StatusBadRequest, err.Error())
@@ -12036,11 +12063,23 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 
 	// Resin 粘性代理池配置
+	resinMode := auth.ResinModeReverse
 	resinURL := ""
 	resinPlatformName := ""
+	resinCodexPlatformName := ""
+	resinTraeCNPlatformName := ""
 	if existingSettings != nil {
+		resinMode = existingSettings.ResinMode
 		resinURL = existingSettings.ResinURL
 		resinPlatformName = existingSettings.ResinPlatformName
+		resinCodexPlatformName = existingSettings.ResinCodexPlatformName
+		resinTraeCNPlatformName = existingSettings.ResinTraeCNPlatformName
+	}
+	if req.ResinMode != nil {
+		resinMode = strings.TrimSpace(*req.ResinMode)
+		if resinMode == "" {
+			resinMode = auth.ResinModeReverse
+		}
 	}
 	if req.ResinURL != nil {
 		resinURL = *req.ResinURL
@@ -12049,6 +12088,14 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	if req.ResinPlatformName != nil {
 		resinPlatformName = *req.ResinPlatformName
 		log.Printf("设置已更新: resin_platform_name")
+	}
+	if req.ResinCodexPlatformName != nil {
+		resinCodexPlatformName = *req.ResinCodexPlatformName
+		log.Printf("设置已更新: resin_codex_platform_name")
+	}
+	if req.ResinTraeCNPlatformName != nil {
+		resinTraeCNPlatformName = *req.ResinTraeCNPlatformName
+		log.Printf("设置已更新: resin_traecn_platform_name")
 	}
 
 	// 图片存储后端配置
@@ -12186,8 +12233,11 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexModelMapping:                   h.store.GetCodexModelMapping(),
 		PayloadRules:                        h.store.GetPayloadRules(),
 		ReasoningEffortModels:               h.store.GetReasoningEffortModels(),
+		ResinMode:                           resinMode,
 		ResinURL:                            resinURL,
 		ResinPlatformName:                   resinPlatformName,
+		ResinCodexPlatformName:              resinCodexPlatformName,
+		ResinTraeCNPlatformName:             resinTraeCNPlatformName,
 		PromptFilterEnabled:                 promptFilterCfg.Enabled,
 		PromptFilterMode:                    promptFilterCfg.Mode,
 		PromptFilterThreshold:               promptFilterCfg.Threshold,
@@ -12287,14 +12337,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	} else {
 		if resinUpdateRequested {
 			// 数据库保存成功后再发布，页面和测试连接读取同一份有效配置。
-			proxy.SetResinConfig(&proxy.ResinConfig{BaseURL: resinURL, PlatformName: resinPlatformName})
-			if proxy.IsResinEnabled() {
-				auth.ResinRequestDecorator = func(targetURL, accountID string) string {
-					return proxy.BuildReverseProxyURL(targetURL)
-				}
-			} else {
-				auth.ResinRequestDecorator = nil
-			}
+			proxy.SetResinConfig(&proxy.ResinConfig{Mode: resinMode, BaseURL: resinURL, PlatformName: resinPlatformName, CodexPlatformName: resinCodexPlatformName, TraeCNPlatformName: resinTraeCNPlatformName})
 		}
 		if req.SessionSlotBufferSeconds != nil {
 			h.store.SetSessionSlotBuffer(time.Duration(sessionSlotBufferSeconds) * time.Second)
@@ -12568,9 +12611,13 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexModelMapping:                   h.store.GetCodexModelMapping(),
 		PayloadRules:                        h.store.GetPayloadRules(),
 		ReasoningEffortModels:               h.store.GetReasoningEffortModels(),
+		ResinMode:                           resinMode,
 		ResinURL:                            resinURL,
 		ResinPlatformName:                   resinPlatformName,
+		ResinCodexPlatformName:              resinCodexPlatformName,
+		ResinTraeCNPlatformName:             resinTraeCNPlatformName,
 		CodexEgress:                         proxy.CurrentCodexEgressSummary(),
+		TraeCNEgress:                        proxy.CurrentTraeCNEgressSummary(),
 		PromptFilterEnabled:                 promptFilterCfg.Enabled,
 		PromptFilterMode:                    promptFilterCfg.Mode,
 		PromptFilterThreshold:               promptFilterCfg.Threshold,

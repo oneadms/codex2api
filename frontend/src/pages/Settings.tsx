@@ -281,7 +281,7 @@ const SETTINGS_TAB_SECTION_INDEX: Record<SettingsTabKey, ReadonlyArray<{ id: str
 // 分区滚动高亮的判定线：分区顶部越过视口该高度即视为当前分区（要盖过粘性 Tab 栏）。
 const SETTINGS_SECTION_SPY_OFFSET_PX = 140
 // 手动保存字段的脏检查里跳过的键：生成号是服务端只读，自定义 Prompt 规则由规则页单独保存。
-const SETTINGS_DIRTY_IGNORED_KEYS: ReadonlySet<string> = new Set(['response_cache_config_generation', 'prompt_filter_custom_patterns', 'codex_images_default_main_model', 'codex_egress'])
+const SETTINGS_DIRTY_IGNORED_KEYS: ReadonlySet<string> = new Set(['response_cache_config_generation', 'prompt_filter_custom_patterns', 'codex_images_default_main_model', 'codex_egress', 'traecn_egress'])
 
 const getDefaultModelMappingEntries = (): ModelMappingEntry[] =>
   Object.entries(DEFAULT_CLAUDE_MODEL_MAP) as ModelMappingEntry[]
@@ -2693,8 +2693,11 @@ export default function Settings() {
     codex_model_mapping: '{}',
     payload_rules: '{}',
     reasoning_effort_models: '[]',
+    resin_mode: 'reverse',
     resin_url: '',
     resin_platform_name: '',
+    resin_codex_platform_name: '',
+    resin_traecn_platform_name: '',
     prompt_filter_enabled: false,
     prompt_filter_mode: 'monitor',
     prompt_filter_threshold: 50,
@@ -3313,7 +3316,8 @@ export default function Settings() {
   const showConnectionPool = isExternalDatabase || isExternalCache
   // Resin 生效与否以后端摘要为准(保存后随响应刷新),不按表单里未保存的草稿猜。
   const codexEgress = persistedSettings?.codex_egress
-  const resinActive = Boolean(codexEgress?.resin_enabled)
+  const traecnEgress = persistedSettings?.traecn_egress
+  const resinActive = Boolean(codexEgress?.resin_enabled || traecnEgress?.resin_enabled)
   const canConfigureRemoteMigration = settingsForm.admin_auth_source === 'env' || settingsForm.admin_secret.trim() !== ''
   const saveButtonLabel = savingSettings ? t('common.saving') : t('settings.saveSettings')
   const siteLogoPreview = sanitizeBrandingLogo(settingsForm.site_logo) || DEFAULT_SITE_LOGO
@@ -6339,11 +6343,24 @@ export default function Settings() {
                         : 'border-border/60 bg-muted/20 text-muted-foreground',
                     )}
                   >
-                    {resinActive
-                      ? t('settings.resinActiveNote', { endpoint: codexEgress?.resin_endpoint || '', platform: codexEgress?.resin_platform_name || '' })
-                      : t('settings.resinInactiveNote')}
+                    <p>{codexEgress?.resin_enabled
+                      ? t('settings.resinActiveNote', { mode: t(codexEgress.resin_mode === 'forward' ? 'settings.resinModeForward' : 'settings.resinModeReverse'), endpoint: codexEgress?.resin_endpoint || '', platform: codexEgress?.resin_platform_name || '' })
+                      : t('settings.resinInactiveNote')}</p>
+                    <p className="mt-1">{traecnEgress?.resin_enabled
+                      ? t('settings.resinTraeCNActiveNote', { mode: t(traecnEgress.resin_mode === 'forward' ? 'settings.resinModeForward' : 'settings.resinModeReverse'), endpoint: traecnEgress.resin_endpoint || '', platform: traecnEgress.resin_platform_name || '' })
+                      : t('settings.resinTraeCNInactiveNote')}</p>
                   </div>
                   <div className={SETTINGS_FIELD_GRID}>
+                    <SettingField label={t('settings.resinMode')} description={t('settings.resinModeDesc')}>
+                      <SegmentedPillGroup
+                        value={settingsForm.resin_mode}
+                        onChange={(value) => setSettingsForm(f => ({ ...f, resin_mode: value as SystemSettings['resin_mode'] }))}
+                        options={[
+                          { value: 'reverse', label: t('settings.resinModeReverse') },
+                          { value: 'forward', label: t('settings.resinModeForward') },
+                        ]}
+                      />
+                    </SettingField>
                     <SettingField label={t('settings.resinUrl')} description={t('settings.resinUrlDesc')}>
                       <Input
                         placeholder="http://127.0.0.1:2260/your-token"
@@ -6356,6 +6373,20 @@ export default function Settings() {
                         placeholder="p1,p2,p3"
                         value={settingsForm.resin_platform_name}
                         onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, resin_platform_name: e.target.value }))}
+                      />
+                    </SettingField>
+                    <SettingField label={t('settings.resinCodexPlatformName')} description={t('settings.resinCodexPlatformNameDesc')}>
+                      <Input
+                        placeholder={settingsForm.resin_platform_name || 'codex-p1,codex-p2'}
+                        value={settingsForm.resin_codex_platform_name}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, resin_codex_platform_name: e.target.value }))}
+                      />
+                    </SettingField>
+                    <SettingField label={t('settings.resinTraeCNPlatformName')} description={t('settings.resinTraeCNPlatformNameDesc')}>
+                      <Input
+                        placeholder={settingsForm.resin_platform_name || 'traecn-p1,traecn-p2'}
+                        value={settingsForm.resin_traecn_platform_name}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, resin_traecn_platform_name: e.target.value }))}
                       />
                     </SettingField>
                   </div>

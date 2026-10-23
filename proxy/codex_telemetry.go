@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -38,13 +39,14 @@ var (
 )
 
 type codexTelemetryClient struct {
-	account     *auth.Account
-	accessToken string
-	accountID   string
-	proxyURL    string
-	userAgent   string
-	originator  string
-	version     string
+	egressContext context.Context
+	account       *auth.Account
+	accessToken   string
+	accountID     string
+	proxyURL      string
+	userAgent     string
+	originator    string
+	version       string
 }
 
 type codexTelemetryProfile struct {
@@ -65,6 +67,7 @@ type codexTelemetryProfile struct {
 }
 
 type codexTelemetryRequest struct {
+	ctx           context.Context
 	account       *auth.Account
 	body          []byte
 	sessionID     string
@@ -269,8 +272,14 @@ func beginCodexTelemetry(input codexTelemetryRequest) *codexTelemetryAttempt {
 
 // snapshotCodexTelemetryClient 固化本次请求实际使用的账号和客户端身份。
 func snapshotCodexTelemetryClient(input codexTelemetryRequest) (codexTelemetryClient, bool) {
+	ctx := input.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	snapshotContext := WithResinPlatform(WithResinConfig(context.Background(), ResinConfigFromContext(ctx)), ResinPlatformFromContext(ctx))
 	client := codexTelemetryClient{
-		account: input.account, accessToken: input.account.GetAccessToken(),
+		egressContext: snapshotContext,
+		account:       input.account, accessToken: input.account.GetAccessToken(),
 		accountID: input.account.EffectiveAccountID(), proxyURL: input.account.GetProxyURL(),
 	}
 	if client.accessToken == "" || client.accountID == "" || input.account.IsCodexAgentIdentity() {
@@ -278,6 +287,12 @@ func snapshotCodexTelemetryClient(input codexTelemetryRequest) (codexTelemetryCl
 	}
 	if input.proxyOverride != "" {
 		client.proxyURL = input.proxyOverride
+	}
+	// 异步任务只保留出口快照，避免延长整个请求上下文及其缓冲区的存活期。
+	egress := ResolveCodexEgressForContext(ctx, input.account, "", client.proxyURL)
+	if !egress.ViaResin() {
+		client.egressContext = WithResinConfig(context.Background(), nil)
+		client.proxyURL = egress.DialProxyURL
 	}
 	identity, err := ResolveCodexOutboundClientIdentity(CodexClientIdentityInput{Account: input.account, APIKey: input.apiKey, DeviceConfig: input.deviceCfg, Headers: input.headers})
 	if err != nil {

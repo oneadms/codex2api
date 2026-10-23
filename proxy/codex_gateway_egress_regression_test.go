@@ -42,7 +42,7 @@ func TestCodexGatewayEgressUsesEffectiveExitBeforeResin(t *testing.T) {
 					t.Fatalf("bound route lost: ws=%v %+v", ws, egress)
 				}
 			}
-			if got := CodexDialProxyURLForContext(ctx, target, selected); got != tc.want {
+			if got, err := CodexDialProxyURLForContext(ctx, target, selected); err != nil || got != tc.want {
 				t.Fatalf("dialer lost bound exit: %q", got)
 			}
 			h := http.Header{}

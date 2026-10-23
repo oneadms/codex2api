@@ -168,9 +168,9 @@ func queryWhamDailyUsageWithURL(ctx context.Context, account *auth.Account, prox
 	query.Set("workspace_user", "true")
 	requestURL := base + "?" + query.Encode()
 
-	// resinMaintenanceTarget 经 RequestURI() 重建目标，query 会被保留。
-	finalURL, resinClient, viaResin := resinMaintenanceTarget(account, requestURL)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, finalURL, nil)
+	// 出口解析保留原始查询参数。
+	egress := resolveCodexMaintenanceEgress(ctx, account, requestURL, proxyURL, maintenancePurposeCodex, false)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, egress.URL, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build daily usage request: %w", err)
 	}
@@ -182,7 +182,8 @@ func queryWhamDailyUsageWithURL(ctx context.Context, account *auth.Account, prox
 	if accountID := account.EffectiveAccountID(); accountID != "" {
 		req.Header.Set("chatgpt-account-id", accountID)
 	}
-	client := whamHTTPClient(req, account, resinClient, viaResin, proxyURL)
+	egress.ApplyHeaders(req.Header)
+	client := egress.Client()
 
 	resp, err := client.Do(req)
 	if err != nil {

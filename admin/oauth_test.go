@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +18,27 @@ import (
 	"github.com/codex2api/proxy"
 	"github.com/gin-gonic/gin"
 )
+
+func TestOAuthForwardUsesTemporaryIdentityAndSnapshot(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		want := "Basic " + base64.StdEncoding.EncodeToString([]byte("p2.oauth-session:private-token"))
+		if r.Method != http.MethodConnect || r.Host != "auth.openai.com:443" || r.Header.Get("Proxy-Authorization") != want || r.Header.Get("X-Resin-Account") != "" {
+			t.Error("incorrect OAuth proxy identity")
+		}
+		w.WriteHeader(http.StatusProxyAuthRequired)
+	}))
+	defer server.Close()
+	ctx := proxy.WithResinPlatform(proxy.WithResinConfig(t.Context(), &proxy.ResinConfig{Mode: "forward", BaseURL: server.URL + "/private-token", PlatformName: "p1,p2"}), "p2")
+	previous := proxy.GetResinConfig()
+	proxy.SetResinConfig(nil)
+	t.Cleanup(func() { proxy.SetResinConfig(previous) })
+	_, _, err := doOAuthCodeExchange(ctx, "code", "verifier", oauthDefaultRedirectURI, "http://127.0.0.1:1", "oauth-session")
+	if err == nil || calls.Load() != 1 || strings.Contains(err.Error(), "private-token") {
+		t.Fatalf("calls=%d err=%v", calls.Load(), err)
+	}
+}
 
 func TestExchangeOAuthCodeSeedsAccessTokenFromExchangeResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -37,11 +59,11 @@ func TestExchangeOAuthCodeSeedsAccessTokenFromExchangeResponse(t *testing.T) {
 	defer server.Close()
 
 	oldResinCfg := proxy.GetResinConfig()
-	oldDecorator := auth.ResinRequestDecorator
+	oldDecorator := auth.ResinRequestResolver
 	proxy.SetResinConfig(&proxy.ResinConfig{BaseURL: server.URL, PlatformName: "codex2api"})
 	t.Cleanup(func() {
 		proxy.SetResinConfig(oldResinCfg)
-		auth.ResinRequestDecorator = oldDecorator
+		auth.ResinRequestResolver = oldDecorator
 	})
 
 	sessionID := "oauth-test-session"
@@ -120,11 +142,11 @@ func newOAuthExchangeTestServerWithIDToken(t *testing.T, idToken string) *httpte
 	t.Cleanup(server.Close)
 
 	oldResinCfg := proxy.GetResinConfig()
-	oldDecorator := auth.ResinRequestDecorator
+	oldDecorator := auth.ResinRequestResolver
 	proxy.SetResinConfig(&proxy.ResinConfig{BaseURL: server.URL, PlatformName: "codex2api"})
 	t.Cleanup(func() {
 		proxy.SetResinConfig(oldResinCfg)
-		auth.ResinRequestDecorator = oldDecorator
+		auth.ResinRequestResolver = oldDecorator
 	})
 	return server
 }
@@ -545,11 +567,11 @@ func TestUpdateOAuthAccountCodeDoesNotExposeTokenErrorBody(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	oldResinCfg := proxy.GetResinConfig()
-	oldDecorator := auth.ResinRequestDecorator
+	oldDecorator := auth.ResinRequestResolver
 	proxy.SetResinConfig(&proxy.ResinConfig{BaseURL: server.URL, PlatformName: "codex2api"})
 	t.Cleanup(func() {
 		proxy.SetResinConfig(oldResinCfg)
-		auth.ResinRequestDecorator = oldDecorator
+		auth.ResinRequestResolver = oldDecorator
 	})
 
 	id := insertOAuthEditTestAccount(t, db, "oauth-existing", "old-refresh", "")

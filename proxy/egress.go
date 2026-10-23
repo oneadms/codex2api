@@ -13,7 +13,7 @@ import (
 //
 // Codex 渠道的出站有三套配置并存(issue #679):
 //
-//  1. Resin 反向代理(全局,系统设置 resin_url + resin_platform_name)
+//  1. Resin 正向或反向代理（系统设置 resin_mode、resin_url 与平台列表）
 //  2. 代理池 / 分组代理 / 账号 proxy_url / 全局 proxy_url
 //     (由 auth.Store.ResolveProxyForAccount 按 账号 > 分组 > 代理池 > 全局 选出一条)
 //  3. 直连
@@ -32,7 +32,7 @@ import (
 type CodexEgressKind string
 
 const (
-	// CodexEgressResin 经 Resin 反代;URL 已改写,请求头需带 X-Resin-Account。
+	// CodexEgressResin 经 Resin，具体转发方式由 ResinMode 区分。
 	CodexEgressResin CodexEgressKind = "resin"
 	// CodexEgressProxy 经第 2 层选出的代理直达上游。
 	CodexEgressProxy CodexEgressKind = "proxy"
@@ -43,15 +43,18 @@ const (
 // CodexEgress 描述解析后的出口:最终请求地址、拨号用代理与客户端。
 type CodexEgress struct {
 	Kind CodexEgressKind
-	// URL 是最终请求地址;Resin 模式下已改写为反代路径。
+	// URL 是最终请求地址；仅 Resin 反向模式改写为反代路径。
 	URL string
 	// ProxyURL 是第 2 层选出的代理。Resin 模式下保留原值用于审计,但拨号不使用。
 	ProxyURL string
-	// DialProxyURL 是实际参与拨号的代理:Resin 模式恒为空。
+	// DialProxyURL 是实际参与拨号的代理；Resin 反向模式为空。
 	DialProxyURL string
+	ResinMode    string
+	Err          error
 
 	account         *auth.Account
 	client          *http.Client
+	resinRoute      auth.ResinRoute
 	freshTicketNode bool
 }
 
@@ -78,15 +81,12 @@ func ResolveCodexEgressForContext(ctx context.Context, account *auth.Account, ta
 		}
 	}
 	proxyURL = strings.TrimSpace(proxyURL)
-	cfg := ResinConfigFromContext(ctx)
+	if account != nil && account.IsTraeCNAPI() {
+		ctx = auth.WithResinChannel(ctx, auth.UpstreamTraeCN)
+	}
+	cfg := ResinConfigFromContext(ctx).forChannel(auth.ResinChannelFromContext(ctx))
 	if cfg != nil && AccountSupportsResin(account) {
-		return CodexEgress{
-			Kind:     CodexEgressResin,
-			URL:      buildReverseProxyURL(cfg, targetURL, ResinPlatformFromContext(ctx)),
-			ProxyURL: proxyURL,
-			account:  account,
-			client:   getResinHTTPClient(account),
-		}
+		return resolveResinEgress(ctx, cfg, account, targetURL, proxyURL)
 	}
 	kind := CodexEgressDirect
 	if proxyURL != "" {
@@ -101,9 +101,22 @@ func ResolveCodexEgressForContext(ctx context.Context, account *auth.Account, ta
 	}
 }
 
+func resolveResinEgress(ctx context.Context, cfg *ResinConfig, account *auth.Account, targetURL, proxyURL string) CodexEgress {
+	route, err := buildResinRoute(cfg, targetURL, ResinPlatformFromContext(ctx), ResinAccountID(account))
+	egress := CodexEgress{Kind: CodexEgressResin, URL: route.URL, ProxyURL: proxyURL,
+		DialProxyURL: route.ProxyURL, ResinMode: cfg.mode(), Err: err, account: account, resinRoute: route}
+	if err == nil && route.Mode == auth.ResinModeReverse {
+		egress.client = getResinHTTPClient(account)
+	}
+	return egress
+}
+
 // resinCarriesEgressForContext 与出口解析使用相同的账号范围与请求配置快照。
 // TRAE CN 保留二开的 Resin 支持，其余中继型账号仍按代理链解析。
 func resinCarriesEgressForContext(ctx context.Context, account *auth.Account) bool {
+	if account != nil && account.IsTraeCNAPI() {
+		ctx = auth.WithResinChannel(ctx, auth.UpstreamTraeCN)
+	}
 	if _, bound, _ := CodexGatewayEgressFromContext(ctx); bound && codexTicketFromContext(ctx) == nil {
 		return false
 	}
@@ -115,10 +128,16 @@ func (e CodexEgress) ViaResin() bool {
 	return e.Kind == CodexEgressResin
 }
 
-// Client 返回本链路的 HTTP 客户端。Resin 模式复用按账号隔离的 Resin 连接池;
-// 其余模式复用网关主池(uTLS + 代理)。account 为 nil 且非 Resin 时返回 nil,
+// Client 返回本链路的 HTTP 客户端。反向模式复用 Resin 连接池；正向模式沿用
+// 网关的 TLS 策略，并以含平台和身份的实际代理地址隔离连接。account 为 nil 时返回 nil，
 // 由调用方按自己的兜底 transport 处理。
 func (e CodexEgress) Client() *http.Client {
+	if e.Err != nil {
+		return &http.Client{Transport: codexEgressErrorTransport{err: e.Err}}
+	}
+	if e.ResinMode == auth.ResinModeReverse && e.client != nil {
+		return e.client
+	}
 	if e.freshTicketNode {
 		// Selector 切换后的请求必须重新 CONNECT，不能复用指向其他节点的 TCP 连接。
 		client, err := auth.BuildHTTPClientChecked(e.DialProxyURL)
@@ -130,13 +149,17 @@ func (e CodexEgress) Client() *http.Client {
 		}
 		return client
 	}
-	if e.client != nil {
-		return e.client
+	if e.client == nil {
+		if e.account == nil {
+			return nil
+		}
+		e.client = getPooledClient(e.account, e.DialProxyURL)
 	}
-	if e.account == nil {
-		return nil
+	if e.ViaResin() {
+		client := *e.client
+		client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+		return &client
 	}
-	e.client = getPooledClient(e.account, e.DialProxyURL)
 	return e.client
 }
 
@@ -146,17 +169,17 @@ func (t codexEgressErrorTransport) RoundTrip(*http.Request) (*http.Response, err
 	return nil, t.err
 }
 
-// ApplyHeaders 补齐链路要求的请求头:Resin 模式注入账号身份头,其余模式不改。
+// ApplyHeaders 只在反代注入账号头；正代身份由代理认证携带。
 func (e CodexEgress) ApplyHeaders(h http.Header) {
 	if h == nil || !e.ViaResin() || e.account == nil {
 		return
 	}
-	h.Set("X-Resin-Account", ResinAccountID(e.account))
+	e.resinRoute.ApplyHeaders(h)
 }
 
 // ResolveCodexWebsocketEgress 为 Codex WS 出站决定链路:返回最终 WS 地址与
-// 拨号用代理。Resin 模式下 WS 地址改写为 Resin 的 ws:// 反代路径、拨号不走代理;
-// 账号身份头由调用方用 ApplyHeaders 注入。
+// 拨号用代理。反向模式改写地址，正向模式保留目标并通过 CONNECT 建立隧道；
+// 调用方用 ApplyHeaders 应用对应的身份头策略。
 func ResolveCodexWebsocketEgress(account *auth.Account, wsURL, proxyURL string) CodexEgress {
 	return ResolveCodexWebsocketEgressForContext(context.Background(), account, wsURL, proxyURL)
 }
@@ -176,14 +199,12 @@ func ResolveCodexWebsocketEgressForContext(ctx context.Context, account *auth.Ac
 		}
 	}
 	proxyURL = strings.TrimSpace(proxyURL)
-	cfg := ResinConfigFromContext(ctx)
+	if account != nil && account.IsTraeCNAPI() {
+		ctx = auth.WithResinChannel(ctx, auth.UpstreamTraeCN)
+	}
+	cfg := ResinConfigFromContext(ctx).forChannel(auth.ResinChannelFromContext(ctx))
 	if cfg != nil && AccountSupportsResin(account) {
-		return CodexEgress{
-			Kind:     CodexEgressResin,
-			URL:      buildWebSocketURL(cfg, wsURL, ResinPlatformFromContext(ctx)),
-			ProxyURL: proxyURL,
-			account:  account,
-		}
+		return resolveResinEgress(ctx, cfg, account, wsURL, proxyURL)
 	}
 	kind := CodexEgressDirect
 	if proxyURL != "" {
@@ -198,25 +219,16 @@ func ResolveCodexWebsocketEgressForContext(ctx context.Context, account *auth.Ac
 	}
 }
 
-// CodexDialProxyURL 返回拨号实际使用的代理:Resin 承担出站时恒为空(地址已是反代
-// 路径,再套代理只会把 Resin 本身推到代理后面)。供只需要"拨号走不走代理"、
-// 手里 URL 已经改写过的调用方(WS 连接建立)使用,避免对改写后的地址二次改写。
-func CodexDialProxyURL(account *auth.Account, proxyURL string) string {
+// CodexDialProxyURL 返回实际代理：反向模式为空，正向模式包含 Resin 代理身份。
+// 供已解析目标 URL 的 WS 拨号方使用，避免重复改写地址。
+func CodexDialProxyURL(account *auth.Account, proxyURL string) (string, error) {
 	return CodexDialProxyURLForContext(context.Background(), account, proxyURL)
 }
 
 // CodexDialProxyURLForContext 与请求的 URL 改写使用同一份 Resin 配置快照。
-func CodexDialProxyURLForContext(ctx context.Context, account *auth.Account, proxyURL string) string {
-	if ticket := CodexTicketProxyForRequest(ctx, ""); ticket != "" {
-		return ticket
-	}
-	if pinned, bound, _ := CodexGatewayEgressFromContext(ctx); bound && codexTicketFromContext(ctx) == nil {
-		return pinned
-	}
-	if resinCarriesEgressForContext(ctx, account) {
-		return ""
-	}
-	return strings.TrimSpace(proxyURL)
+func CodexDialProxyURLForContext(ctx context.Context, account *auth.Account, proxyURL string) (string, error) {
+	egress := ResolveCodexWebsocketEgressForContext(ctx, account, "", proxyURL)
+	return egress.DialProxyURL, egress.Err
 }
 
 // CodexEgressSummary 是给设置接口/日志用的全局出口摘要:只回答"Codex 渠道现在
@@ -225,7 +237,8 @@ type CodexEgressSummary struct {
 	// Mode 是 resin 或 proxy_chain;proxy_chain 表示按 账号 > 分组 > 代理池 > 全局 > 直连 解析。
 	Mode string `json:"mode"`
 	// ResinEnabled 为 true 时 Codex 渠道的代理池/proxy_url 均不参与出站。
-	ResinEnabled bool `json:"resin_enabled"`
+	ResinEnabled bool   `json:"resin_enabled"`
+	ResinMode    string `json:"resin_mode,omitempty"`
 	// ResinEndpoint 是打码后的 Resin 地址(去掉路径里的 token),仅用于展示。
 	ResinEndpoint string `json:"resin_endpoint,omitempty"`
 	// ResinPlatformName 是 Resin 侧平台标识。
@@ -234,13 +247,22 @@ type CodexEgressSummary struct {
 
 // CurrentCodexEgressSummary 返回当前生效的 Codex 出口摘要。
 func CurrentCodexEgressSummary() CodexEgressSummary {
-	cfg := GetResinConfig()
+	return currentResinEgressSummary("")
+}
+
+func CurrentTraeCNEgressSummary() CodexEgressSummary {
+	return currentResinEgressSummary(auth.UpstreamTraeCN)
+}
+
+func currentResinEgressSummary(channel string) CodexEgressSummary {
+	cfg := GetResinConfig().forChannel(channel)
 	if cfg == nil {
 		return CodexEgressSummary{Mode: "proxy_chain"}
 	}
 	return CodexEgressSummary{
 		Mode:              "resin",
 		ResinEnabled:      true,
+		ResinMode:         cfg.mode(),
 		ResinEndpoint:     MaskResinBaseURL(cfg.BaseURL),
 		ResinPlatformName: cfg.PlatformName,
 	}

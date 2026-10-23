@@ -14,8 +14,8 @@ import (
 // helper: the Store is responsible for supplying the stable DB account id that
 // binds ExchangeToken and inference to the same Resin lease.
 func TestTraeCNRefreshRoutesExchangeTokenThroughResin(t *testing.T) {
-	previousDecorator := ResinRequestDecorator
-	t.Cleanup(func() { ResinRequestDecorator = previousDecorator })
+	previousDecorator := ResinRequestResolver
+	t.Cleanup(func() { ResinRequestResolver = previousDecorator })
 
 	var originCalls atomic.Int32
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -47,10 +47,10 @@ func TestTraeCNRefreshRoutesExchangeTokenThroughResin(t *testing.T) {
 	defer resin.Close()
 
 	var decoratedTarget, decoratedAccount string
-	ResinRequestDecorator = func(targetURL, accountID string) string {
+	ResinRequestResolver = func(_ context.Context, targetURL, accountID string) (ResinRoute, error) {
 		decoratedTarget = targetURL
 		decoratedAccount = accountID
-		return resin.URL + "/resin/exchange"
+		return ResinRoute{URL: resin.URL + "/resin/exchange", Mode: ResinModeReverse, AccountID: accountID}, nil
 	}
 	store := (&Store{}).withMaxConcurrency(1)
 	account := &Account{
@@ -99,9 +99,9 @@ func TestTraeCNRefreshRoutesExchangeTokenThroughResin(t *testing.T) {
 }
 
 func TestTraeCNRefreshWithoutResinUsesDirectExchangeTokenRoute(t *testing.T) {
-	previousDecorator := ResinRequestDecorator
-	ResinRequestDecorator = nil
-	t.Cleanup(func() { ResinRequestDecorator = previousDecorator })
+	previousDecorator := ResinRequestResolver
+	ResinRequestResolver = nil
+	t.Cleanup(func() { ResinRequestResolver = previousDecorator })
 
 	type capturedRequest struct {
 		path         string
@@ -143,13 +143,13 @@ func TestTraeCNRefreshWithoutResinUsesDirectExchangeTokenRoute(t *testing.T) {
 }
 
 func TestTraeCNTransientRefreshDoesNotClaimZeroResinLease(t *testing.T) {
-	previousDecorator := ResinRequestDecorator
-	t.Cleanup(func() { ResinRequestDecorator = previousDecorator })
+	previousDecorator := ResinRequestResolver
+	t.Cleanup(func() { ResinRequestResolver = previousDecorator })
 
 	var decoratorCalls atomic.Int32
-	ResinRequestDecorator = func(targetURL, accountID string) string {
+	ResinRequestResolver = func(_ context.Context, targetURL, accountID string) (ResinRoute, error) {
 		decoratorCalls.Add(1)
-		return targetURL
+		return ResinRoute{URL: targetURL}, nil
 	}
 	type capturedRequest struct {
 		path         string

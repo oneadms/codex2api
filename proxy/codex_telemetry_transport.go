@@ -14,10 +14,14 @@ import (
 // （issue #372 的不变量）。metrics 端点虽不带 Bearer，但真实客户端从同一出口发出，
 // 这里保持一致。
 func sendCodexTelemetryJob(job codexTelemetryJob) error {
-	ctx, cancel := context.WithTimeout(context.Background(), codexTelemetryTimeout)
+	ctx := job.client.egressContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, codexTelemetryTimeout)
 	defer cancel()
-	finalURL, resinClient, viaResin := resinMaintenanceTarget(job.client.account, job.url)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, finalURL, bytes.NewReader(job.body))
+	egress := ResolveCodexEgressForContext(ctx, job.client.account, job.url, job.client.proxyURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, egress.URL, bytes.NewReader(job.body))
 	if err != nil {
 		return err
 	}
@@ -29,11 +33,8 @@ func sendCodexTelemetryJob(job codexTelemetryJob) error {
 	} else {
 		applyCodexAnalyticsHeaders(req.Header, job.client)
 	}
-	client := codexTelemetryHTTPClient(getPooledClient(job.client.account, job.client.proxyURL))
-	if viaResin {
-		req.Header.Set("X-Resin-Account", ResinAccountID(job.client.account))
-		client = codexTelemetryHTTPClient(resinClient)
-	}
+	egress.ApplyHeaders(req.Header)
+	client := codexTelemetryHTTPClient(egress.Client())
 	resp, err := client.Do(req)
 	if err != nil {
 		return err

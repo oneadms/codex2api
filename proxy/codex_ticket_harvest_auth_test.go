@@ -105,14 +105,14 @@ func TestHarvestOneTicketRefreshesCredentialsAndPublishes(t *testing.T) {
 				_, _ = w.Write([]byte(`{"access_token":"new-at","refresh_token":"new-rt","expires_in":3600}`))
 			}))
 			t.Cleanup(issuer.Close)
-			previousDecorator := auth.ResinRequestDecorator
-			auth.ResinRequestDecorator = func(targetURL, _ string) string {
+			previousDecorator := auth.ResinRequestResolver
+			auth.ResinRequestResolver = func(_ context.Context, targetURL, accountID string) (auth.ResinRoute, error) {
 				if targetURL != auth.TokenURL {
 					t.Error("unexpected refresh endpoint")
 				}
-				return issuer.URL
+				return auth.ResinRoute{Mode: auth.ResinModeReverse, URL: issuer.URL, AccountID: accountID}, nil
 			}
-			t.Cleanup(func() { auth.ResinRequestDecorator = previousDecorator })
+			t.Cleanup(func() { auth.ResinRequestResolver = previousDecorator })
 
 			state := testTicketState(time.Now(), auth.CodexTicketPersonalBlocks)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

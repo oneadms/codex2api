@@ -20,8 +20,11 @@ import (
 
 // ResinConfig 保存 Resin 代理池连接配置
 type ResinConfig struct {
-	BaseURL      string // 完整基础地址，例如 http://127.0.0.1:2260/my-token
-	PlatformName string // 全局平台标识；支持逗号分隔，例如 codex2api 或 p1,p2,p3
+	Mode               string // reverse 或 forward；空值沿用反向代理
+	BaseURL            string // 完整基础地址，例如 http://127.0.0.1:2260/my-token
+	PlatformName       string // 全局平台标识；支持逗号分隔，例如 codex2api 或 p1,p2,p3
+	CodexPlatformName  string // Codex 独立平台列表，留空沿用公共平台
+	TraeCNPlatformName string // TRAE CN 独立平台列表，留空沿用公共平台
 }
 
 // resinPlatformContextKey carries the platform selected for one request.  It
@@ -36,7 +39,8 @@ func WithResinPlatform(ctx context.Context, platform string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return context.WithValue(ctx, resinPlatformContextKey{}, strings.TrimSpace(platform))
+	platform = strings.TrimSpace(platform)
+	return withResinPlatforms(ctx, resinPlatformSelection{codex: platform, traecn: platform})
 }
 
 // ResinPlatformFromContext returns the request-scoped platform, if one was
@@ -45,8 +49,11 @@ func ResinPlatformFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
 	}
-	platform, _ := ctx.Value(resinPlatformContextKey{}).(string)
-	return strings.TrimSpace(platform)
+	platforms, _ := ctx.Value(resinPlatformContextKey{}).(resinPlatformSelection)
+	if auth.ResinChannelFromContext(ctx) == auth.UpstreamTraeCN {
+		return platforms.traecn
+	}
+	return platforms.codex
 }
 
 // parseResinPlatforms normalizes the legacy single string field into a global
@@ -92,31 +99,21 @@ func (cfg *ResinConfig) platformList() []string {
 // 全局 Resin 配置（原子指针，支持热更新）
 var resinCfg atomic.Pointer[ResinConfig]
 
-// SetResinConfig 设置全局 Resin 配置；cfg 为 nil、BaseURL 为空或平台列表为空时禁用 Resin。
-// PlatformName 继续使用原有字段承载多个全局平台（逗号分隔），兼容既有配置。
+// SetResinConfig 设置全局 Resin 配置；地址或全部平台列表为空时禁用 Resin。
+// 每条链路优先使用独立平台，未填写时沿用公共平台。
 // 启用/禁用同步到 auth 包的出口标记；日志隐藏 Resin URL 中的 token。
 func SetResinConfig(cfg *ResinConfig) {
-	wasEnabled := IsResinEnabled()
-	if cfg != nil {
-		baseURL := strings.TrimSpace(cfg.BaseURL)
-		platforms := parseResinPlatforms(cfg.PlatformName)
-		if baseURL != "" && len(platforms) > 0 {
-			// Store an immutable snapshot rather than the caller-owned pointer. Keep
-			// the public struct's original two-field shape for source compatibility.
-			normalized := &ResinConfig{
-				BaseURL:      baseURL,
-				PlatformName: strings.Join(platforms, ","),
-			}
-			resinCfg.Store(normalized)
-			auth.SetResinEgressEnabled(true)
-			log.Printf("[Resin] 已启用: platforms=%s endpoint=%s;Codex 渠道出站全部经 Resin,代理池/分组代理/账号与全局 proxy_url 对 Codex 不再生效",
-				normalized.PlatformName, MaskResinBaseURL(normalized.BaseURL))
-			return
-		}
-	}
-	resinCfg.Store(nil)
-	auth.SetResinEgressEnabled(false)
-	if wasEnabled {
+	wasEnabled := GetResinConfig() != nil
+	normalized := normalizeResinConfig(cfg)
+	resinCfg.Store(normalized)
+	auth.SetResinEgressEnabled(normalized.forChannel("") != nil)
+	if normalized != nil {
+		log.Printf("[Resin] 已启用: mode=%s codex=%s traecn=%s endpoint=%s",
+			normalized.mode(),
+			strings.Join(normalized.forChannel("").platformList(), ","),
+			strings.Join(normalized.forChannel(auth.UpstreamTraeCN).platformList(), ","),
+			MaskResinBaseURL(normalized.BaseURL))
+	} else if wasEnabled {
 		log.Printf("[Resin] 已禁用;Codex 渠道出站恢复按 账号 > 分组 > 代理池 > 全局 > 直连 解析")
 	}
 }
@@ -126,9 +123,9 @@ func GetResinConfig() *ResinConfig {
 	return resinCfg.Load()
 }
 
-// IsResinEnabled 检查 Resin 代理池是否已启用
+// IsResinEnabled 检查 Codex 链路是否已启用 Resin。
 func IsResinEnabled() bool {
-	return GetResinConfig() != nil
+	return GetResinConfig().forChannel("") != nil
 }
 
 // ResinPlatformForSession returns the deterministic global platform assigned
@@ -136,7 +133,7 @@ func IsResinEnabled() bool {
 // empty key intentionally falls back to the first configured platform so
 // maintenance/anonymous requests do not hash a per-request random identity.
 func ResinPlatformForSession(sessionKey string) string {
-	return resinPlatformForSession(GetResinConfig(), sessionKey)
+	return resinPlatformForSession(GetResinConfig().forChannel(""), sessionKey)
 }
 
 func resinPlatformForSession(cfg *ResinConfig, sessionKey string) string {
@@ -180,33 +177,6 @@ func defaultResinPlatform(cfg *ResinConfig) string {
 	return platforms[0]
 }
 
-// resinMaintenanceTarget 为账号维护类旁路请求（wham 用量/重置券/订阅到期查询）
-// 决定最终 URL 与客户端。这类请求与 /responses 一样携带账号身份打 chatgpt.com，
-// Resin 启用时必须同样经反代访问并复用 Resin 连接池，否则全部账号共享本机
-// 出口 IP 直连（issue #372）。返回 viaResin=true 时调用方需在请求头设置
-// X-Resin-Account；未启用时返回原 URL 与 nil 客户端，由调用方按既有直连
-// transport 兜底。
-func resinMaintenanceTarget(account *auth.Account, targetURL string) (finalURL string, client *http.Client, viaResin bool) {
-	return resinMaintenanceTargetForPlatform(account, targetURL, "")
-}
-
-// resinMaintenanceTargetForPlatform 让带会话的清单、搜索请求复用推理请求的
-// Resin 平台；后台维护没有会话时传空值，沿用默认平台。
-func resinMaintenanceTargetForPlatform(account *auth.Account, targetURL, platformName string) (finalURL string, client *http.Client, viaResin bool) {
-	return resinMaintenanceTargetForContext(context.Background(), account, targetURL, platformName)
-}
-
-func resinMaintenanceTargetForContext(ctx context.Context, account *auth.Account, targetURL, platformName string) (finalURL string, client *http.Client, viaResin bool) {
-	if strings.TrimSpace(platformName) != "" {
-		ctx = WithResinPlatform(ctx, platformName)
-	}
-	egress := ResolveCodexEgressForContext(ctx, account, targetURL, "")
-	if !egress.ViaResin() {
-		return targetURL, nil, false
-	}
-	return egress.URL, egress.Client(), true
-}
-
 // ==================== 反向代理 URL 构建 ====================
 
 // BuildReverseProxyURL 将目标 URL 转换为 Resin 反向代理 URL
@@ -221,7 +191,7 @@ func BuildReverseProxyURL(targetURL string) string {
 // request paths.  An empty platform selects the first configured platform,
 // preserving the old single-platform helper semantics.
 func BuildReverseProxyURLForPlatform(targetURL, platformName string) string {
-	return buildReverseProxyURL(GetResinConfig(), targetURL, platformName)
+	return buildReverseProxyURL(GetResinConfig().forChannel(""), targetURL, platformName)
 }
 
 func buildReverseProxyURL(cfg *ResinConfig, targetURL, platformName string) string {
@@ -261,7 +231,7 @@ func BuildWebSocketURL(targetURL string) string {
 
 // BuildWebSocketURLForPlatform is the platform-pinned WebSocket URL builder.
 func BuildWebSocketURLForPlatform(targetURL, platformName string) string {
-	return buildWebSocketURL(GetResinConfig(), targetURL, platformName)
+	return buildWebSocketURL(GetResinConfig().forChannel(""), targetURL, platformName)
 }
 
 func buildWebSocketURL(cfg *ResinConfig, targetURL, platformName string) string {
@@ -311,31 +281,41 @@ func ResinAccountID(account *auth.Account) string {
 
 // InheritLease 将临时身份的 IP 租约继承给正式账号身份
 // 用于 OAuth 场景：授权阶段使用临时标识，账号创建后切换为 DBID
-func InheritLease(tempAccount, newAccount string) {
-	cfg := GetResinConfig()
+func InheritLease(ctx context.Context, tempAccount, newAccount string) {
+	cfg := ResinConfigFromContext(ctx).forChannel("")
 	if cfg == nil {
 		return
+	}
+	platform := ResinPlatformFromContext(ctx)
+	if platform == "" {
+		platform = defaultResinPlatform(cfg)
 	}
 
 	inheritURL := fmt.Sprintf("%s/api/v1/%s/actions/inherit-lease",
 		strings.TrimRight(cfg.BaseURL, "/"),
-		defaultResinPlatform(cfg),
+		platform,
 	)
 
 	body := fmt.Sprintf(`{"parent_account":%q,"new_account":%q}`, tempAccount, newAccount)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, inheritURL, bytes.NewBufferString(body))
 	if err != nil {
-		log.Printf("[Resin] 构建 inherit-lease 请求失败: %v", err)
+		log.Printf("[Resin] 构建 inherit-lease 请求失败")
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	client := auth.NewResinHTTPClient(10 * time.Second)
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
 	if err != nil {
+		// url.Error 含控制接口路径中的 Token，只记录底层错误。
+		if urlErr, ok := err.(*url.Error); ok {
+			err = urlErr.Err
+		}
 		log.Printf("[Resin] inherit-lease 请求失败: %v", err)
 		return
 	}

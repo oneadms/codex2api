@@ -20,9 +20,11 @@ func codexRefreshFixture(t *testing.T, handler http.HandlerFunc) (*Store, *datab
 	t.Helper()
 	provider := httptest.NewServer(handler)
 	t.Cleanup(provider.Close)
-	oldDecorator := ResinRequestDecorator
-	ResinRequestDecorator = func(string, string) string { return provider.URL }
-	t.Cleanup(func() { ResinRequestDecorator = oldDecorator })
+	oldDecorator := ResinRequestResolver
+	ResinRequestResolver = func(_ context.Context, _, accountID string) (ResinRoute, error) {
+		return ResinRoute{Mode: ResinModeReverse, URL: provider.URL, AccountID: accountID}, nil
+	}
+	t.Cleanup(func() { ResinRequestResolver = oldDecorator })
 	path := filepath.Join(t.TempDir(), "codex-refresh.db")
 	db, err := database.New("sqlite", path)
 	if err != nil {

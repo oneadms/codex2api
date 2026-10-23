@@ -351,21 +351,6 @@ func QueryWhamUsage(ctx context.Context, account *auth.Account, proxyURL string)
 	return queryWhamUsageWithURL(ctx, account, proxyURL, url)
 }
 
-// whamHTTPClient 是 wham 三个端点共用的 Resin/直连选择：viaResin 时设置
-// X-Resin-Account 并复用按账号隔离的 Resin 连接池；否则回退网关同款
-// transport（支持 uTLS Chrome 指纹），让 wham 请求与 /responses 走一致的
-// TLS 指纹，降低被 Cloudflare 拦截的概率。
-//
-// 直连分支必须用池化 Client：wham 探针是后台周期任务，每次新建一次性
-// uTLS transport 会持续泄漏 HTTP/2 连接与 goroutine（issue #446）。
-func whamHTTPClient(req *http.Request, account *auth.Account, resinClient *http.Client, viaResin bool, proxyURL string) *http.Client {
-	if viaResin {
-		req.Header.Set("X-Resin-Account", ResinAccountID(account))
-		return resinClient
-	}
-	return getCodexMaintenanceClient(account, proxyURL)
-}
-
 func queryWhamUsageWithURL(ctx context.Context, account *auth.Account, proxyURL, url string) (*WhamUsage, *http.Response, error) {
 	if account == nil {
 		return nil, nil, fmt.Errorf("account is nil")
@@ -375,8 +360,8 @@ func queryWhamUsageWithURL(ctx context.Context, account *auth.Account, proxyURL,
 		return nil, nil, fmt.Errorf("account has no access token")
 	}
 
-	finalURL, resinClient, viaResin := resinMaintenanceTargetForContext(ctx, account, url, ResinPlatformFromContext(ctx))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, finalURL, nil)
+	egress := resolveCodexMaintenanceEgress(ctx, account, url, proxyURL, maintenancePurposeCodex, false)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, egress.URL, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build wham request: %w", err)
 	}
@@ -388,7 +373,8 @@ func queryWhamUsageWithURL(ctx context.Context, account *auth.Account, proxyURL,
 	if accountID := account.EffectiveAccountID(); accountID != "" {
 		req.Header.Set("chatgpt-account-id", accountID)
 	}
-	client := whamHTTPClient(req, account, resinClient, viaResin, proxyURL)
+	egress.ApplyHeaders(req.Header)
+	client := egress.Client()
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -488,8 +474,8 @@ func queryWhamResetCreditsWithURL(ctx context.Context, account *auth.Account, pr
 		return nil, nil, fmt.Errorf("account has no access token")
 	}
 
-	finalURL, resinClient, viaResin := resinMaintenanceTarget(account, url)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, finalURL, nil)
+	egress := resolveCodexMaintenanceEgress(ctx, account, url, proxyURL, maintenancePurposeCodex, false)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, egress.URL, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build reset-credits list request: %w", err)
 	}
@@ -500,7 +486,8 @@ func queryWhamResetCreditsWithURL(ctx context.Context, account *auth.Account, pr
 	if accountID := account.EffectiveAccountID(); accountID != "" {
 		req.Header.Set("chatgpt-account-id", accountID)
 	}
-	client := whamHTTPClient(req, account, resinClient, viaResin, proxyURL)
+	egress.ApplyHeaders(req.Header)
+	client := egress.Client()
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -573,8 +560,8 @@ func consumeResetCreditWithURL(ctx context.Context, account *auth.Account, proxy
 	}
 	payload, _ := json.Marshal(map[string]string{"redeem_request_id": redeemRequestID})
 
-	finalURL, resinClient, viaResin := resinMaintenanceTarget(account, url)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, finalURL, bytes.NewReader(payload))
+	egress := resolveCodexMaintenanceEgress(ctx, account, url, proxyURL, maintenancePurposeCodex, false)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, egress.URL, bytes.NewReader(payload))
 	if err != nil {
 		return nil, nil, fmt.Errorf("build reset-credit request: %w", err)
 	}
@@ -586,7 +573,8 @@ func consumeResetCreditWithURL(ctx context.Context, account *auth.Account, proxy
 	if accountID := account.EffectiveAccountID(); accountID != "" {
 		req.Header.Set("chatgpt-account-id", accountID)
 	}
-	client := whamHTTPClient(req, account, resinClient, viaResin, proxyURL)
+	egress.ApplyHeaders(req.Header)
+	client := egress.Client()
 
 	resp, err := client.Do(req)
 	if err != nil {

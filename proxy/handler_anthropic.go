@@ -575,7 +575,9 @@ func (h *Handler) Messages(c *gin.Context) {
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
-	resinPlatform := resinPlatformForSessionIdentity(sessionIdentity, apiKeyID)
+	resinCtx := WithResinConfig(c.Request.Context(), ResinConfigFromContext(c.Request.Context()))
+	c.Request = c.Request.WithContext(resinCtx)
+	resinPlatforms := resinPlatformsForSessionIdentity(resinCtx, sessionIdentity, apiKeyID)
 	// 与 ccbridge 的请求级身份一致性设计相同：在换号循环外确定一次，
 	// 但保留本项目的 API Key 隔离和无显式会话时的每请求隔离语义。
 	claudeSessionID := ""
@@ -718,7 +720,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			lastUpstreamCancel()
 		}
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
-		upstreamCtx = WithResinPlatform(upstreamCtx, resinPlatform)
+		upstreamCtx = withResinPlatforms(upstreamCtx, resinPlatforms)
 		readCtx := upstreamResponseReadContext(c.Request.Context(), upstreamCtx, continuousRetryPolicy)
 		upstreamCtx = context.WithValue(upstreamCtx, encryptedContentSessionKey{}, sessionIdentity.affinityID)
 		// 身份按 attempt 附加实际选中账号维度：account_* 门随重试换号重新匹配（issue #410）。

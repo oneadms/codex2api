@@ -37,7 +37,7 @@ func newTraeCNChatStreamServer(t *testing.T, filterOutput bool, serve http.Handl
 		serve(w, r)
 	}))
 	t.Cleanup(upstream.Close)
-	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "traecn-test"})
+	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "shared", CodexPlatformName: "codex", TraeCNPlatformName: "traecn-test"})
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, MaxRetries: 0})
 	t.Cleanup(store.Stop)
 	store.AddAccount(&auth.Account{

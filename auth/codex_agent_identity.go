@@ -210,11 +210,19 @@ func registerAgentIdentityTask(ctx context.Context, key agentIdentityRuntimeKey,
 	if len(resinAccountID) > 0 {
 		accountID = strings.TrimSpace(resinAccountID[0])
 	}
-	url, viaResin := ResinRequestURL(ctx, url, accountID)
+	route, err := ResolveResinRequest(ctx, url, accountID)
+	if err != nil {
+		return "", err
+	}
+	url = route.URL
+	viaResin := route.Enabled()
 	var client *http.Client
 	if viaResin {
 		// 注册 task 是推理的前置鉴权，必须沿用本次请求的 Resin 出口。
-		client = NewResinHTTPClient(agentIdentityTaskRegistrationTimeout)
+		client, err = route.HTTPClient(agentIdentityTaskRegistrationTimeout, false)
+		if err != nil {
+			return "", err
+		}
 	} else {
 		client, err = grokHTTPClient(proxyURL)
 		if err != nil {
@@ -229,9 +237,7 @@ func registerAgentIdentityTask(ctx context.Context, key agentIdentityRuntimeKey,
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	if viaResin {
-		req.Header.Set("X-Resin-Account", accountID)
-	}
+	route.ApplyHeaders(req.Header)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", errors.New("agent task 注册请求失败")

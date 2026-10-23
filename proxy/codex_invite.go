@@ -311,25 +311,33 @@ func isCloudflareChallenge(status int, body []byte) bool {
 	return false
 }
 
-// inviteHTTPClient 返回邀请请求用的 Client。
+// inviteHTTPClient 返回邀请请求用的 Client，并保留账号 Cookie。
 //
 // 这些端点是网页端 /backend-api 路径，挂在 Cloudflare bot 管理后面：用 Go 默认 TLS 指纹
 // 直连会被随机丢进 managed challenge（同一账号连续请求在 200 与 403 挑战页之间反复跳），
 // 因此和订阅同步一样强制 uTLS Chrome 指纹。transport 取自池子（连接由池持有，不会像
 // 一次性 uTLS 实例那样泄漏 h2 连接），jar 按账号另挂，让 __cf_bm 能在多次请求间复用。
 // useTestTransport 供 httptest（明文 HTTP）用，uTLS 无法对明文端口拨号。
-func inviteHTTPClient(account *auth.Account, proxyURL string, useTestTransport bool) *http.Client {
-	jar := inviteCookieJarFor(account)
-	if useTestTransport {
-		return &http.Client{Transport: newCodexStandardTransport(proxyURL), Jar: jar}
-	}
-	pooled := getMaintenanceClient(account, proxyURL, maintenancePurposeInvite, true)
-	return &http.Client{Transport: pooled.Transport, Jar: jar}
+func inviteHTTPClient(egress CodexEgress, account *auth.Account) *http.Client {
+	client := *egress.Client()
+	client.Jar = inviteCookieJarFor(account)
+	return &client
 }
 
 // doInviteRequest 执行请求并读回状态码、request id、响应体与是否被 Cloudflare 挑战。
 func doInviteRequest(req *http.Request, account *auth.Account, proxyURL string, useTestTransport bool) (int, string, []byte, bool, error) {
-	client := inviteHTTPClient(account, proxyURL, useTestTransport)
+	egress := resolveCodexMaintenanceEgress(req.Context(), account, req.URL.String(), proxyURL, maintenancePurposeInvite, !useTestTransport)
+	if egress.Err != nil {
+		return 0, "", nil, false, egress.Err
+	}
+	req = req.Clone(req.Context())
+	var err error
+	req.URL, err = url.Parse(egress.URL)
+	if err != nil {
+		return 0, "", nil, false, err
+	}
+	egress.ApplyHeaders(req.Header)
+	client := inviteHTTPClient(egress, account)
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, "", nil, false, fmt.Errorf("invite request: %w", err)

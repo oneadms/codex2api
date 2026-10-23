@@ -240,7 +240,8 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 
 	// Resin 临时身份用于 OAuth 兑换（新账号尚无 DBID）
 	resinTempID := "oauth-" + req.SessionID
-	tokenResp, accountInfo, err := doOAuthCodeExchange(c.Request.Context(), req.Code, sess.CodeVerifier, sess.RedirectURI, proxyURL, resinTempID)
+	resinCtx := proxy.WithResinConfig(c.Request.Context(), proxy.ResinConfigFromContext(c.Request.Context()))
+	tokenResp, accountInfo, err := doOAuthCodeExchange(resinCtx, req.Code, sess.CodeVerifier, sess.RedirectURI, proxyURL, resinTempID)
 	if err != nil {
 		writeError(c, http.StatusBadGateway, "授权码兑换失败: "+err.Error())
 		return
@@ -277,9 +278,7 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 	if !updated {
 		h.startDBBackgroundTask(func(context.Context) {
 			// 先继承授权阶段的出口租约，再查询时区，避免绑定到临时分配的 IP。
-			if proxy.IsResinEnabled() {
-				proxy.InheritLease(resinTempID, fmt.Sprintf("%d", id))
-			}
+			proxy.InheritLease(resinCtx, resinTempID, fmt.Sprintf("%d", id))
 			h.scheduleCodexTimezoneBindings([]int64{id})
 		})
 	}
@@ -675,15 +674,18 @@ func doOAuthCodeExchange(ctx context.Context, code, codeVerifier, redirectURI, p
 	form.Set("redirect_uri", redirectURI)
 	form.Set("code_verifier", codeVerifier)
 
-	// Resin 反代模式：改写 URL
+	// 固定兑换请求的 Resin 出口，正向模式保留授权服务 URL。
 	targetURL := oauthTokenURL
 	tempID := ""
 	if len(resinTempID) > 0 {
 		tempID = resinTempID[0]
 	}
-	if proxy.IsResinEnabled() && tempID != "" {
-		targetURL = proxy.BuildReverseProxyURL(oauthTokenURL)
+	ctx = proxy.WithResinConfig(ctx, proxy.ResinConfigFromContext(ctx))
+	route, err := auth.ResolveResinRequest(ctx, targetURL, tempID)
+	if err != nil {
+		return nil, nil, err
 	}
+	targetURL = route.URL
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -693,16 +695,17 @@ func doOAuthCodeExchange(ctx context.Context, code, codeVerifier, redirectURI, p
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "codex-cli/0.91.0")
 
-	// Resin 反代：注入临时账号身份头
-	if proxy.IsResinEnabled() && tempID != "" {
-		req.Header.Set("X-Resin-Account", tempID)
-	}
+	// 临时身份按路由模式进入反代头或代理认证。
+	route.ApplyHeaders(req.Header)
 
 	var client *http.Client
-	if proxy.IsResinEnabled() && tempID != "" {
-		client = &http.Client{Timeout: 30 * time.Second}
+	if route.Enabled() {
+		client, err = route.HTTPClient(30*time.Second, false)
 	} else {
 		client = auth.BuildHTTPClient(proxyURL)
+	}
+	if err != nil {
+		return nil, nil, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -758,7 +761,8 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 		proxyURL = h.store.GetProxyURL()
 	}
 	resinTempID := "oauth-" + sessionID
-	tokenResp, accountInfo, err := doOAuthCodeExchange(c.Request.Context(), code, sess.CodeVerifier, sess.RedirectURI, proxyURL, resinTempID)
+	resinCtx := proxy.WithResinConfig(c.Request.Context(), proxy.ResinConfigFromContext(c.Request.Context()))
+	tokenResp, accountInfo, err := doOAuthCodeExchange(resinCtx, code, sess.CodeVerifier, sess.RedirectURI, proxyURL, resinTempID)
 	if err != nil {
 		sess.ExchangeResult = &oauthExchangeResult{
 			Success: false,
@@ -807,9 +811,7 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 
 	if !updated {
 		h.startDBBackgroundTask(func(context.Context) {
-			if proxy.IsResinEnabled() {
-				proxy.InheritLease(resinTempID, fmt.Sprintf("%d", id))
-			}
+			proxy.InheritLease(resinCtx, resinTempID, fmt.Sprintf("%d", id))
 			h.scheduleCodexTimezoneBindings([]int64{id})
 		})
 	}

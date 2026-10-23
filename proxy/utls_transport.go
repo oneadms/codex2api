@@ -1,10 +1,8 @@
 package proxy
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -88,6 +86,7 @@ func (c *utlsConn) reclaimable(now time.Time, grace time.Duration) bool {
 // utlsRoundTripper 实现 http.RoundTripper 接口
 // 使用 utls 模拟 Chrome 浏览器的 TLS 指纹以绕过 TLS 指纹检测
 type utlsRoundTripper struct {
+	proxyErr    error
 	mu          sync.Mutex
 	connections map[string]*utlsConn  // HTTP/2 连接池，按 host 索引
 	pending     map[string]*sync.Cond // 防止重复连接创建
@@ -157,12 +156,12 @@ var utlsSessionCache = utls.NewLRUClientSessionCache(256)
 // 支持 HTTP(S) 和 SOCKS5 代理
 func NewUTLSTransport(proxyURL string) http.RoundTripper {
 	var dialer xproxy.Dialer = xproxy.Direct
+	var proxyErr error
 
 	if proxyURL != "" {
 		d, err := buildProxyDialer(proxyURL)
 		if err != nil {
-			log.Printf("[UTLS] 代理配置失败，回退直连: proxy=%s err=%v", proxyURL, err)
-			dialer = xproxy.Direct
+			proxyErr = fmt.Errorf("代理配置无效，已拒绝直连")
 		} else {
 			dialer = d
 		}
@@ -170,6 +169,7 @@ func NewUTLSTransport(proxyURL string) http.RoundTripper {
 
 	return &utlsRoundTripper{
 		connections: make(map[string]*utlsConn),
+		proxyErr:    proxyErr,
 		pending:     make(map[string]*sync.Cond),
 		http1Hosts:  make(map[string]struct{}),
 		dialer:      dialer,
@@ -194,93 +194,12 @@ func buildProxyDialer(proxyURL string) (xproxy.Dialer, error) {
 
 	switch strings.ToLower(u.Scheme) {
 	case "http", "https":
-		return buildHTTPProxyDialer(u)
+		return security.NewHTTPConnectDialer(u), nil
 	case "socks5", "socks5h":
 		return buildSOCKS5Dialer(u)
 	default:
 		return nil, fmt.Errorf("不支持的代理协议: %s", u.Scheme)
 	}
-}
-
-// httpConnectDialer 通过 HTTP CONNECT 方法建立隧道的拨号器
-type httpConnectDialer struct {
-	proxyAddr  string // 代理服务器地址（host:port）
-	authHeader string // Proxy-Authorization 头（可选）
-}
-
-// Dial 通过 HTTP CONNECT 隧道连接到目标地址
-func (d *httpConnectDialer) Dial(network, addr string) (net.Conn, error) {
-	// 1. 建立到代理服务器的 TCP 连接
-	conn, err := net.DialTimeout("tcp", d.proxyAddr, 10*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("连接代理服务器失败: %w", err)
-	}
-
-	// 2. 发送 CONNECT 请求建立隧道
-	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n", addr, addr)
-	if d.authHeader != "" {
-		connectReq += fmt.Sprintf("Proxy-Authorization: %s\r\n", d.authHeader)
-	}
-	connectReq += "\r\n"
-
-	if _, err := conn.Write([]byte(connectReq)); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("发送 CONNECT 请求失败: %w", err)
-	}
-
-	// 3. 读取代理响应
-	br := bufio.NewReader(conn)
-	resp, err := http.ReadResponse(br, nil)
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("读取代理响应失败: %w", err)
-	}
-	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		conn.Close()
-		return nil, fmt.Errorf("代理 CONNECT 失败 (status %d)", resp.StatusCode)
-	}
-
-	// bufio.Reader 可能缓冲了响应之后的字节，需要包装确保后续读取不丢失
-	if br.Buffered() > 0 {
-		return &bufferedConn{Conn: conn, reader: br}, nil
-	}
-	return conn, nil
-}
-
-// bufferedConn 包装 net.Conn，优先读取 bufio.Reader 中的缓冲数据
-type bufferedConn struct {
-	net.Conn
-	reader *bufio.Reader
-}
-
-func (c *bufferedConn) Read(b []byte) (int, error) {
-	return c.reader.Read(b)
-}
-
-// buildHTTPProxyDialer 创建 HTTP CONNECT 代理拨号器
-func buildHTTPProxyDialer(u *url.URL) (xproxy.Dialer, error) {
-	addr := u.Host
-	if !strings.Contains(addr, ":") {
-		if u.Scheme == "https" {
-			addr += ":443"
-		} else {
-			addr += ":80"
-		}
-	}
-
-	d := &httpConnectDialer{proxyAddr: addr}
-
-	// 处理代理认证
-	if u.User != nil {
-		username := u.User.Username()
-		password, _ := u.User.Password()
-		credentials := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
-		d.authHeader = "Basic " + credentials
-	}
-
-	return d, nil
 }
 
 // buildSOCKS5Dialer 创建 SOCKS5 代理拨号器
@@ -470,6 +389,9 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 
 // RoundTrip 实现 http.RoundTripper 接口
 func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.proxyErr != nil {
+		return nil, t.proxyErr
+	}
 	host := req.URL.Host
 	addr := host
 	if !strings.Contains(addr, ":") {

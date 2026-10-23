@@ -193,7 +193,7 @@ CLI/应用版本留空使用自动配对；手填字段独立覆盖。`auto` 模
 
 #### Codex 客户端遥测
 
-**实验性功能，默认关闭。** 开启后，Codex OAuth 的普通 Responses 请求会按所选 Codex Desktop/CLI 指纹异步发送客户端遥测。分析事件发送到 `chatgpt.com/backend-api/codex/analytics-events/events`，OTLP metrics 发送到 `ab.chatgpt.com/otlp/v1/metrics`；失败不会影响代理响应，沿用账号的代理地址，Resin 启用时与 `/responses` 一样经反代发出。注意：工具调用、文件修改、hook 等事件是随机模拟生成的，并非对真实请求的观测，与上游侧可见的请求流可能不一致；是否开启由部署者自行评估。
+**实验性功能，默认关闭。** 开启后，Codex OAuth 的普通 Responses 请求会按所选 Codex Desktop/CLI 指纹异步发送客户端遥测。分析事件发送到 `chatgpt.com/backend-api/codex/analytics-events/events`，OTLP metrics 发送到 `ab.chatgpt.com/otlp/v1/metrics`；失败不会影响代理响应，沿用账号的代理地址，Resin 启用时与 `/responses` 使用相同的正向或反向出口。注意：工具调用、文件修改、hook 等事件是随机模拟生成的，并非对真实请求的观测，与上游侧可见的请求流可能不一致；是否开启由部署者自行评估。
 
 管理后台「系统设置 → Codex → 客户端遥测」可实时开关，字段为 `codex_telemetry_enabled`（新装与升级安装均默认关闭）。`CODEX_TELEMETRY_ENABLED=false` 是部署层强制关闭开关，无视后台设置。`CODEX_STATSIG_API_KEY` 可覆盖内置的公开 SDK key；当前 Codex Desktop 与 Codex CLI 使用同一个 key。
 
@@ -217,19 +217,29 @@ API Key 启用多个 RPM/RPD/费用/Token 窗口时，Redis 会通过一次 `MGE
 
 ### Resin 多出口分流
 
-Resin 配置使用已有的两个系统设置字段，不需要新增账号字段或数据库迁移：
+Resin 配置位于「系统设置 → Resin」。Codex 与 TRAE CN 共用基础地址，各自可设置独立平台列表：
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
+| `resin_mode` | string | `"reverse"` | `reverse` 反向代理；`forward` 正向代理，保留本服务原有 TLS 握手 |
 | `resin_url` | string | `""` | Resin 基础地址（通常包含访问 Token），例如 `http://127.0.0.1:2260/my-token` |
-| `resin_platform_name` | string | `""` | 一个或多个全局平台名；多个平台用逗号分隔，例如 `p1,p2,p3` |
+| `resin_platform_name` | string | `""` | 公共平台列表；链路未填写独立平台时使用，多个平台用逗号分隔 |
+| `resin_codex_platform_name` | string | `""` | Codex 独立平台列表；留空沿用公共平台 |
+| `resin_traecn_platform_name` | string | `""` | TRAE CN 独立平台列表；留空沿用公共平台 |
 
-请求先按现有账号调度和会话亲和选择账号，再用同一条本地亲和键选择 Resin 平台。平台列表会按配置顺序去重；非空会话键使用稳定的 SHA-256 哈希取模，因此同一会话在并发、重试、HTTP/WS 切换和换账号重试时仍使用同一个平台。每个账号自动适用这份全局平台列表。
+正向模式需要可以直接接收 CONNECT 的 Resin 入口。HTTPS/WSS 请求保留原始目标 URL，通过隧道连接上游；代理认证使用 `平台.账号DBID` 作为用户名、地址路径中的 Token 作为密码，OAuth 新账号兑换时使用 `oauth-会话ID` 临时身份。`Proxy-Authorization` 只发送给代理，业务请求不携带 `X-Resin-Account`。普通 HTTP 目标采用正向 HTTP 代理协议。
+
+`resin_url` 在正向模式只接受 `http(s)://host[:port]/token`（Token 可为空），不支持额外反代路径前缀、用户信息、查询参数或片段。平台及 Token 不能包含 Resin 认证分隔符或空白。HTTPS 代理会先验证代理证书，再建立 CONNECT 隧道；上游 TLS 仍由本服务完成。CONNECT 被拒绝或连接失败会返回错误，不会自动切换成反向模式或直连。
+
+正向模式保留每条链路原有的 TLS 策略。需要推理请求使用 Chrome uTLS 时，设置环境变量 `CODEX_TRANSPORT_MODE=utls_chrome`；默认 `standard` 仍使用 Go 标准 TLS。订阅查询和 ST 刷新等原本强制 uTLS 的请求继续使用 uTLS；WebSocket 及现有 HTTP/1.1 回退仍使用标准 TLS。旧配置迁移后默认反向模式，保存正向模式后新请求生效，在途请求继续使用原配置快照。
+
+请求按账号所属链路使用独立平台列表或公共列表，再用账号调度的同一条本地亲和键选择 Resin 平台。平台列表会按配置顺序去重；非空会话键使用稳定的 SHA-256 哈希取模，因此同一链路、同一会话在并发、重试、HTTP/WS 切换和换账号重试时仍使用同一个平台。TRAE CN 的令牌刷新、推理、模型查询、积分查询和签到均使用 TRAE CN 平台；Codex 的推理、WebSocket、OAuth 和维护请求均使用 Codex 平台。
 
 会话键的来源顺序与账号调度一致：本地 `X-Codex2API-Affinity-Key`、`Session-Id`/`Conversation-Id`/`Idempotency-Key`、`prompt_cache_key`、内容派生键、下游 API Key 派生键。没有任何稳定身份时使用第一个平台，避免把每次请求生成的随机上游会话 ID 当作路由键。后台维护、OAuth 等没有请求会话上下文的旁路请求也使用第一个平台。
 
 - 只填写一个平台（例如 `codex2api`）时，URL 和调度行为保持原有单平台 Resin 行为。
-- 清空 `resin_url` 或平台字段会立即禁用 Resin，恢复原有直连/账号代理路径。
+- 清空某条链路的独立平台后，该链路沿用公共平台；公共平台也为空时，该链路恢复原有代理或直连路径。另一条链路不受影响。
+- 完全禁用 Resin 时同时清空 `resin_url` 及三个平台字段；只保存地址或只保存平台会返回校验错误。
 - 将平台列表改回一个名称即可关闭多出口分流；删除某个平台后，新请求按剩余列表重新计算，正在进行的请求继续使用本次已选平台。
 - 管理后台修改后立即热更新；平台名称字段中的空项会忽略，重复名称只计一次。
 
@@ -237,8 +247,11 @@ Resin 配置使用已有的两个系统设置字段，不需要新增账号字�
 
 ```json
 {
+  "resin_mode": "forward",
   "resin_url": "http://127.0.0.1:2260/my-token",
-  "resin_platform_name": "p1,p2,p3"
+  "resin_platform_name": "p1,p2,p3",
+  "resin_codex_platform_name": "codex-p1,codex-p2",
+  "resin_traecn_platform_name": "traecn-p1,traecn-p2"
 }
 ```
 ### Codex 生图设置
@@ -371,18 +384,21 @@ Codex 瞬时账号限流按 `15s → 30s → 60s → 120s → 240s → 300s` 退
 |------|------|--------|------|
 | `ProxyURL` | string | "" | 全局代理 URL |
 | `ProxyPoolEnabled` | bool | false | 启用代理池。开启后未绑定账号从启用代理中粘性分配；绑定到已禁用/测挂托管代理的账号不会直连；池空且无全局代理时拒绝调度 |
-| `ResinURL` | string | "" | Resin 粘性代理池地址（含 token，形如 `http://127.0.0.1:2260/<token>`）。日志与设置接口只回显打码后的 `scheme://host` |
-| `ResinPlatformName` | string | "" | Resin 侧平台标识。与 `ResinURL` 同时填写才启用，清空任一即禁用 |
+| `ResinMode` | string | "reverse" | `reverse` 反向代理，`forward` 正向代理 |
+| `ResinURL` | string | "" | Resin 粘性代理池地址（含 token，形如 `http://127.0.0.1:2260/<token>`）。日志及出口摘要隐藏 Token；管理设置保留完整地址供编辑 |
+| `ResinPlatformName` | string | "" | Resin 公共平台列表；各链路未填写独立列表时使用 |
+| `ResinCodexPlatformName` | string | "" | Codex 独立平台列表，留空沿用公共平台 |
+| `ResinTraeCNPlatformName` | string | "" | TRAE CN 独立平台列表，留空沿用公共平台 |
 
 #### 出口链路优先级
 
 Codex 渠道的出站有三套配置并存，生效关系是固定的、逐层覆盖而不是叠加：
 
-1. **Resin 反代**（全局）：启用后 Codex 渠道所有携带账号身份的出站（`/responses`、compact、WebSocket、wham 用量/重置券/订阅查询、客户端遥测、令牌刷新）全部改经 Resin，出口 IP 由 Resin 按账号粘性提供。此时下面第 2 层选出的代理只保留在审计标签里、不参与拨号；代理池的 fail-closed（池空、绑定的托管代理已禁用）对 Codex 账号也不再成立，账号不会因此被跳过。
+1. **Resin 代理**（全局）：按 `resin_mode` 选择正向或反向模式。启用后 Codex 渠道携带账号身份的出站（`/responses`、compact、WebSocket、wham 用量/重置券/订阅查询、客户端遥测、令牌刷新）改经 Resin，出口 IP 由 Resin 按账号粘性提供。此时下面第 2 层选出的代理只保留在审计标签里、不参与拨号；代理池的 fail-closed（池空、绑定的托管代理已禁用）对 Codex 账号也不再成立，账号不会因此被跳过。门票及网关显式绑定的出口仍优先使用其固定代理。
 2. **代理链**：账号 `proxy_url` > 分组代理 > 代理池（按账号 ID 粘性）> 全局 `ProxyURL`。
 3. **直连**：代理池关闭且以上都为空时直连上游。
 
-Claude / Grok / Antigravity 等中继型账号不经 Resin，始终按第 2、3 层解析。管理后台在「系统设置 → Resin」卡片、代理池页顶部与 Codex 账号列表的代理徽章上标出当前由谁承担出站；设置接口的只读字段 `codex_egress` 给出同一结论（`mode` 为 `resin` 或 `proxy_chain`）。
+Claude / Grok / Antigravity 等中继型账号不经 Resin，始终按第 2、3 层解析。管理后台在「系统设置 → Resin」卡片、代理池页顶部与 Codex 账号列表的代理徽章上标出当前由谁承担出站；设置接口的只读字段 `codex_egress` 给出同一结论（`mode` 为 `resin` 或 `proxy_chain`，启用 Resin 时 `resin_mode` 为 `reverse` 或 `forward`）。
 
 ### 账号级设置（单账号）
 

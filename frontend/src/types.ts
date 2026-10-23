@@ -2336,6 +2336,7 @@ export interface AntigravityOAuthClientSetting {
 export interface CodexEgressSummary {
   mode: 'resin' | 'proxy_chain' | string
   resin_enabled: boolean
+  resin_mode?: 'reverse' | 'forward'
   /** 打码后的 Resin 地址(不含 token),仅用于展示。 */
   resin_endpoint?: string
   resin_platform_name?: string
@@ -2482,10 +2483,14 @@ export interface SystemSettings {
   codex_model_mapping: string
   payload_rules: string
   reasoning_effort_models: string
+  resin_mode: 'reverse' | 'forward'
   resin_url: string
   resin_platform_name: string
+  resin_codex_platform_name: string
+  resin_traecn_platform_name: string
   /** 后端权威的 Codex 出口摘要(只读):Resin 启用时代理池/分组/账号/全局代理对 Codex 渠道均不参与出站。 */
   codex_egress?: CodexEgressSummary
+  traecn_egress?: CodexEgressSummary
   prompt_filter_enabled: boolean
   prompt_filter_mode: 'monitor' | 'warn' | 'block' | string
   prompt_filter_threshold: number

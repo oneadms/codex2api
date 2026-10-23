@@ -528,6 +528,7 @@ func fetchTraeCNModels(ctx context.Context, store *auth.Store, account *auth.Acc
 	if account == nil || !account.IsTraeCNAPI() {
 		return nil, fmt.Errorf("traecn account is unavailable")
 	}
+	ctx = withTraeCNResinContext(ctx)
 	if proxyOverride = strings.TrimSpace(proxyOverride); proxyOverride == "" {
 		account.Mu().RLock()
 		proxyOverride = strings.TrimSpace(account.ProxyURL)
@@ -547,23 +548,11 @@ func fetchTraeCNModels(ctx context.Context, store *auth.Store, account *auth.Acc
 		return nil, fmt.Errorf("traecn credentials are incomplete")
 	}
 
-	viaResin := IsResinEnabledForContext(ctx) && account.ID() > 0
-	resinPlatform := ResinPlatformFromContext(ctx)
-	if viaResin && resinPlatform == "" {
-		resinPlatform = ResinPlatformForSessionFromContext(ctx, "")
-	}
-	client := getPooledClient(account, proxyOverride)
-	buildEndpoint := func(path string) string {
-		endpoint := strings.TrimRight(host, "/") + path
-		if viaResin {
-			return BuildReverseProxyURLForContext(ctx, endpoint, resinPlatform)
-		}
-		return endpoint
-	}
 	doRequest := func(method, path string, body []byte, providerAuth bool) ([]byte, int, error) {
 		requestCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
-		endpoint := buildEndpoint(path)
+		egress := ResolveCodexEgressForContext(ctx, account, strings.TrimRight(host, "/")+path, proxyOverride)
+		endpoint := egress.URL
 		req, requestErr := http.NewRequestWithContext(requestCtx, method, endpoint, bytes.NewReader(body))
 		if requestErr != nil {
 			return nil, 0, requestErr
@@ -588,16 +577,9 @@ func fetchTraeCNModels(ctx context.Context, store *auth.Store, account *auth.Acc
 		if method == http.MethodPost {
 			headers.Set("Content-Type", "application/json")
 		}
-		if viaResin {
-			headers.Set("X-Resin-Account", ResinAccountID(account))
-		}
+		egress.ApplyHeaders(headers)
 		req.Header = headers
-		resp, requestErr := func() (*http.Response, error) {
-			if viaResin {
-				return getResinHTTPClient(account).Do(req)
-			}
-			return client.Do(req)
-		}()
+		resp, requestErr := egress.Client().Do(req)
 		if requestErr != nil {
 			return nil, 0, requestErr
 		}
@@ -2319,6 +2301,13 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 	if account == nil || !account.IsTraeCNAPI() {
 		return nil, ErrNoAvailableAccount()
 	}
+	ctx = withTraeCNResinContext(ctx)
+	// 令牌刷新、推理和续跑必须共用本次会话选定的平台。
+	sessionBody := inboundBody
+	if len(sessionBody) == 0 {
+		sessionBody = responsesBody
+	}
+	ctx = WithResinPlatform(ctx, resinPlatformForExecutor(ctx, "", downstreamHeaders, sessionBody))
 	requestID := uuid.NewString()
 	account.Mu().RLock()
 	diagnosticAccessToken, diagnosticRefreshToken := account.AccessToken, account.RefreshToken
@@ -2378,30 +2367,10 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 	}
 	host, accessToken := account.TraeCNCredentials()
 	endpoint := host + auth.TraeCNChatPath
-	// Persisted accounts have a stable DBID and therefore a stable Resin lease.
-	// Store-independent fixtures with DBID=0 stay on their explicit proxy/direct
-	// route instead of collapsing unrelated identities into one shared "0" lease.
-	viaResin := IsResinEnabledForContext(ctx) && account.ID() > 0
-	resinPlatform := ResinPlatformFromContext(ctx)
-	if viaResin && resinPlatform == "" {
-		sessionBody := inboundBody
-		if len(sessionBody) == 0 {
-			sessionBody = responsesBody
-		}
-		identity := resolveRequestSessionIdentity(downstreamHeaders, sessionBody)
-		if identity.hasStableAffinity {
-			resinPlatform = ResinPlatformForSessionFromContext(ctx, identity.affinityID)
-		} else {
-			resinPlatform = ResinPlatformForSessionFromContext(ctx, "")
-		}
-	}
-	var client *http.Client
-	if viaResin {
-		endpoint = BuildReverseProxyURLForContext(ctx, endpoint, resinPlatform)
-		client = getResinHTTPClient(account)
-	} else {
-		client = getPooledClient(account, proxyURL)
-	}
+	egress := ResolveCodexEgressForContext(ctx, account, endpoint, proxyURL)
+	endpoint = egress.URL
+	viaResin := egress.ViaResin()
+	client := egress.Client()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, ErrInternalError("创建 Trae CN 请求失败", err)
@@ -2436,9 +2405,7 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 	diagnostic.secrets = append(diagnostic.secrets, accessToken)
 	// Resin owns the sticky egress identity. Set this after account custom
 	// headers so an imported header cannot move the request to another lease.
-	if viaResin {
-		req.Header.Set("X-Resin-Account", ResinAccountID(account))
-	}
+	egress.ApplyHeaders(req.Header)
 	// 到这里连接参数、凭据和客户端都已就绪：这段是执行器侧的取连成本。
 	AddWsAcquireDuration(ctx, time.Since(acquireStart))
 	// 连接本身的获取（连接池命中约等于 0；冷连接含拨号/TLS/代理 CONNECT）由
@@ -2457,8 +2424,8 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 		AddWsAcquireDuration(ctx, connectedAt.Sub(dispatchStart))
 	}
 	if err != nil {
-		if !viaResin && shouldRecyclePooledClient(err) {
-			recyclePooledClient(account, proxyURL)
+		if egress.ResinMode != auth.ResinModeReverse && shouldRecyclePooledClient(err) {
+			recyclePooledClient(account, egress.DialProxyURL)
 		}
 		return nil, ErrUpstream(0, "请求 Trae CN 上游失败", err)
 	}
@@ -2503,9 +2470,7 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 				nextReq.Header.Set(key, value)
 			}
 		}
-		if viaResin {
-			nextReq.Header.Set("X-Resin-Account", ResinAccountID(account))
-		}
+		egress.ApplyHeaders(nextReq.Header)
 		nextResp, nextErr := client.Do(nextReq)
 		if nextErr != nil {
 			return nil, nextErr

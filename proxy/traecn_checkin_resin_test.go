@@ -109,7 +109,7 @@ func TestRunTraeCNCheckinRefreshKeepsResinSnapshot(t *testing.T) {
 		}
 	}))
 	defer resin.Close()
-	SetResinConfig(&ResinConfig{BaseURL: resin.URL + "/lease", PlatformName: "p1,p2"})
+	SetResinConfig(&ResinConfig{BaseURL: resin.URL + "/lease", PlatformName: "shared", CodexPlatformName: "codex", TraeCNPlatformName: "p1,p2"})
 	account := &auth.Account{DBID: 91307, UpstreamType: auth.UpstreamTraeCN, AccessToken: "old-at", RefreshToken: "old-rt", ExpiresAt: time.Now().Add(-time.Hour)}
 	store := &auth.Store{}
 	store.SetProxyPoolEnabled(true)

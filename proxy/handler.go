@@ -4124,7 +4124,9 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
-	resinPlatform := resinPlatformForSessionIdentity(sessionIdentity, apiKeyID)
+	resinCtx := WithResinConfig(c.Request.Context(), ResinConfigFromContext(c.Request.Context()))
+	c.Request = c.Request.WithContext(resinCtx)
+	resinPlatforms := resinPlatformsForSessionIdentity(resinCtx, sessionIdentity, apiKeyID)
 	turnContinuation := codexTurnContinuationToken(c.Request.Header, rawBody) != ""
 	_, turnHasBinding := h.store.SessionAffinityAccountID(affinityKey)
 	turnContinuationPinned := turnContinuation && turnHasBinding
@@ -4413,7 +4415,7 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 			// adapters too (notably Trae CN).  Their executors can otherwise derive a
 			// second platform from the translated body and lose the API-key-scoped
 			// hash used by this handler.
-			upstreamCtx = WithResinPlatform(upstreamCtx, resinPlatform)
+			upstreamCtx = withResinPlatforms(upstreamCtx, resinPlatforms)
 			// TRAECN 前置元数据下发：在建立上游 context 时固定本次请求的策略。
 			// 这条 relay 分支正是 Trae CN 账号实际走的路径（IsRelayStyle 对 Trae CN
 			// 恒为真），快照必须在这里写入，否则执行器读不到请求级决策。
@@ -5266,7 +5268,7 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 			lastUpstreamCancel()
 		}
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
-		upstreamCtx = WithResinPlatform(upstreamCtx, resinPlatform)
+		upstreamCtx = withResinPlatforms(upstreamCtx, resinPlatforms)
 		// TRAECN 前置元数据下发：建立上游 context 时固定本次请求的策略，与 Codex 的
 		// preflight 快照同口径，热更新不改变在途请求。已有快照（断线续传 worker 在
 		// 受理任务时冻结的那份）保持不动。
@@ -5782,7 +5784,7 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 							lastUpstreamCancel()
 						}
 						rctx, rcancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
-						rctx = WithResinPlatform(rctx, resinPlatform)
+						rctx = withResinPlatforms(rctx, resinPlatforms)
 						// A hidden round gets exactly one request on this account. Failures
 						// stay inside the fold and become a synthetic response.incomplete;
 						// encrypted reasoning must never participate in account rotation.
@@ -6255,7 +6257,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
-	resinPlatform := resinPlatformForSessionIdentity(sessionIdentity, apiKeyID)
+	resinCtx := WithResinConfig(c.Request.Context(), ResinConfigFromContext(c.Request.Context()))
+	c.Request = c.Request.WithContext(resinCtx)
+	resinPlatforms := resinPlatformsForSessionIdentity(resinCtx, sessionIdentity, apiKeyID)
 	reasoningEffort := extractReasoningEffort(rawBody)
 	serviceTier := extractServiceTier(rawBody)
 	if serviceTier != "" {
@@ -6667,7 +6671,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		upstreamEndpointLabel := "/v1/responses/compact"
 		var resp *http.Response
 		var reqErr error
-		requestCtx := WithResinPlatform(c.Request.Context(), resinPlatform)
+		requestCtx := withResinPlatforms(c.Request.Context(), resinPlatforms)
 		guardCodexTurnStateEcho(affinityKey, account, downstreamHeaders)
 		if compactViaResponses {
 			upstreamEndpointLabel = "/v1/responses"
@@ -7170,7 +7174,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
-	resinPlatform := resinPlatformForSessionIdentity(sessionIdentity, apiKeyID)
+	resinCtx := WithResinConfig(c.Request.Context(), ResinConfigFromContext(c.Request.Context()))
+	c.Request = c.Request.WithContext(resinCtx)
+	resinPlatforms := resinPlatformsForSessionIdentity(resinCtx, sessionIdentity, apiKeyID)
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -7322,7 +7328,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			lastUpstreamCancel()
 		}
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
-		upstreamCtx = WithResinPlatform(upstreamCtx, resinPlatform)
+		upstreamCtx = withResinPlatforms(upstreamCtx, resinPlatforms)
 		// TRAECN 前置元数据下发：在建立上游 context 时固定本次请求的策略，
 		// 与 Codex 的 preflight 快照同口径，热更新不改变在途请求。
 		upstreamCtx = withTraeCNPreflightPassthroughSnapshot(upstreamCtx, traeCNPreflightPassthrough(c))

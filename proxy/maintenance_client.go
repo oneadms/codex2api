@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -95,4 +96,13 @@ func getMaintenanceClient(account *auth.Account, proxyURL, purpose string, force
 // 走网关同款 transport（含 uTLS Chrome 指纹），与 /responses 的指纹保持一致。
 func getCodexMaintenanceClient(account *auth.Account, proxyURL string) *http.Client {
 	return getMaintenanceClient(account, proxyURL, maintenancePurposeCodex, false)
+}
+
+// resolveCodexMaintenanceEgress 保留维护请求的用途隔离及强制 uTLS 策略。
+func resolveCodexMaintenanceEgress(ctx context.Context, account *auth.Account, targetURL, proxyURL, purpose string, forceUTLS bool) CodexEgress {
+	egress := ResolveCodexEgressForContext(ctx, account, targetURL, proxyURL)
+	if egress.Err == nil && egress.ResinMode != auth.ResinModeReverse {
+		egress.client = getMaintenanceClient(account, egress.DialProxyURL, purpose, forceUTLS)
+	}
+	return egress
 }

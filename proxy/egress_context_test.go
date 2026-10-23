@@ -47,12 +47,12 @@ func TestResolveCodexEgressForContextKeepsResinSnapshot(t *testing.T) {
 			if want := "ws://resin/token/p2/https/chatgpt.com/backend-api/codex/responses"; wsEgress.URL != want {
 				t.Fatalf("WS URL = %q, want %q", wsEgress.URL, want)
 			}
-			if got := CodexDialProxyURLForContext(ctx, account, proxyURL); got != "" {
+			if got, err := CodexDialProxyURLForContext(ctx, account, proxyURL); err != nil || got != "" {
 				t.Fatalf("WS dial proxy = %q, want empty for pinned Resin route", got)
 			}
-			url, client, viaResin := resinMaintenanceTargetForContext(ctx, account, target, "")
-			if url != httpEgress.URL || !viaResin || client != httpEgress.Client() {
-				t.Fatalf("maintenance route = %q, viaResin=%v; want same snapshot as inference", url, viaResin)
+			maintenance := resolveCodexMaintenanceEgress(ctx, account, target, proxyURL, maintenancePurposeCodex, false)
+			if maintenance.URL != httpEgress.URL || !maintenance.ViaResin() || maintenance.Client().Transport != httpEgress.Client().Transport {
+				t.Fatalf("maintenance route = %+v; want same snapshot as inference", maintenance)
 			}
 		})
 	}
@@ -83,11 +83,12 @@ func TestResolveCodexEgressForContextKeepsDisabledSnapshot(t *testing.T) {
 			t.Fatal("disabled snapshot must not add a Resin account header")
 		}
 	}
-	if got := CodexDialProxyURLForContext(ctx, account, " "+proxyURL+" "); got != proxyURL {
+	if got, err := CodexDialProxyURLForContext(ctx, account, " "+proxyURL+" "); err != nil || got != proxyURL {
 		t.Fatalf("WS dial proxy = %q, want %q", got, proxyURL)
 	}
-	if url, client, viaResin := resinMaintenanceTargetForContext(ctx, account, target, "p2"); url != target || client != nil || viaResin {
-		t.Fatalf("disabled maintenance route = %q, client=%v, viaResin=%v", url, client, viaResin)
+	maintenance := resolveCodexMaintenanceEgress(ctx, account, target, proxyURL, maintenancePurposeCodex, false)
+	if maintenance.URL != target || maintenance.DialProxyURL != proxyURL || maintenance.ViaResin() {
+		t.Fatalf("disabled maintenance route = %+v", maintenance)
 	}
 }
 

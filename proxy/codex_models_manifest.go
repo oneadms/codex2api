@@ -574,11 +574,11 @@ func fetchCodexModelsManifestWithURL(ctx context.Context, account *auth.Account,
 		userAgent = replaceCodexUserAgentVersion(defaultCodexCLIUserAgent, clientVersion)
 	}
 	requestURL := endpoint + "?client_version=" + url.QueryEscape(clientVersion)
-	finalURL, client, viaResin := resinMaintenanceTargetForContext(ctx, account, requestURL, ResinPlatformFromContext(ctx))
+	egress := resolveCodexMaintenanceEgress(ctx, account, requestURL, proxyURL, maintenancePurposeCodex, false)
 
 	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, finalURL, nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, egress.URL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build codex models request: %w", err)
 	}
@@ -595,12 +595,8 @@ func fetchCodexModelsManifestWithURL(ctx context.Context, account *auth.Account,
 		req.Header.Set("chatgpt-account-id", accountID)
 	}
 
-	if viaResin {
-		req.Header.Set("X-Resin-Account", ResinAccountID(account))
-	} else {
-		// 未启用 Resin 时沿用账号代理和池化 transport，避免泄漏 uTLS 连接。
-		client = getCodexMaintenanceClient(account, proxyURL)
-	}
+	egress.ApplyHeaders(req.Header)
+	client := egress.Client()
 
 	resp, err := client.Do(req)
 	if err != nil {

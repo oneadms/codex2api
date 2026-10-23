@@ -105,12 +105,12 @@ func TestResolveCodexWebsocketEgress(t *testing.T) {
 		t.Fatalf("resin ws url = %q", egress.URL)
 	}
 
-	if got := CodexDialProxyURL(account, "socks5://pool:1080"); got != "" {
+	if got, err := CodexDialProxyURL(account, "socks5://pool:1080"); err != nil || got != "" {
 		t.Fatalf("dial proxy under resin = %q, want empty", got)
 	}
 
 	SetResinConfig(nil)
-	if got := CodexDialProxyURL(account, " socks5://pool:1080 "); got != "socks5://pool:1080" {
+	if got, err := CodexDialProxyURL(account, " socks5://pool:1080 "); err != nil || got != "socks5://pool:1080" {
 		t.Fatalf("dial proxy without resin = %q", got)
 	}
 	egress = ResolveCodexWebsocketEgress(account, target, "socks5://pool:1080")

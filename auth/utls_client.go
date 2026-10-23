@@ -1,11 +1,8 @@
 package auth
 
 import (
-	"bufio"
 	"context"
-	"encoding/base64"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -23,6 +20,7 @@ import (
 // utlsAuthRoundTripper 使用 Chrome TLS 指纹的 http.RoundTripper，
 // 专门用于 chatgpt.com 等受 Cloudflare 保护的 auth 端点。
 type utlsAuthRoundTripper struct {
+	proxyErr    error
 	mu          sync.Mutex
 	connections map[string]*http2.ClientConn
 	pending     map[string]*sync.Cond
@@ -37,16 +35,18 @@ const (
 
 func newUTLSAuthTransport(proxyURL string) http.RoundTripper {
 	var dialer xproxy.Dialer = xproxy.Direct
+	var proxyErr error
 	if proxyURL != "" {
 		d, err := buildAuthProxyDialer(proxyURL)
 		if err != nil {
-			dialer = xproxy.Direct
+			proxyErr = fmt.Errorf("代理配置无效，已拒绝直连")
 		} else {
 			dialer = d
 		}
 	}
 	return &utlsAuthRoundTripper{
 		connections: make(map[string]*http2.ClientConn),
+		proxyErr:    proxyErr,
 		pending:     make(map[string]*sync.Cond),
 		dialer:      dialer,
 	}
@@ -132,6 +132,9 @@ func (t *utlsAuthRoundTripper) createConnection(host, addr string) (*http2.Clien
 }
 
 func (t *utlsAuthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.proxyErr != nil {
+		return nil, t.proxyErr
+	}
 	addr := req.URL.Host
 	if !strings.Contains(addr, ":") {
 		addr += ":443"
@@ -184,84 +187,12 @@ func buildAuthProxyDialer(proxyURL string) (xproxy.Dialer, error) {
 
 	switch strings.ToLower(u.Scheme) {
 	case "http", "https":
-		return buildAuthHTTPProxyDialer(u)
+		return security.NewHTTPConnectDialer(u), nil
 	case "socks5", "socks5h":
 		return buildAuthSOCKS5Dialer(u)
 	default:
 		return nil, fmt.Errorf("不支持的代理协议: %s", u.Scheme)
 	}
-}
-
-type authHTTPConnectDialer struct {
-	proxyAddr  string
-	authHeader string
-}
-
-func (d *authHTTPConnectDialer) Dial(network, addr string) (net.Conn, error) {
-	conn, err := net.DialTimeout("tcp", d.proxyAddr, 10*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("连接代理服务器失败: %w", err)
-	}
-
-	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n", addr, addr)
-	if d.authHeader != "" {
-		connectReq += fmt.Sprintf("Proxy-Authorization: %s\r\n", d.authHeader)
-	}
-	connectReq += "\r\n"
-
-	if _, err := conn.Write([]byte(connectReq)); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("发送 CONNECT 请求失败: %w", err)
-	}
-
-	br := bufio.NewReader(conn)
-	resp, err := http.ReadResponse(br, nil)
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("读取代理响应失败: %w", err)
-	}
-	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		conn.Close()
-		return nil, fmt.Errorf("代理 CONNECT 失败 (status %d)", resp.StatusCode)
-	}
-
-	if br.Buffered() > 0 {
-		return &authBufferedConn{Conn: conn, reader: br}, nil
-	}
-	return conn, nil
-}
-
-type authBufferedConn struct {
-	net.Conn
-	reader *bufio.Reader
-}
-
-func (c *authBufferedConn) Read(b []byte) (int, error) {
-	return c.reader.Read(b)
-}
-
-func buildAuthHTTPProxyDialer(u *url.URL) (xproxy.Dialer, error) {
-	addr := u.Host
-	if !strings.Contains(addr, ":") {
-		if u.Scheme == "https" {
-			addr += ":443"
-		} else {
-			addr += ":80"
-		}
-	}
-
-	d := &authHTTPConnectDialer{proxyAddr: addr}
-
-	if u.User != nil {
-		username := u.User.Username()
-		password, _ := u.User.Password()
-		credentials := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
-		d.authHeader = "Basic " + credentials
-	}
-
-	return d, nil
 }
 
 func buildAuthSOCKS5Dialer(u *url.URL) (xproxy.Dialer, error) {

@@ -63,8 +63,8 @@ func TestResolveTraeCNGroupIDsEnforcesChannelBeforeImport(t *testing.T) {
 // transient "0" lease and then switching egress for inference.
 func TestAddTraeCNAccountFirstExchangeUsesInsertedIDForResin(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	previousDecorator := auth.ResinRequestDecorator
-	t.Cleanup(func() { auth.ResinRequestDecorator = previousDecorator })
+	previousDecorator := auth.ResinRequestResolver
+	t.Cleanup(func() { auth.ResinRequestResolver = previousDecorator })
 
 	type decoratedRequest struct {
 		targetURL string
@@ -82,9 +82,9 @@ func TestAddTraeCNAccountFirstExchangeUsesInsertedIDForResin(t *testing.T) {
 		_, _ = w.Write([]byte(`{"token":"import-at","refreshToken":"import-rt-rotated","expiresIn":3600,"userId":"trae-user"}`))
 	}))
 	defer resin.Close()
-	auth.ResinRequestDecorator = func(targetURL, accountID string) string {
+	auth.ResinRequestResolver = func(_ context.Context, targetURL, accountID string) (auth.ResinRoute, error) {
 		decorated <- decoratedRequest{targetURL: targetURL, accountID: accountID}
-		return resin.URL + "/resin/exchange"
+		return auth.ResinRoute{URL: resin.URL + "/resin/exchange", Mode: auth.ResinModeReverse, AccountID: accountID}, nil
 	}
 
 	db := newTestAdminDB(t)

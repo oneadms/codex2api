@@ -27,11 +27,6 @@ const (
 	MaxRetries    = 3
 )
 
-// ResinRequestDecorator 由外部（main.go）注入，用于在 Resin 启用时改写请求 URL 和添加 Header。
-// 避免 auth → proxy 循环依赖。参数: (originalURL, accountIdentifier) → (newURL)
-// 调用方需在返回的 req 上设置 X-Resin-Account header。
-var ResinRequestDecorator func(targetURL, accountID string) string
-
 // TokenData 保存一次 RT 刷新获得的 token 信息
 type TokenData struct {
 	AccessToken  string `json:"access_token"`
@@ -60,13 +55,17 @@ func RefreshAccessToken(ctx context.Context, refreshToken string, proxyURL strin
 		"scope":         {RefreshScopes},
 	}
 
-	// Resin 反代模式：改写 URL
+	// 固定请求的 Resin 出口，正向模式保留原始 URL。
 	targetURL := TokenURL
 	accountID := ""
 	if len(resinAccountID) > 0 {
 		accountID = resinAccountID[0]
 	}
-	targetURL, viaResin := ResinRequestURL(ctx, targetURL, accountID)
+	route, err := ResolveResinRequest(ctx, targetURL, accountID)
+	if err != nil {
+		return nil, nil, err
+	}
+	targetURL = route.URL
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader(data.Encode()))
 	if err != nil {
@@ -75,17 +74,18 @@ func RefreshAccessToken(ctx context.Context, refreshToken string, proxyURL strin
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	// Resin 反代：注入账号身份头
-	if viaResin {
-		req.Header.Set("X-Resin-Account", accountID)
-	}
+	// 仅反向模式发送 Resin 账号头。
+	route.ApplyHeaders(req.Header)
 
-	// Resin 反代模式下使用标准 HTTP client（不走代理，Resin 处理路由）
+	// 按出口方式选择客户端，正向模式保留原有 TLS 策略。
 	var client *http.Client
-	if viaResin {
-		client = NewResinHTTPClient(30 * time.Second)
+	if route.Enabled() {
+		client, err = route.HTTPClient(30*time.Second, false)
 	} else {
 		client = buildHTTPClient(proxyURL)
+	}
+	if err != nil {
+		return nil, nil, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -204,7 +204,11 @@ func RefreshWithSessionToken(ctx context.Context, sessionToken string, proxyURL 
 	if len(resinAccountID) > 0 {
 		accountID = resinAccountID[0]
 	}
-	targetURL, viaResin := ResinRequestURL(ctx, targetURL, accountID)
+	route, err := ResolveResinRequest(ctx, targetURL, accountID)
+	if err != nil {
+		return nil, nil, err
+	}
+	targetURL = route.URL
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
@@ -217,15 +221,16 @@ func RefreshWithSessionToken(ctx context.Context, sessionToken string, proxyURL 
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	req.AddCookie(&http.Cookie{Name: "__Secure-next-auth.session-token", Value: sessionToken})
-	if viaResin {
-		req.Header.Set("X-Resin-Account", accountID)
-	}
+	route.ApplyHeaders(req.Header)
 
 	var client *http.Client
-	if viaResin {
-		client = NewResinHTTPClient(30 * time.Second)
+	if route.Enabled() {
+		client, err = route.HTTPClient(30*time.Second, true)
 	} else {
 		client = buildUTLSHTTPClient(proxyURL)
+	}
+	if err != nil {
+		return nil, nil, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {

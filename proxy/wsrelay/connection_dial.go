@@ -56,7 +56,11 @@ func (m *Manager) createConnection(ctx context.Context, input connectionDialRequ
 func (m *Manager) connectionDialer(ctx context.Context, input connectionDialRequest) (*websocket.Dialer, error) {
 	dialer := *m.dialer
 	proxyURL := effectiveProxyURLForContext(ctx, input.account, input.proxyOverride)
-	if dialProxy := proxy.CodexDialProxyURLForContext(ctx, input.account, proxyURL); dialProxy != "" {
+	dialProxy, err := proxy.CodexDialProxyURLForContext(ctx, input.account, proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	if dialProxy != "" {
 		if err := configureWebsocketDialerProxy(&dialer, dialProxy); err != nil {
 			return nil, err
 		}

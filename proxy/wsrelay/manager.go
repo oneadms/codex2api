@@ -113,10 +113,9 @@ type WsConnection struct {
 }
 
 func effectiveProxyURLForContext(ctx context.Context, account *auth.Account, override string) string {
-	if pinned, bound, _ := proxy.CodexGatewayEgressFromContext(ctx); bound {
-		return pinned
-	}
-	return effectiveProxyURL(account, override)
+	egress := proxy.ResolveCodexWebsocketEgressForContext(ctx, account, "", effectiveProxyURL(account, override))
+	// 池键使用实际拨号出口；路由错误由执行器和建连入口返回。
+	return egress.DialProxyURL
 }
 
 func effectiveProxyURL(account *auth.Account, proxyOverride string) string {
@@ -145,6 +144,11 @@ func configureWebsocketDialerProxy(dialer *websocket.Dialer, rawProxyURL string)
 	parsed.Scheme = strings.ToLower(strings.TrimSpace(parsed.Scheme))
 	if parsed.Scheme == "socks5h" {
 		parsed.Scheme = "socks5"
+	}
+	if parsed.Scheme == "http" || parsed.Scheme == "https" {
+		dialer.Proxy = nil
+		dialer.NetDialContext = security.NewHTTPConnectDialer(parsed).DialContext
+		return nil
 	}
 	dialer.Proxy = http.ProxyURL(parsed)
 	return nil

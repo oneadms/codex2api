@@ -28,12 +28,21 @@ func (h *Handler) prepareCodexConnectionTestContext(ctx context.Context, account
 		if settings == nil {
 			return ctx, fmt.Errorf("无法确认 Resin 配置，已取消测试连接")
 		}
-		cfg = &proxy.ResinConfig{BaseURL: settings.ResinURL, PlatformName: settings.ResinPlatformName}
+		cfg = &proxy.ResinConfig{
+			Mode:               settings.ResinMode,
+			BaseURL:            settings.ResinURL,
+			PlatformName:       settings.ResinPlatformName,
+			CodexPlatformName:  settings.ResinCodexPlatformName,
+			TraeCNPlatformName: settings.ResinTraeCNPlatformName,
+		}
 	}
 	if err := proxy.ValidateResinConfig(cfg); err != nil {
 		return ctx, fmt.Errorf("Resin 配置无效，已取消测试连接: %w", err)
 	}
 	ctx = proxy.WithResinConfig(ctx, cfg)
+	if account.IsTraeCNAPI() {
+		ctx = auth.WithResinChannel(ctx, auth.UpstreamTraeCN)
+	}
 	// 后台测连没有用户会话，与用量维护一样选择默认平台。
 	ctx = proxy.WithResinPlatform(ctx, proxy.ResinPlatformForSessionFromContext(ctx, ""))
 	return proxy.WithFreshCodexConnection(proxy.WithCodexSyntheticProbe(ctx)), nil

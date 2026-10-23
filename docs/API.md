@@ -1998,8 +1998,11 @@ curl -X DELETE "http://localhost:8080/api/admin/account-groups/1?force=true" \
   "test_content": "hi",
   "test_concurrency": 50,
   "proxy_url": "",
+  "resin_mode": "reverse",
   "resin_url": "",
   "resin_platform_name": "",
+  "resin_codex_platform_name": "",
+  "resin_traecn_platform_name": "",
   "pg_max_conns": 50,
   "redis_pool_size": 30,
   "auto_clean_unauthorized": false,
@@ -2050,8 +2053,11 @@ curl -X DELETE "http://localhost:8080/api/admin/account-groups/1?force=true" \
   "test_content": "say pong",
   "test_concurrency": 50,
   "proxy_url": "http://proxy.example.com:8080",
+  "resin_mode": "forward",
   "resin_url": "http://127.0.0.1:2260/my-token",
   "resin_platform_name": "p1,p2,p3",
+  "resin_codex_platform_name": "codex-p1,codex-p2",
+  "resin_traecn_platform_name": "traecn-p1,traecn-p2",
   "auto_clean_unauthorized": true,
   "auto_clean_rate_limited": false,
   "fast_scheduler_enabled": true,
@@ -2068,7 +2074,9 @@ curl -X DELETE "http://localhost:8080/api/admin/account-groups/1?force=true" \
 
 **响应:** 更新后的完整设置对象
 
-`resin_url` 与 `resin_platform_name` 同时包含有效值时启用 Resin。`resin_platform_name` 支持逗号分隔的全局平台列表；请求在完成账号调度后，使用同一条本地会话亲和键对列表做稳定哈希选择平台。一个平台保持原有单出口行为，清空任一字段立即关闭 Resin 并回退到原有路径。没有稳定会话键的旁路请求使用列表第一个平台。
+`resin_mode` 可选 `reverse`（默认反向代理）或 `forward`（正向代理），非法值返回 HTTP 400。省略时保留已保存模式，旧数据库及空值按 `reverse` 读取。正向模式的 `resin_url` 必须指向支持 CONNECT 的入口，格式为 `http(s)://host[:port]/token`，不支持额外路径前缀。HTTPS/WSS 保留目标 URL，通过 `平台.账号DBID:Token` 代理认证建立隧道，保留本服务原有 TLS 策略；代理失败不会回退直连。启用 Resin 时，`codex_egress.resin_mode` 与 `traecn_egress.resin_mode` 返回各链路当前模式。
+
+`resin_url` 是 Codex 与 TRAE CN 共用的 Resin 地址。`resin_codex_platform_name`、`resin_traecn_platform_name` 分别覆盖对应链路的平台列表，留空时沿用 `resin_platform_name` 公共列表；三个平台字段均支持逗号分隔。链路有效平台列表与地址同时非空时才使用 Resin；独立平台与公共平台均为空时，该链路沿用原有代理或直连出口。保存时必须提供地址及至少一份有效平台列表，或同时清空地址和全部平台字段以禁用 Resin。部分更新省略字段会保留原值。请求使用账号调度的本地会话亲和键稳定选择平台，没有稳定会话键的维护请求使用该链路列表的第一个平台。响应中的只读字段 `codex_egress` 和 `traecn_egress` 分别报告两条链路当前生效的平台和出口。
 
 `codex_fingerprint_default_mode`（`off`/`device`/`session`/`full`，默认 `off`）是新导入或新建 Codex 账号默认盖上的设备指纹收敛档位，只影响之后新加入的账号；已有账号档位不变，入库后仍可在账号级单独调整。非法取值返回 HTTP 400。
 

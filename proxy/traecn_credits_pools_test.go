@@ -219,13 +219,13 @@ func TestQueryTraeCNCreditsRespectsResinEgress(t *testing.T) {
 	previous := resinCfg.Load()
 	t.Cleanup(func() { resinCfg.Store(previous) })
 	resin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, traeCNCreditsUsagePath) || r.Header.Get("X-Resin-Account") != "91234" || r.Header.Get("Authorization") != "Cloud-IDE-JWT AT" {
+		if r.URL.Path != "/lease/traecn-test/https/trae-origin.invalid"+traeCNCreditsUsagePath || r.Header.Get("X-Resin-Account") != "91234" || r.Header.Get("Authorization") != "Cloud-IDE-JWT AT" {
 			t.Errorf("incorrect credit query route: %s", r.URL.Path)
 		}
 		_, _ = io.WriteString(w, traeCNCreditsPacksFixture)
 	}))
 	defer resin.Close()
-	SetResinConfig(&ResinConfig{BaseURL: resin.URL + "/lease", PlatformName: "traecn-test"})
+	SetResinConfig(&ResinConfig{BaseURL: resin.URL + "/lease", PlatformName: "shared", CodexPlatformName: "codex", TraeCNPlatformName: "traecn-test"})
 	account := &auth.Account{DBID: 91234, UpstreamType: auth.UpstreamTraeCN, AccessToken: "AT", ExpiresAt: time.Now().Add(time.Hour), ProxyURL: "http://127.0.0.1:1"}
 	got, err := queryTraeCNCredits(t.Context(), nil, account, "https://trae-origin.invalid")
 	if err != nil || len(got.Pools) != 2 {

@@ -341,19 +341,16 @@ func main() {
 	}
 
 	// 4c. 初始化 Resin 粘性代理池。始终应用一次规范化配置，确保历史上
-	// 只包含分隔符的 platform 字段不会把 OAuth 装饰器误留在启用状态。
+	// 只包含分隔符的 platform 字段不会把 OAuth 路由误留在启用状态。
 	proxy.SetResinConfig(&proxy.ResinConfig{
-		BaseURL:      settings.ResinURL,
-		PlatformName: settings.ResinPlatformName,
+		Mode:               settings.ResinMode,
+		BaseURL:            settings.ResinURL,
+		PlatformName:       settings.ResinPlatformName,
+		CodexPlatformName:  settings.ResinCodexPlatformName,
+		TraeCNPlatformName: settings.ResinTraeCNPlatformName,
 	})
-	if proxy.IsResinEnabled() {
-		// 注入 Resin URL 装饰器到 auth 包（避免 auth → proxy 循环依赖）
-		auth.ResinRequestDecorator = func(targetURL, accountID string) string {
-			return proxy.BuildReverseProxyURL(targetURL)
-		}
-	} else {
-		auth.ResinRequestDecorator = nil
-	}
+	// 解析器只在启动时注入；热更新通过原子配置发布，避免并发读写回调。
+	auth.ResinRequestResolver = proxy.ResolveResinAuthRoute
 
 	// Claude CLI 同步版本先于账号加载发布，保证 GenerateClaudeFingerprint 与回写使用同一生效版本。
 	claudeCLIVersionCtx, claudeCLIVersionCancel := context.WithTimeout(context.Background(), 10*time.Second)

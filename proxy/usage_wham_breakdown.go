@@ -163,8 +163,8 @@ func queryWhamDailyTokenBreakdownWithURL(ctx context.Context, account *auth.Acco
 	query.Set("group_by", "day")
 	requestURL := base + "?" + query.Encode()
 
-	finalURL, resinClient, viaResin := resinMaintenanceTarget(account, requestURL)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, finalURL, nil)
+	egress := resolveCodexMaintenanceEgress(ctx, account, requestURL, proxyURL, maintenancePurposeCodex, false)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, egress.URL, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build token breakdown request: %w", err)
 	}
@@ -176,7 +176,8 @@ func queryWhamDailyTokenBreakdownWithURL(ctx context.Context, account *auth.Acco
 	if accountID := account.EffectiveAccountID(); accountID != "" {
 		req.Header.Set("chatgpt-account-id", accountID)
 	}
-	client := whamHTTPClient(req, account, resinClient, viaResin, proxyURL)
+	egress.ApplyHeaders(req.Header)
+	client := egress.Client()
 
 	resp, err := client.Do(req)
 	if err != nil {

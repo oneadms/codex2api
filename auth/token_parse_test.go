@@ -86,12 +86,12 @@ func TestRefreshAccessTokenRejectsEmptyAccessToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	oldDecorator := ResinRequestDecorator
-	ResinRequestDecorator = func(targetURL, accountID string) string {
-		return server.URL
+	oldDecorator := ResinRequestResolver
+	ResinRequestResolver = func(_ context.Context, targetURL, accountID string) (ResinRoute, error) {
+		return ResinRoute{URL: server.URL, Mode: ResinModeReverse, AccountID: accountID}, nil
 	}
 	defer func() {
-		ResinRequestDecorator = oldDecorator
+		ResinRequestResolver = oldDecorator
 	}()
 
 	_, _, err := RefreshAccessToken(context.Background(), "rt-old", "", "account-1")
@@ -143,12 +143,12 @@ func TestRefreshWithSessionToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	oldDecorator := ResinRequestDecorator
-	ResinRequestDecorator = func(targetURL, accountID string) string {
-		return server.URL
+	oldDecorator := ResinRequestResolver
+	ResinRequestResolver = func(_ context.Context, targetURL, accountID string) (ResinRoute, error) {
+		return ResinRoute{URL: server.URL, Mode: ResinModeReverse, AccountID: accountID}, nil
 	}
 	defer func() {
-		ResinRequestDecorator = oldDecorator
+		ResinRequestResolver = oldDecorator
 	}()
 
 	td, info, err := RefreshWithSessionToken(context.Background(), "st-old", "", "account-1")

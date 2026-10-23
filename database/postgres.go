@@ -1469,8 +1469,11 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS session_slot_buffer_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS session_slot_buffer_seconds INT DEFAULT 10;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS models_list_read_max_bytes BIGINT NOT NULL DEFAULT 8388608;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_mode TEXT DEFAULT 'reverse';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_url TEXT DEFAULT '';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_platform_name TEXT DEFAULT '';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_codex_platform_name TEXT DEFAULT '';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_traecn_platform_name TEXT DEFAULT '';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_mode VARCHAR(20) DEFAULT 'monitor';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_threshold INT DEFAULT 50;
@@ -2447,8 +2450,11 @@ type SystemSettings struct {
 	SessionSlotBufferEnabled           bool   // 成功请求结束后为原会话短暂保留并发槽
 	SessionSlotBufferSeconds           int    // 会话并发槽缓冲时间，默认 10 秒，范围 1..60
 	ModelsListReadMaxBytes             int64  // 上游 /models 与 Codex 模型清单的最大读取字节数，默认 8 MiB
+	ResinMode                          string // reverse 或 forward，默认 reverse
 	ResinURL                           string // Resin 代理池地址（含 Token），例如 http://127.0.0.1:2260/my-token
 	ResinPlatformName                  string // Resin 全局平台标识（支持逗号分隔），例如 codex2api 或 p1,p2,p3
+	ResinCodexPlatformName             string // Codex 独立 Resin 平台标识，留空沿用公共平台
+	ResinTraeCNPlatformName            string // TRAE CN 独立 Resin 平台标识，留空沿用公共平台
 	PromptFilterEnabled                bool
 	PromptFilterMode                   string
 	PromptFilterThreshold              int
@@ -2698,6 +2704,9 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(session_affinity_spread, false),
 		       COALESCE(resin_url, ''),
 		       COALESCE(resin_platform_name, ''),
+		       COALESCE(resin_codex_platform_name, ''),
+		       COALESCE(resin_traecn_platform_name, ''),
+		       COALESCE(NULLIF(TRIM(resin_mode), ''), 'reverse'),
 		       COALESCE(prompt_filter_enabled, false),
 		       COALESCE(prompt_filter_mode, 'monitor'),
 		       COALESCE(prompt_filter_threshold, 50),
@@ -2806,6 +2815,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.AffinityMode,
 		&s.SessionAffinitySpread,
 		&s.ResinURL, &s.ResinPlatformName,
+		&s.ResinCodexPlatformName, &s.ResinTraeCNPlatformName, &s.ResinMode,
 		&s.PromptFilterEnabled, &s.PromptFilterMode, &s.PromptFilterThreshold, &s.PromptFilterStrictThreshold, &s.PromptFilterStrictTerminalEnabled, &s.PromptFilterAdvancedConfig,
 		&s.PromptFilterLogMatches, &s.PromptFilterMaxTextLength, &s.PromptFilterSensitiveWords,
 		&s.PromptFilterCustomPatterns, &s.PromptFilterDisabledPatterns,
@@ -3164,9 +3174,12 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					codex_telemetry_timing_debug,
 					auto_reset_credits_on_exhaustion_enabled,
 					codex_unified_client_identity_enabled,
-					codex_ws_downstream_keepalive_slots
+					codex_ws_downstream_keepalive_slots,
+					resin_codex_platform_name,
+					resin_traecn_platform_name,
+					resin_mode
 					)
-				VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107, $108, $109, $110, $111, $112, $113, $114, $115, $116, $117, $118, $119, $120, $121, $122, $123, $124, $125, $126, $127, $128, $129, $130, $133)
+				VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107, $108, $109, $110, $111, $112, $113, $114, $115, $116, $117, $118, $119, $120, $121, $122, $123, $124, $125, $126, $127, $128, $129, $130, $133, $134, $135, COALESCE(NULLIF($136, ''), 'reverse'))
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -3199,6 +3212,9 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					recovery_probe_interval_minutes = EXCLUDED.recovery_probe_interval_minutes,
 				resin_url               = EXCLUDED.resin_url,
 				resin_platform_name     = EXCLUDED.resin_platform_name,
+				resin_codex_platform_name = EXCLUDED.resin_codex_platform_name,
+				resin_traecn_platform_name = EXCLUDED.resin_traecn_platform_name,
+				resin_mode = EXCLUDED.resin_mode,
 				prompt_filter_enabled   = EXCLUDED.prompt_filter_enabled,
 				prompt_filter_mode      = EXCLUDED.prompt_filter_mode,
 				prompt_filter_threshold = EXCLUDED.prompt_filter_threshold,
@@ -3356,7 +3372,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		s.AutoResetCreditsOnExhaustionEnabled,
 		s.CodexUnifiedClientIdentityEnabled,
 		s.PreservePromptFilterCustomPatterns,
-		s.PreservePromptFilterReviewAPIKey, NormalizeCodexWSDownstreamKeepaliveSlots(s.CodexWSDownstreamKeepaliveSlots))
+		s.PreservePromptFilterReviewAPIKey, NormalizeCodexWSDownstreamKeepaliveSlots(s.CodexWSDownstreamKeepaliveSlots),
+		s.ResinCodexPlatformName, s.ResinTraeCNPlatformName, strings.TrimSpace(s.ResinMode))
 	return err
 }
 

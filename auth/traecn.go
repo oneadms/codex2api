@@ -802,22 +802,27 @@ func ExchangeTraeCNRefreshToken(ctx context.Context, refreshToken, host, proxyUR
 	if len(resinAccountID) > 0 {
 		accountID = strings.TrimSpace(resinAccountID[0])
 	}
-	targetURL, viaResin := ResinRequestURL(ctx, targetURL, accountID)
+	route, err := ResolveResinRequest(WithResinChannel(ctx, UpstreamTraeCN), targetURL, accountID)
+	if err != nil {
+		return TraeCNToken{}, err
+	}
+	targetURL = route.URL
+	viaResin := route.Enabled()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader(string(body)))
 	if err != nil {
 		return TraeCNToken{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	if viaResin {
-		req.Header.Set("X-Resin-Account", accountID)
-	}
+	route.ApplyHeaders(req.Header)
 	client := &http.Client{Timeout: TraeCNExchangeTimeout}
 	if viaResin {
-		client = NewResinHTTPClient(TraeCNExchangeTimeout)
+		client, err = route.HTTPClient(TraeCNExchangeTimeout, false)
+		if err != nil {
+			return TraeCNToken{}, err
+		}
 	}
-	// Resin is the complete egress route, not an HTTP CONNECT proxy. Do not
-	// wrap the Resin request in the account/global proxy selected for fallback.
+	// Resin 承担完整出口，不叠加账号或全局代理。
 	if proxyURL = strings.TrimSpace(proxyURL); !viaResin && proxyURL != "" {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
 		if proxyErr := ConfigureTransportProxy(transport, proxyURL, nil); proxyErr != nil {
@@ -1607,7 +1612,11 @@ func (s *Store) refreshTraeCNAccountWithProxy(ctx context.Context, account *Acco
 	if err != nil {
 		return err
 	}
-	resinURL, viaResin := ResinRequestURL(ctx, traeCNExchangeHost(normalizedHost)+TraeCNExchangePath, resinAccountID)
+	resinRoute, err := ResolveResinRequest(WithResinChannel(ctx, UpstreamTraeCN), traeCNExchangeHost(normalizedHost)+TraeCNExchangePath, resinAccountID)
+	if err != nil {
+		return err
+	}
+	viaResin := resinRoute.Enabled()
 	proxyURL := ""
 	// Resin 已承担出口时，普通代理池为空不能阻止令牌刷新。
 	if !viaResin {
@@ -1635,11 +1644,8 @@ func (s *Store) refreshTraeCNAccountWithProxy(ctx context.Context, account *Acco
 		defer criticalCancel()
 	}
 	// 固定刚才检查过的出口，避免配置热更新后绕过代理池保护直接刷新。
-	criticalCtx = WithResinRequestDecorator(criticalCtx, func(_ context.Context, targetURL, _ string) string {
-		if viaResin {
-			return resinURL
-		}
-		return targetURL
+	criticalCtx = WithResinRequestResolver(criticalCtx, func(context.Context, string, string) (ResinRoute, error) {
+		return resinRoute, nil
 	})
 	token, err := ExchangeTraeCNRefreshToken(criticalCtx, refreshToken, host, proxyURL, resinAccountID)
 	if err != nil {

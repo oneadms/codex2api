@@ -194,6 +194,9 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	}
 	// URL 改写和拨号共用请求快照，热更新不会改变在途请求的出口。
 	egress := proxy.ResolveCodexWebsocketEgressForContext(ctx, account, wsURL, effectiveProxyURLForContext(ctx, account, proxyOverride))
+	if egress.Err != nil {
+		return nil, egress.Err
+	}
 	wsURL = egress.URL
 
 	// 准备请求头

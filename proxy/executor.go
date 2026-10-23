@@ -161,7 +161,8 @@ func evictExpiredClients() {
 			released := actual.(*poolEntry)
 			releaseEvictedClient(released.client)
 			if aged && !idle {
-				log.Printf("[CodexTransport] 连接寿命到期轮转: key=%s age=%s", key, time.Duration(nowNanos-released.createdAt).Truncate(time.Second))
+				// 池键包含正向代理认证信息，日志仅保留摘要。
+				log.Printf("[CodexTransport] 连接寿命到期轮转: key_hash=%s age=%s", shortHashForLog(key.(string)), time.Duration(nowNanos-released.createdAt).Truncate(time.Second))
 			}
 		}
 		return true
@@ -265,9 +266,7 @@ func newCodexStandardTransport(proxyURL string) http.RoundTripper {
 	baseDialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	transport.DialContext = baseDialer.DialContext
 	if err := auth.ConfigureTransportProxy(transport, proxyURL, baseDialer); err != nil {
-		log.Printf("[CodexTransport] 代理配置失败，回退直连: proxy=%s err=%v", proxyURL, err)
-		transport.Proxy = nil
-		transport.DialContext = baseDialer.DialContext
+		return codexEgressErrorTransport{err: fmt.Errorf("代理配置无效，已拒绝直连")}
 	}
 	// 在代理/DialContext 敲定后再启用 HTTP/2 保活 PING，剔除被中间设备静默
 	// 掐断的死连接，避免请求挂到 TCP 重传超时。
@@ -302,7 +301,7 @@ func shortHashForLog(raw string) string {
 	return hex.EncodeToString(sum[:6])
 }
 
-func logCodexFingerprintDebug(kind string, account *auth.Account, proxyURL string, headers http.Header) {
+func logCodexFingerprintDebug(kind string, account *auth.Account, egress CodexEgress, headers http.Header) {
 	if !codexFingerprintDebugEnabled() {
 		return
 	}
@@ -312,12 +311,13 @@ func logCodexFingerprintDebug(kind string, account *auth.Account, proxyURL strin
 	}
 	userAgent := strings.TrimSpace(headers.Get("User-Agent"))
 	originator := strings.TrimSpace(headers.Get("Originator"))
-	log.Printf("[CodexFingerprint] kind=%s account_id=%d transport_mode=%s proxy_enabled=%t resin_enabled=%t official_client=%t ua_hash=%s originator=%s session_hash=%s stainless_present=%t",
+	log.Printf("[CodexFingerprint] kind=%s account_id=%d transport_mode=%s proxy_enabled=%t resin_enabled=%t resin_mode=%s official_client=%t ua_hash=%s originator=%s session_hash=%s stainless_present=%t",
 		kind,
 		accountID,
 		codexTransportModeForAccount(account),
-		strings.TrimSpace(proxyURL) != "",
-		headers.Get("X-Resin-Account") != "",
+		egress.DialProxyURL != "",
+		egress.ViaResin(),
+		egress.ResinMode,
 		IsCodexOfficialClientByHeaders(userAgent, originator),
 		shortHashForLog(userAgent),
 		originator,
@@ -636,6 +636,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	var telemetryAttempt *codexTelemetryAttempt
 	if !detectorProbe {
 		telemetryAttempt = beginCodexTelemetry(codexTelemetryRequest{
+			ctx:     ctx,
 			account: account, body: requestBody, sessionID: sessionID, proxyOverride: proxyOverride,
 			apiKey: apiKey, deviceCfg: deviceCfg, headers: headers,
 		})
@@ -894,7 +895,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		}
 
 		egress.ApplyHeaders(req.Header)
-		logCodexFingerprintDebug("http", account, egress.DialProxyURL, req.Header)
+		logCodexFingerprintDebug("http", account, egress, req.Header)
 
 		if err := ConsumeAPIKeyModelRequestQuota(ctx, requestModel); err != nil {
 			return nil, err
@@ -906,7 +907,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		resp, err := doTracedUpstreamRequest(gatewayHTTPClient(ctx, client), req, account, proxyURL)
 		if err != nil {
 			if shouldRecyclePooledClient(err) {
-				recyclePooledClient(account, proxyURL)
+				recyclePooledClient(account, egress.DialProxyURL)
 			}
 			return nil, ErrUpstream(0, "请求上游失败", err)
 		}
@@ -1306,7 +1307,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	ApplyCodexRoutingHint(req.Header, account, requestBody)
 
 	egress.ApplyHeaders(req.Header)
-	logCodexFingerprintDebug("compact", account, egress.DialProxyURL, req.Header)
+	logCodexFingerprintDebug("compact", account, egress, req.Header)
 
 	if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(requestBody, "model").String()); err != nil {
 		return nil, err
@@ -1314,7 +1315,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	resp, err := doTracedUpstreamRequest(gatewayHTTPClient(ctx, client), req, account, proxyURL)
 	if err != nil {
 		if shouldRecyclePooledClient(err) {
-			recyclePooledClient(account, proxyURL)
+			recyclePooledClient(account, egress.DialProxyURL)
 		}
 		return nil, ErrUpstream(0, "请求上游失败", err)
 	}

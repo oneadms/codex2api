@@ -172,12 +172,11 @@ func recordTraeCNCreditsBalance(account *auth.Account, snapshot TraeCNCreditsSna
 type traeCNCreditsRequest struct {
 	account     *auth.Account
 	accessToken string
-	endpoint    string
-	proxyURL    string
-	viaResin    bool
+	egress      CodexEgress
 }
 
 func newTraeCNCreditsRequest(ctx context.Context, store *auth.Store, account *auth.Account, host string) (traeCNCreditsRequest, error) {
+	ctx = withTraeCNResinContext(ctx)
 	account.Mu().RLock()
 	proxyURL := strings.TrimSpace(account.ProxyURL)
 	account.Mu().RUnlock()
@@ -199,34 +198,22 @@ func newTraeCNCreditsRequest(ctx context.Context, store *auth.Store, account *au
 		host = TraeCNCheckinHost
 	}
 	endpoint := host + traeCNCreditsUsagePath
-	viaResin := IsResinEnabledForContext(ctx) && account.ID() > 0
-	if viaResin {
-		platform := ResinPlatformFromContext(ctx)
-		if platform == "" {
-			platform = ResinPlatformForSessionFromContext(ctx, "")
-		}
-		endpoint = BuildReverseProxyURLForContext(ctx, endpoint, platform)
-	}
-	return traeCNCreditsRequest{account: account, accessToken: accessToken, endpoint: endpoint, proxyURL: proxyURL, viaResin: viaResin}, nil
+	egress := ResolveCodexEgressForContext(ctx, account, endpoint, proxyURL)
+	return traeCNCreditsRequest{account: account, accessToken: accessToken, egress: egress}, egress.Err
 }
 
 func (r traeCNCreditsRequest) fetch(ctx context.Context, reqSource int) ([]byte, error) {
 	body := fmt.Sprintf(`{"require_usage":true,"req_source":%d}`, reqSource)
 	requestCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, r.endpoint, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, r.egress.URL, strings.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("创建积分查询请求失败")
 	}
 	// pay 和签到接口均使用市场客户端身份，不能套用推理接口的 x-ide-token 头。
 	req.Header = auth.TraeCNCheckinHeaders(r.account, r.accessToken, uuid.NewString())
-	var resp *http.Response
-	if r.viaResin {
-		req.Header.Set("X-Resin-Account", ResinAccountID(r.account))
-		resp, err = getResinHTTPClient(r.account).Do(req)
-	} else {
-		resp, err = getPooledClient(r.account, r.proxyURL).Do(req)
-	}
+	r.egress.ApplyHeaders(req.Header)
+	resp, err := r.egress.Client().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("积分查询连接失败或超时")
 	}

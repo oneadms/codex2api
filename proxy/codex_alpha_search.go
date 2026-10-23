@@ -160,12 +160,13 @@ func ForwardCodexAlphaSearch(ctx context.Context, account *auth.Account, proxyUR
 	if codexAlphaSearchURLForTest != "" {
 		endpoint = codexAlphaSearchURLForTest
 	}
-	finalURL, client, viaResin := resinMaintenanceTargetForContext(ctx, account, endpoint, resinPlatform)
+	ctx = WithResinPlatform(ctx, resinPlatform)
+	egress := resolveCodexMaintenanceEgress(ctx, account, endpoint, proxyURL, maintenancePurposeCodex, false)
 
 	// standalone 搜索是模型驱动的检索回合，上游耗时可达数十秒。
 	reqCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, finalURL, strings.NewReader(string(rawBody)))
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, egress.URL, strings.NewReader(string(rawBody)))
 	if err != nil {
 		return nil, fmt.Errorf("build codex search request: %w", err)
 	}
@@ -190,13 +191,8 @@ func ForwardCodexAlphaSearch(ctx context.Context, account *auth.Account, proxyUR
 		req.Header.Set("chatgpt-account-id", accountID)
 	}
 
-	if viaResin {
-		req.Header.Set("X-Resin-Account", ResinAccountID(account))
-	} else {
-		// 未启用 Resin 时改用账号代理的池化 transport，避免泄漏 uTLS 连接。
-		// 池化而非每次新建，避免一次性 uTLS transport 泄漏连接（issue #446）。
-		client = getCodexMaintenanceClient(account, proxyURL)
-	}
+	egress.ApplyHeaders(req.Header)
+	client := egress.Client()
 	resp, err := executeHTTPWithContinuousRetryKeepalive(reqCtx, func() (*http.Response, error) {
 		return client.Do(req)
 	})
