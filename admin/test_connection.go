@@ -231,7 +231,10 @@ func (h *Handler) testConnection(c *gin.Context, quality *qualityTestRequest) {
 	} else if isAntigravityAccount {
 		resp, reqErr = h.executeAntigravityConnectionTest(c.Request.Context(), account, testModel, payload, proxyURL, !isTransient)
 	} else if isOpenAIResponsesAccount {
-		if isTransient {
+		if quality == nil {
+			resp, payload, reqErr = h.executeRelayConnectionTest(c.Request.Context(), account, payload, proxyURL, !isTransient)
+			usageEffort = connectionTestReasoningEffort(payload)
+		} else if isTransient {
 			resp, reqErr = proxy.ExecuteRelayStyleRequest(c.Request.Context(), account, payload, proxyURL, nil)
 		} else {
 			resp, reqErr = proxy.ExecuteRelayStyleRequestWithStore(c.Request.Context(), h.store, account, payload, proxyURL, nil)
@@ -1746,7 +1749,7 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 	} else if acc.IsAntigravityAPI() {
 		resp, err = h.executeAntigravityConnectionTest(testCtx, acc, testModel, payload, proxyURL, true)
 	} else if acc.IsRelayStyle() {
-		resp, err = proxy.ExecuteRelayStyleRequestWithStore(testCtx, h.store, acc, payload, proxyURL, nil)
+		resp, _, err = h.executeRelayConnectionTest(testCtx, acc, payload, proxyURL, true)
 	} else {
 		resp, err = proxy.ExecuteRequest(testCtx, acc, payload, "", proxyURL, "", nil, nil)
 	}
@@ -1902,7 +1905,7 @@ func (h *Handler) runRecycleBinSingleTest(ctx context.Context, acc *auth.Account
 		// 回收站账号是临时对象：401 不做凭据刷新，只展示结果。
 		resp, err = h.executeAntigravityConnectionTest(testCtx, acc, testModel, payload, h.store.ResolveProxyForAccount(acc), false)
 	} else if acc.IsRelayStyle() {
-		resp, err = proxy.ExecuteRelayStyleRequest(testCtx, acc, payload, h.store.ResolveProxyForAccount(acc), nil)
+		resp, _, err = h.executeRelayConnectionTest(testCtx, acc, payload, h.store.ResolveProxyForAccount(acc), false)
 	} else {
 		resp, err = proxy.ExecuteRequest(testCtx, acc, payload, "", h.store.ResolveProxyForAccount(acc), "", nil, nil)
 	}
