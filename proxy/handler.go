@@ -4423,6 +4423,9 @@ func (h *Handler) responsesValidated(c *gin.Context, validated responsesValidate
 			upstreamCtx = withTraeCNPreflightPassthroughSnapshot(upstreamCtx, traeCNPreflightPassthrough(c))
 			readCtx := upstreamResponseReadContext(c.Request.Context(), upstreamCtx, continuousRetryPolicy)
 			upstreamCtx = WithCodexClientModel(upstreamCtx, model)
+			// TRAE rules use the authenticated key and this attempt's selected
+			// account, including after a retry switches groups.
+			upstreamCtx = WithPayloadRuleIdentity(upstreamCtx, ruleIdentity.WithSelectedAccount(account, h.store))
 			lastUpstreamCancel = upstreamCancel
 			ttftGuard := (*firstTokenTimeoutGuard)(nil)
 			if isStream {
@@ -7313,7 +7316,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		// 身份按 attempt 附加实际选中账号维度：account_* 门随重试换号重新匹配（issue #410）。
 		attemptIdentity := ruleIdentity.WithSelectedAccount(account, h.store)
 		// service_tier 记账按 payload 规则改写后的值归因（覆写 service_tier 的规则才生效）。
-		// 仅 Codex 路径（ExecuteRequest）套用规则；relay 账号不套用，保持原值。
+		// service_tier 的规则改写与记账仅适用于 Codex；TRAE 不转发该字段，relay 保持原记账值。
 		// 按尝试重算：不同尝试的生效模型/账号可能不同，规则按模型或账号门匹配则结果随之变化。
 		if !isRelayAccount {
 			serviceTier = EffectiveRequestedServiceTier(codexBody, attemptEffectiveModel, downstreamHeaders, attemptIdentity)

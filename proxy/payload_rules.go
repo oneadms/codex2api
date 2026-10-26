@@ -52,7 +52,9 @@ import (
 //	}
 //
 // api_key_* / group_* 依赖请求身份（PayloadRuleIdentity）：无身份的内部/未鉴权路径下，
-// 凡配置了任一 key/组门的规则一律不匹配（fail-closed）。compact/relay 端点不套用本引擎。
+// 凡配置了任一 key/组门的规则一律不匹配（fail-closed）。Codex 与 TRAE CN 对话请求
+// 套用本引擎；compact 与其它 relay 通道不套用。TRAE 在统一的 Responses 形态上
+// 改写，再转换为原生请求；仅适配器支持的字段会发往上游（不含 service_tier/token 上限）。
 //
 // 注意 group_* 与 account_group_* 的语义区别（issue #410）：
 //   - group_*         匹配该 Key **允许使用**的账号组，与本次实际调度到哪个账号无关；
@@ -136,7 +138,7 @@ func (id *PayloadRuleIdentity) WithSelectedAccount(account *auth.Account, store 
 type payloadRuleIdentityKey struct{}
 
 // WithPayloadRuleIdentity 把身份挂到 context 上（id 为 nil 时原样返回）。
-// 必须挂在真正流入 ExecuteRequest 的上游 context 上——client 请求 context 与上游
+// 必须挂在真正流入上游执行器（ExecuteRequest / ExecuteTraeCNRequest）的 context 上——client 请求 context 与上游
 // context 解耦（newDrainableUpstreamContext 从 background 派生），挂错则传不进引擎。
 func WithPayloadRuleIdentity(ctx context.Context, id *PayloadRuleIdentity) context.Context {
 	if ctx == nil || id == nil {

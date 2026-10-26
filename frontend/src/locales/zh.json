@@ -6559,12 +6559,12 @@
     "reasoningEmpty": "暂无思考强度模型，点击下方按钮添加",
     "messagesEndpoint": "Anthropic Messages API 兼容端点（Claude Code）",
     "payloadRules": "请求体重写规则",
-    "payloadRulesDesc": "按条件改写发往上游的请求体：追加/覆盖系统提示词 instructions、覆盖 service_tier、按条件映射思考强度等。",
-    "payloadRulesWarning": "覆盖 instructions 会替换 Codex CLI 自带的官方系统提示词，可能影响其工具调用行为；改写 instructions 也会使上游 prompt cache 失效，请保持规则文本稳定。生图请求不受规则影响。",
-    "payloadRulesHint": "规则组：default（缺失才写入）/ override（无条件覆盖）/ append（字符串追加）/ filter（删除字段）及 *_raw 原始 JSON 变体；匹配门支持 models 通配、headers、match / not_match / exist / not_exist。受保护字段（model、stream、input、store、prompt_cache_key）不允许改写。",
+    "payloadRulesDesc": "按条件改写 Codex 与 TRAE CN 的对话请求：追加/覆盖系统提示词 instructions、映射 reasoning.effort 等。service_tier 仅适用于 Codex；TRAE 不转发该字段或 token 上限。",
+    "payloadRulesWarning": "覆盖 instructions 会替换客户端提示词（包括 Codex CLI 官方提示词），可能影响工具调用；改写也会改变上游 prompt cache，请保持规则文本稳定。生图请求不受影响；TRAE 适配器的工具辅助提示仍保留。",
+    "payloadRulesHint": "规则组：default（缺失才写入）/ override（无条件覆盖）/ append（字符串追加）/ filter（删除字段）及 *_raw 原始 JSON 变体；匹配门支持 models 通配、headers、match / not_match / exist / not_exist。受保护字段（model、stream、input、store、prompt_cache_key）不允许直接改写。",
     "payloadRulesJsonError": "JSON 格式错误",
     "payloadRulesObserved": "客户端透传的系统提示词样本",
-    "payloadRulesObservedDesc": "网关本身没有默认系统提示词，instructions 由客户端透传；这里展示最近观测到的原文（规则改写前），方便照着写追加/覆盖规则。",
+    "payloadRulesObservedDesc": "这里展示规则改写前的客户端 instructions；TRAE 的 Chat/Messages 系统提示词文本会合并为 instructions 供规则匹配和观测。样本不包含 TRAE 适配器后续追加的工具辅助提示。",
     "payloadRulesObservedLoad": "加载样本",
     "payloadRulesObservedEmpty": "暂无样本——有请求经过网关后这里会出现客户端发来的 instructions 原文。"
   },
@@ -6914,7 +6914,7 @@
     "formText": "提示词文本",
     "formTextPlaceholder": "输入要追加或覆盖的系统提示词……",
     "formTier": "service_tier 值",
-    "formTierHint": "上游当前只接受 priority(fast 会映射为 priority);其余值(auto/default/flex/scale)会在发往上游前被自动剔除,不会报错但也不会生效。",
+    "formTierHint": "仅 Codex 支持 service_tier 改写：priority 生效，fast 映射为 priority，其余值在发送前剔除。TRAE CN 不转发 service_tier 或 token 上限，配置这些字段不会生效。",
     "formEffortFrom": "当思考强度为",
     "formEffortTo": "改写为",
     "formGroup": "规则组",
@@ -6927,7 +6927,7 @@
     "formModelsPlaceholder": "选择模型或输入通配符(如 gpt-*),留空 = 全部模型",
     "formFilterPaths": "要删除的字段路径(逗号分隔)",
     "identityGatesLabel": "身份匹配门(可选)",
-    "identityGatesHint": "按下游 API Key、Key 允许的分组或实际调度账号限定规则生效;支持通配符 *,同一项内多值为「或」关系,与其它匹配门为「且」关系。留空表示不限制。仅对 Codex 接口生效。",
+    "identityGatesHint": "按下游 API Key、Key 允许的分组或实际调度账号限定规则生效；支持通配符 *，同一项内多值为「或」，各匹配门之间为「且」。留空表示不限制。适用于 Codex 与 TRAE CN 对话请求，换号后按新账号重新匹配。",
     "apiKeyNamesLabel": "API Key 名称",
     "apiKeyNamesPlaceholder": "选择或输入 Key 名称,支持通配符 *",
     "apiKeyIdsLabel": "API Key ID",
@@ -6967,7 +6967,7 @@
     "copyFailed": "复制失败",
     "formModelsSelected": "已选 {{count}} 个",
     "formModelsAll": "全部模型",
-    "formModelsHint": "可多选或输入通配符（如 gpt-*）；留空表示对全部模型生效。",
+    "formModelsHint": "可多选或输入通配符（如 gpt-*）；留空表示全部模型。TRAE 匹配模型映射并按账号目录校正后的上游 config_name，不是客户端别名；match.model 仍匹配请求体中的模型名。",
     "views": {
       "editor": "规则配置",
       "docs": "使用说明"
@@ -6986,8 +6986,8 @@
       },
       "what": {
         "title": "模块是做什么的",
-        "p1": "请求体重写在网关把客户端请求转给上游之前，按规则条件修改请求 JSON。常见用途包括追加/覆盖 instructions、强制 service_tier、按条件映射 reasoning.effort。",
-        "p2": "规则保存后即时生效。网关本身没有默认系统提示词——instructions 由客户端透传，你可以用规则在透传内容之上做追加或覆盖。",
+        "p1": "规则在 Codex 与 TRAE CN 的对话请求发往上游前执行，字段使用统一的 Responses 形态（如 instructions、reasoning.effort），不是 TRAE 原生的 messages。仅适配器支持的字段会发往上游；service_tier 改写仅适用于 Codex。",
+        "p2": "保存后即时生效。TRAE 的 Chat/Messages 会将转换后的系统提示词文本用两个换行合并为 instructions；只有 instructions 真正改变时才移除对应旧文本，非文本内容与对话历史保留。未命中或未改变提示词的规则保持原消息布局。原生 Responses 仅改写顶层 instructions，input 中的 system/developer 消息保持不变。TRAE 工具辅助提示在改写后另行添加。",
         "b1": "可视化编辑：用模板快速创建规则，也可用 JSON 源码精细控制。",
         "b2": "规则组决定写入方式：缺失才写、覆盖、追加字符串、删除字段。",
         "b3": "匹配门可按模型、请求头、字段存在与取值过滤规则是否生效。",
@@ -6996,11 +6996,11 @@
       "pipeline": {
         "title": "请求处理顺序",
         "p1": "一条请求大致按下列顺序经过规则引擎：",
-        "s1": "解析客户端请求体（聊天/响应类接口；生图请求不受本规则影响）。",
-        "s2": "按配置的规则组与匹配门筛选要应用的规则。",
+        "s1": "将 Codex / TRAE CN 对话请求转换为统一的 Responses 形态；生图与模型探测请求不套用规则。",
+        "s2": "根据模型、下游密钥与本次选中账号等条件匹配规则，并记录改写前的 instructions 样本。",
         "s3": "按规则组语义改写字段（default / override / append / filter 及 raw 变体）。",
-        "s4": "跳过受保护字段，避免破坏路由与流式协议。",
-        "s5": "将改写后的请求发往上游；可选记录原始 instructions 样本供对照。"
+        "s4": "禁止直接改写受保护字段，避免破坏路由与流式协议。",
+        "s5": "经上游适配器转换后发送；TRAE 不转发 service_tier 或 token 上限，换号重试时从原请求重新匹配规则。"
       },
       "groups": {
         "title": "规则组怎么选",
@@ -7015,7 +7015,7 @@
       "gates": {
         "title": "匹配门（何时生效）",
         "p1": "匹配门全部满足时规则才执行；留空表示不限制该项。",
-        "b1": "models：模型名或通配符（如 gpt-*）；留空表示全部模型。",
+        "b1": "models：映射后的模型名或通配符（如 gpt-*）；TRAE 使用按账号目录校正后的上游 config_name。留空表示全部模型；match.model 仍读取请求体中的模型名。",
         "b2": "headers：要求请求头键值匹配。",
         "b3": "match / not_match：请求体字段路径等于/不等于给定值。",
         "b4": "exist / not_exist：字段路径必须存在/不存在。",
@@ -7030,7 +7030,7 @@
         "b3": "group_ids：该 Key 允许使用的账号分组 ID（字符串），支持通配符。",
         "b4": "group_names：账号分组名称，支持通配符。",
         "b5": "留空表示不限制该项；若设置了任一身份门而请求无法解析出身份，则规则不生效（fail-closed，默认不匹配）。",
-        "callout": "身份门仅对 Codex 接口生效（/v1/responses、/v1/messages、/v1/chat/completions），对 compact / relay 通道不生效。「快速分组加速」模板即基于分组门实现。"
+        "callout": "身份门适用于 Codex 与 TRAE CN 的 /v1/responses、/v1/messages、/v1/chat/completions 请求（含流式），compact 与其它 relay 通道不套用。account_group_* / account_plans 按每次实际选中账号匹配；group_* 匹配 Key 允许组。「快速分组加速」的 service_tier 改写仅对 Codex 生效。"
       },
       "templates": {
         "title": "内置模板",

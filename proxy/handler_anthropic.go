@@ -851,7 +851,7 @@ func (h *Handler) Messages(c *gin.Context) {
 				sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Request translation failed: "+translateErr.Error())
 				return
 			}
-			// service_tier 记账按 payload 规则改写后的值归因（仅 Codex 路径套用规则）。
+			// service_tier 记账按 payload 规则改写后的值归因（此字段的改写仅适用于 Codex）。
 			serviceTier = EffectiveRequestedServiceTier(codexBody, attemptEffectiveModel, downstreamHeaders, attemptIdentity)
 			upstreamCtx = WithCodexTurnStateAffinityKey(upstreamCtx, affinityKey)
 			guardCodexTurnStateEcho(affinityKey, account, downstreamHeaders)

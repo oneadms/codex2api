@@ -13,8 +13,9 @@ import (
 // ==================== 透传 instructions 观测 ====================
 //
 // 网关自身没有默认系统提示词：/v1/responses 的 instructions 由客户端透传。
-// 这里在规则改写前记录最近观测到的原始 instructions 样本，供管理端展示，
-// 让管理员配置追加/覆盖规则时能看到客户端实际发来的提示词原文。
+// 这里在规则改写前记录最近观测到的原始 instructions 样本，供管理端展示。
+// TRAE 的 Chat/Messages 请求先将转换后的系统提示词文本合并成 instructions；
+// 适配器后续添加的工具辅助提示不在样本中。
 
 const (
 	observedInstructionsMaxSamples = 8

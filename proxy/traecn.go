@@ -2334,6 +2334,7 @@ func executeTraeCNRequest(ctx context.Context, store *auth.Store, account *auth.
 		!responsesBodyRequestsImageGeneration(inboundBody) {
 		canonical = stripResponsesImageGenerationCapabilities(canonical)
 	}
+	canonical = applyTraeCNPayloadRules(ctx, account, inbound, canonical, downstreamHeaders)
 	if diagnostic.dir != "" {
 		diagnostic.record("canonical", traeCNDiagnosticRequestSummary(canonical))
 	}

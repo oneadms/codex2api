@@ -6560,12 +6560,12 @@
     "reasoningEmpty": "No reasoning-effort models yet — add one below",
     "messagesEndpoint": "Anthropic Messages API endpoint (Claude Code)",
     "payloadRules": "Payload Rewrite Rules",
-    "payloadRulesDesc": "Conditionally rewrite upstream request bodies: append/override the instructions system prompt, override service_tier, remap reasoning effort, etc.",
-    "payloadRulesWarning": "Overriding instructions replaces the official Codex CLI system prompt and may affect its tool-calling behavior; rewriting instructions also invalidates the upstream prompt cache, so keep rule text stable. Image generation requests are not affected.",
-    "payloadRulesHint": "Rule groups: default (set when missing) / override (always set) / append (string concat) / filter (remove fields), plus *_raw raw-JSON variants. Gates: models wildcards, headers, match / not_match / exist / not_exist. Protected fields (model, stream, input, store, prompt_cache_key) cannot be rewritten.",
+    "payloadRulesDesc": "Conditionally rewrite Codex and TRAE CN conversations: append/override instructions, remap reasoning.effort, etc. service_tier is Codex-only; TRAE forwards neither service_tier nor token limits.",
+    "payloadRulesWarning": "Overriding instructions replaces client prompts (including the official Codex CLI prompt) and may affect tool calling. Rewrites also change upstream prompt caching, so keep rule text stable. Image generation is unaffected; TRAE adapter tool hints remain intact.",
+    "payloadRulesHint": "Rule groups: default (set when missing) / override (always set) / append (string concat) / filter (remove fields), plus *_raw raw-JSON variants. Gates: models wildcards, headers, match / not_match / exist / not_exist. Protected fields (model, stream, input, store, prompt_cache_key) cannot be rewritten directly.",
     "payloadRulesJsonError": "Invalid JSON",
     "payloadRulesObserved": "Observed client instructions samples",
-    "payloadRulesObservedDesc": "The gateway has no default system prompt of its own — instructions pass through from clients. Recent originals (pre-rewrite) are shown here as reference for writing append/override rules.",
+    "payloadRulesObservedDesc": "Samples show client instructions before rewriting. For TRAE Chat/Messages, translated system-prompt text is combined as instructions for rules and observation. Samples exclude tool hints added later by the TRAE adapter.",
     "payloadRulesObservedLoad": "Load samples",
     "payloadRulesObservedEmpty": "No samples yet — client instructions will appear here once requests flow through the gateway."
   },
@@ -6915,7 +6915,7 @@
     "formText": "Prompt text",
     "formTextPlaceholder": "Enter the system prompt text to append or override…",
     "formTier": "service_tier value",
-    "formTierHint": "The upstream currently only accepts priority (fast is mapped to priority). Other values (auto/default/flex/scale) are silently stripped before reaching the upstream — no error, but no effect either.",
+    "formTierHint": "service_tier rewrites are Codex-only: priority is supported, fast maps to priority, and other values are stripped. TRAE CN forwards neither service_tier nor token limits, so rules for those fields have no effect.",
     "formEffortFrom": "When effort is",
     "formEffortTo": "Rewrite to",
     "formGroup": "Rule group",
@@ -6928,7 +6928,7 @@
     "formModelsPlaceholder": "Pick models or type a wildcard (e.g. gpt-*), empty = all models",
     "formFilterPaths": "Field paths to remove (comma separated)",
     "identityGatesLabel": "Identity gates (optional)",
-    "identityGatesHint": "Scope the rule by downstream API Key, key-allowed groups, or the actually-scheduled account. Wildcard * supported; values within one gate are OR'd, gates combine with others via AND. Empty = unrestricted. Codex endpoints only.",
+    "identityGatesHint": "Scope rules by downstream API Key, key-allowed groups, or the selected account. Wildcard * supported; values within a gate are OR'd and gates combine via AND. Empty = unrestricted. Applies to Codex and TRAE CN conversations, re-evaluated when retries select another account.",
     "apiKeyNamesLabel": "API Key names",
     "apiKeyNamesPlaceholder": "Pick or type a key name, wildcard * supported",
     "apiKeyIdsLabel": "API Key IDs",
@@ -6968,7 +6968,7 @@
     "copyFailed": "Copy failed",
     "formModelsSelected": "{{count}} selected",
     "formModelsAll": "All models",
-    "formModelsHint": "Multi-select or type a wildcard (e.g. gpt-*). Leave empty to apply to all models.",
+    "formModelsHint": "Select names or enter a wildcard (e.g. gpt-*); empty = all models. TRAE matches the mapped, account-catalog-normalized upstream config_name, not the client alias. match.model still reads the model in the request body.",
     "views": {
       "editor": "Rules",
       "docs": "Guide"
@@ -6987,8 +6987,8 @@
       },
       "what": {
         "title": "What this module does",
-        "p1": "Payload rewrite mutates the client JSON body after it hits the gateway and before it is sent upstream. Typical uses include appending or replacing instructions, forcing service_tier, and remapping reasoning.effort.",
-        "p2": "Rules apply immediately after save. The gateway has no default system prompt of its own—instructions are client-provided, and rules layer on top of that pass-through.",
+        "p1": "Rules run before Codex and TRAE CN conversations are sent upstream. Paths refer to the canonical Responses body (e.g. instructions, reasoning.effort), not TRAE's native messages. Only adapter-supported fields reach the provider; service_tier rewrites are Codex-only.",
+        "p2": "Rules apply immediately after save. TRAE Chat/Messages expose translated system-prompt text as instructions, joined by two newlines. Only an actual instructions change removes the corresponding old text; non-text content and conversation history remain. Unmatched rules or unchanged prompts preserve the original message layout. Native Responses rewrites only top-level instructions, preserving system/developer messages in input. TRAE tool hints are added after rewriting.",
         "b1": "Visual editor with templates, plus a full JSON source mode.",
         "b2": "Rule groups control write semantics: set-if-missing, override, string append, or field removal.",
         "b3": "Match gates filter by model, headers, field presence, and field values.",
@@ -6997,11 +6997,11 @@
       "pipeline": {
         "title": "Request pipeline",
         "p1": "A request roughly flows through the engine as follows:",
-        "s1": "Parse the client body (chat/responses-style endpoints; image generation is not affected).",
-        "s2": "Select rules that pass their group configuration and match gates.",
+        "s1": "Translate Codex / TRAE CN conversations into a canonical Responses body; image-generation and model-detector requests bypass rules.",
+        "s2": "Match rules using the model, downstream key and selected account, and record pre-rewrite instructions samples.",
         "s3": "Apply writes using default / override / append / filter (and raw variants).",
-        "s4": "Skip protected fields so routing and streaming stay intact.",
-        "s5": "Forward the rewritten body upstream; optionally record original instructions samples."
+        "s4": "Prevent direct writes to protected fields so routing and streaming stay intact.",
+        "s5": "Convert through the upstream adapter and send. TRAE omits service_tier and token limits; account-switch retries re-evaluate rules from the original request."
       },
       "groups": {
         "title": "Choosing a rule group",
@@ -7016,7 +7016,7 @@
       "gates": {
         "title": "Match gates",
         "p1": "A rule runs only when every configured gate matches. Empty means unrestricted.",
-        "b1": "models: names or wildcards (e.g. gpt-*); empty = all models.",
+        "b1": "models: mapped names or wildcards (e.g. gpt-*); TRAE uses the account-catalog-normalized upstream config_name. Empty = all models; match.model still reads the model in the body.",
         "b2": "headers: require specific request header values.",
         "b3": "match / not_match: body field paths equal / not equal given values.",
         "b4": "exist / not_exist: field paths must be present / absent.",
@@ -7031,7 +7031,7 @@
         "b3": "group_ids: account-group IDs (as strings) the Key may use, wildcard supported.",
         "b4": "group_names: account-group names, wildcard supported.",
         "b5": "Empty = unrestricted. If a rule sets any identity gate but the request has no resolvable identity, the rule does not match (fail-closed).",
-        "callout": "Identity gates only apply on Codex endpoints (/v1/responses, /v1/messages, /v1/chat/completions), NOT on compact / relay channels. The Fast Group Boost template is built on the group gate."
+        "callout": "Identity gates apply to Codex and TRAE CN on /v1/responses, /v1/messages and /v1/chat/completions, including streaming. Compact and other relay channels are excluded. account_group_* / account_plans match the account selected for each attempt; group_* matches key-allowed groups. Fast Group Boost's service_tier rewrite is Codex-only."
       },
       "templates": {
         "title": "Built-in templates",
