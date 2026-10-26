@@ -8,6 +8,7 @@ import PageHeader from '../components/PageHeader'
 import CodexClientVersionsPanel from '../components/CodexClientVersionsPanel'
 import StateShell from '../components/StateShell'
 import TraeCNModelMapping from '../components/TraeCNModelMapping'
+import TraeCNModelSyncSettings from '../components/TraeCNModelSyncSettings'
 import TraeCNPreflightPassthrough from '../components/TraeCNPreflightPassthrough'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
@@ -5145,6 +5146,9 @@ export default function Settings() {
 
           {activeTab === 'traecn' ? (
             <SettingsSection id="settings-traecn" title={t('settings.traecnSettingsTitle')} description={t('settings.traecnMapping.sectionDescription')} icon={<ChannelLogo channel="traecn" size={16} />}>
+              <SettingsCard title={t('settings.traecnModelSync.title')} description={t('settings.traecnModelSync.description')} icon={<RefreshCw className="size-4" />}>
+                <TraeCNModelSyncSettings />
+              </SettingsCard>
               <SettingsCard title={t('settings.traecnMapping.title')} description={t('settings.traecnMapping.description')} icon={<Shuffle className="size-4" />}>
                 <TraeCNModelMapping />
               </SettingsCard>

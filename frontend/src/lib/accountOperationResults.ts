@@ -34,7 +34,7 @@ export interface AccountOperationResultsPage {
 }
 
 export interface AccountOperationResultsState {
-  action: "batch_test" | "batch_refresh" | "batch_usage_refresh" | "traecn_batch_checkin";
+  action: "batch_test" | "batch_refresh" | "batch_usage_refresh" | "traecn_batch_checkin" | "traecn_batch_sync_models";
   results: AccountOperationResult[];
 }
 
@@ -68,7 +68,11 @@ export function collectAccountOperationResult(
   }
   if (
     event.type !== "progress" ||
-    (event.action !== "batch_test" && event.action !== "batch_refresh" && event.action !== "batch_usage_refresh") ||
+    (event.action !== "batch_test" &&
+      event.action !== "batch_refresh" &&
+      event.action !== "batch_usage_refresh" &&
+      event.action !== "traecn_batch_checkin" &&
+      event.action !== "traecn_batch_sync_models") ||
     !event.account_id
   ) {
     return;

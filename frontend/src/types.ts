@@ -138,7 +138,20 @@ export interface CodexTicketSettingsResponse {
   total_accounts: number
 }
 
-export interface TraeCNSettingsResponse {
+export interface TraeCNModelSyncSettings {
+  model_sync_enabled: boolean
+  /** Daily wall-clock time in model_sync_timezone, using HH:mm (00:00 is midnight). */
+  model_sync_time: string
+  /** IANA timezone; independent of the browser's display timezone. */
+  model_sync_timezone: string
+}
+
+export type TraeCNSettingsPatch = Partial<TraeCNModelSyncSettings & {
+  model_mapping: Record<string, string>
+  preflight_sse_passthrough: boolean
+}>
+
+export interface TraeCNSettingsResponse extends TraeCNModelSyncSettings {
   model_mapping: Record<string, string>
   /** 默认关闭：开启后把上游内容生成前的元数据通知立即下发（会提前提交 200）。 */
   preflight_sse_passthrough: boolean

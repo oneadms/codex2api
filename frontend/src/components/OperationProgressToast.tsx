@@ -39,6 +39,7 @@ export default function OperationProgressToast({
         ]
       : progress.action === "batch_refresh" ||
         progress.action === "traecn_batch_checkin" ||
+        progress.action === "traecn_batch_sync_models" ||
         progress.action === "grok_import"
         ? [
             {

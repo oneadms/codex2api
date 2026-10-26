@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
+	_ "time/tzdata" // Keep scheduled sync timezones available in minimal containers.
 
 	"github.com/codex2api/security"
 )
@@ -17,10 +19,17 @@ type TraeCNSettings struct {
 	// （metadata / progress_notice / queue_* 等 provider 事件）立即转发下游，
 	// 而不是丢掉/缓冲到首个真实内容事件（与 Codex 的旧版兼容开关同语义，默认 false）。
 	// 开启后会提前提交 200，首内容前的失败/换号/超窗压缩重试将失效。
-	PreflightSSEPassthrough bool `json:"preflight_sse_passthrough"`
+	PreflightSSEPassthrough bool   `json:"preflight_sse_passthrough"`
+	ModelSyncEnabled        bool   `json:"model_sync_enabled"`
+	ModelSyncTime           string `json:"model_sync_time"`
+	ModelSyncTimezone       string `json:"model_sync_timezone"`
 }
 
-const TraeCNModelMappingMaxEntries = 200
+const (
+	TraeCNModelMappingMaxEntries   = 200
+	TraeCNModelSyncDefaultTime     = "00:00"
+	TraeCNModelSyncDefaultTimezone = "Asia/Shanghai"
+)
 
 type traeCNSettingsSnapshot struct {
 	settings TraeCNSettings
@@ -30,7 +39,14 @@ type traeCNSettingsSnapshot struct {
 var configuredTraeCNSettings atomic.Value // traeCNSettingsSnapshot
 
 func cloneTraeCNSettings(settings TraeCNSettings) TraeCNSettings {
-	out := TraeCNSettings{PreflightSSEPassthrough: settings.PreflightSSEPassthrough, ModelMapping: make(map[string]string, len(settings.ModelMapping))}
+	out := settings
+	out.ModelMapping = make(map[string]string, len(settings.ModelMapping))
+	if out.ModelSyncTime == "" {
+		out.ModelSyncTime = TraeCNModelSyncDefaultTime
+	}
+	if out.ModelSyncTimezone == "" {
+		out.ModelSyncTimezone = TraeCNModelSyncDefaultTimezone
+	}
 	for from, to := range settings.ModelMapping {
 		out.ModelMapping[from] = to
 	}
@@ -59,7 +75,19 @@ func TraeCNPreflightSSEPassthroughEnabled() bool {
 }
 
 func NormalizeTraeCNSettings(settings TraeCNSettings) (TraeCNSettings, error) {
-	out := TraeCNSettings{PreflightSSEPassthrough: settings.PreflightSSEPassthrough, ModelMapping: map[string]string{}}
+	out := cloneTraeCNSettings(settings)
+	out.ModelSyncTime = strings.TrimSpace(out.ModelSyncTime)
+	out.ModelSyncTimezone = strings.TrimSpace(out.ModelSyncTimezone)
+	if parsed, err := time.Parse("15:04", out.ModelSyncTime); err != nil || parsed.Format("15:04") != out.ModelSyncTime {
+		return out, fmt.Errorf("模型目录同步时间必须为 HH:mm（00:00–23:59）")
+	}
+	if out.ModelSyncTimezone == "Local" || out.ModelSyncTimezone == "" {
+		return out, fmt.Errorf("模型目录同步时区必须为明确的 IANA 时区，如 Asia/Shanghai 或 UTC")
+	}
+	if _, err := time.LoadLocation(out.ModelSyncTimezone); err != nil {
+		return out, fmt.Errorf("模型目录同步时区无效: %s", out.ModelSyncTimezone)
+	}
+	out.ModelMapping = map[string]string{}
 	if len(settings.ModelMapping) > TraeCNModelMappingMaxEntries {
 		return out, fmt.Errorf("TRAE 模型映射最多允许 %d 条", TraeCNModelMappingMaxEntries)
 	}

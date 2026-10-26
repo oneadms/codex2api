@@ -332,8 +332,9 @@ func (h *Handler) AddTraeCNAccounts(c *gin.Context) {
 	})
 }
 
-// syncTraeCNAccountModels is shared by account creation and manual refresh.
-func (h *Handler) syncTraeCNAccountModels(ctx context.Context, account *auth.Account) ([]string, []string, time.Time, error) {
+// fetchAndSaveTraeCNAccountModels keeps provider catalogs separate from the
+// administrator allowlist. Its caller coalesces overlapping requests per account.
+func (h *Handler) fetchAndSaveTraeCNAccountModels(ctx context.Context, account *auth.Account) ([]string, []string, time.Time, error) {
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	models, err := proxy.FetchTraeCNModelsWithStore(ctx, h.store, account, h.store.ResolveProxyForAccount(account))

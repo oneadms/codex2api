@@ -11,6 +11,7 @@
     "test:svg": "node --experimental-strip-types --test tests/qualityTestSVG.browser.test.mjs",
     "test:version": "node --experimental-strip-types --test tests/useVersionCheck.browser.test.mjs",
     "test:harvest": "node --experimental-strip-types --test tests/codexHarvest.browser.test.mjs",
+    "test:traecn": "node --experimental-strip-types --test tests/traecnModelSync.browser.test.mjs",
     "typecheck": "tsc --noEmit",
     "audit:ci": "node scripts/audit-gate.mjs"
   },

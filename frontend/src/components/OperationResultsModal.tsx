@@ -140,7 +140,9 @@ export default function OperationResultsModal({
         ? t("accounts.operationRefreshResultsTitle")
         : state?.action === "traecn_batch_checkin"
           ? t("accounts.operationCheckinResultsTitle")
-          : t("accounts.operationTestResultsTitle");
+          : state?.action === "traecn_batch_sync_models"
+            ? t("traecn.batchSyncModelsResultsTitle")
+            : t("accounts.operationTestResultsTitle");
 
   const statusLabel = (status: string) => {
     switch (status) {

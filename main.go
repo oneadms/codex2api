@@ -423,6 +423,8 @@ func main() {
 	proxy.StartCodexTicketHarvestLoop(backgroundCtx, db, store)
 	// Trae CN 每日自动签到（随机时段，每账号每天一次；TRAECN_CHECKIN_DISABLED=1 可关）。
 	proxy.StartTraeCNCheckinScheduler(backgroundCtx, store, db)
+	// Trae CN 模型目录每日同步：管理员配置开关、时间与时区，默认关闭。
+	adminHandler.StartTraeCNModelSyncScheduler(backgroundCtx)
 	// Trae CN 每日额度探针：额度不足被限流的账号，每天随机时段查一次积分，
 	// 确认恢复后解冻；TRAECN_CREDITS_PROBE_DISABLED=1 可关。
 	proxy.StartTraeCNCreditsProbeScheduler(backgroundCtx, store, db)
@@ -706,6 +708,7 @@ func main() {
 	}
 	adminHandler.WaitAutoResetCredits()
 	adminHandler.WaitAutoActivate5hWindow()
+	adminHandler.WaitTraeCNModelSyncScheduler()
 	adminHandler.WaitQualityTests()
 	adminHandler.StopDiagnostics()
 	wsKeepalive.Stop()

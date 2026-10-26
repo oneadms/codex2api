@@ -18,6 +18,7 @@ export type BatchOperationAction =
   | "batch_delete"
   | "batch_refresh"
   | "traecn_batch_checkin"
+  | "traecn_batch_sync_models"
   | "grok_import"
   | "clean";
 
@@ -159,6 +160,15 @@ export function useOperationProgress(
       window.clearTimeout(operationProgressHideTimer.current);
       operationProgressHideTimer.current = null;
     }
+    if (operationProgressFrame.current !== null) {
+      window.cancelAnimationFrame(operationProgressFrame.current);
+      operationProgressFrame.current = null;
+    }
+    if (operationProgressFlushTimer.current !== null) {
+      window.clearTimeout(operationProgressFlushTimer.current);
+      operationProgressFlushTimer.current = null;
+    }
+    pendingOperationProgress.current = null;
     setOperationProgress(null);
   }, []);
 
@@ -204,7 +214,8 @@ export function useOperationProgress(
           showOperationResultsRef.current &&
           (event.action === "batch_test" ||
             event.action === "batch_refresh" ||
-            event.action === "traecn_batch_checkin")
+            event.action === "traecn_batch_checkin" ||
+            event.action === "traecn_batch_sync_models")
         ) {
           setOperationResults({
             action: event.action,

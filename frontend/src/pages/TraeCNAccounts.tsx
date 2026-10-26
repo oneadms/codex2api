@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router-dom";
 import {
   ArrowDown,
   ArrowUpDown,
@@ -64,6 +65,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { traeCNCreditsAvailability, traeCNCreditsBadgeKey } from "../lib/traecnCredits";
+import { buildTraeCNModelSyncScope } from "../lib/traecnModelSync";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -777,6 +779,9 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [batchTesting, setBatchTesting] = useState(false);
   const [batchCheckingIn, setBatchCheckingIn] = useState(false);
+  const [batchSyncingModels, setBatchSyncingModels] = useState(false);
+  const batchOperationRef = useRef(false);
+  const batchActionsBusy = batchTesting || batchCheckingIn || batchSyncingModels || batchDeleting;
   const [jsonPreview, setJsonPreview] = useState<{ items: TraeCNImportPreviewItem[]; error?: string }>({ items: [] });
   const [jsonSelected, setJsonSelected] = useState<Set<number>>(new Set());
   // OAuth 授权会话：从 start 拿到授权链接，轮询到 ready 后自动建号。
@@ -860,11 +865,11 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
     return () => window.clearTimeout(timer);
   }, [search]);
   useEffect(() => { setPage(1); }, [status]);
-  useEffect(() => {
-    void api.getModels().then((response) => {
-      if (response.traecn_models?.length) setModels(response.traecn_models);
-    }).catch(() => undefined);
+  const reloadModels = useCallback(async () => {
+    const response = await api.getModels();
+    setModels(response.traecn_models?.length ? response.traecn_models : DEFAULT_TRAE_MODELS);
   }, []);
+  useEffect(() => { void reloadModels().catch(() => undefined); }, [reloadModels]);
   useEffect(() => {
     void api.getSettings().then((response) => {
       const configuredModel = response.traecn_test_model?.trim();
@@ -1306,6 +1311,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const hasActiveTraeCNFilters = Boolean(debouncedSearch || status !== "all");
 
   const handleBatchTest = async (testIds?: number[]) => {
+    if (batchOperationRef.current || batchActionsBusy) return;
     if (total === 0 && selectedIDs.size === 0 && !testIds?.length) return;
 
     // 必须显式传 ids 或 channel=traecn 的 selector，否则会连其它渠道一起测。
@@ -1332,7 +1338,9 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
       if (!confirmed) return;
     }
     if (ids && ids.length === 0) return;
+    if (batchOperationRef.current) return;
 
+    batchOperationRef.current = true;
     setBatchTesting(true);
     try {
       const result = await runStreamingOperation(
@@ -1353,6 +1361,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
     } catch (testError) {
       showToast(t("accounts.batchTestFailed", { error: getErrorMessage(testError) }), "error");
     } finally {
+      batchOperationRef.current = false;
       setBatchTesting(false);
     }
   };
@@ -1369,6 +1378,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
 
   // 批量签到：勾选时只签所选，否则签当前筛选结果；没有筛选才要求全量确认。
   const handleBatchCheckin = async (checkinIDs?: number[]) => {
+    if (batchOperationRef.current || batchActionsBusy) return;
     if (total === 0 && selectedIDs.size === 0 && !checkinIDs?.length) return;
 
     const ids = checkinIDs?.length ? checkinIDs : Array.from(selectedIDs);
@@ -1384,8 +1394,9 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
         confirmText: t("traecn.batchCheckin"),
       },
     );
-    if (!confirmed) return;
+    if (!confirmed || batchOperationRef.current) return;
 
+    batchOperationRef.current = true;
     setBatchCheckingIn(true);
     try {
       const result = await runStreamingOperation(
@@ -1401,7 +1412,49 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
     } catch (checkinError) {
       showToast(t("traecn.batchCheckinFailed", { error: getErrorMessage(checkinError) }), "error");
     } finally {
+      batchOperationRef.current = false;
       setBatchCheckingIn(false);
+    }
+  };
+
+  const handleBatchSyncModels = async (syncIDs?: number[]) => {
+    if (batchOperationRef.current || batchActionsBusy) return;
+    const operation = buildTraeCNModelSyncScope(syncIDs ?? Array.from(selectedIDs), currentTraeCNSelector, total);
+    if (operation.count === 0) return;
+    const confirmed = await confirm({
+      title: t(`traecn.batchSyncModelsConfirm.${operation.scope}Title`),
+      description: t(`traecn.batchSyncModelsConfirm.${operation.scope}Description`, { count: operation.count }),
+      confirmText: t("traecn.batchSyncModels"),
+    });
+    if (!confirmed || batchOperationRef.current) return;
+
+    batchOperationRef.current = true;
+    setBatchSyncingModels(true);
+    try {
+      const result = await runStreamingOperation(
+        "/accounts/traecn/batch-sync-models?stream=true",
+        operation.body,
+        t("traecn.batchSyncModelsProgressTitle"),
+      );
+      if (!result) throw new Error(t("accounts.connectionEndedUnexpectedly"));
+      showToast(
+        t("traecn.batchSyncModelsDone", { success: result.success ?? 0, failed: result.failed ?? 0 }),
+        result.failed ? "warning" : "success",
+      );
+    } catch (syncError) {
+      closeOperationProgress();
+      showToast(t("traecn.batchSyncModelsFailed", { error: getErrorMessage(syncError) }), "error");
+    } finally {
+      // A failed or interrupted stream may still have updated some accounts.
+      // Refresh both snapshots, including on partial failure, before unlocking batch actions.
+      try {
+        await Promise.all([reload(true), reloadModels()]);
+      } catch (reloadError) {
+        showToast(t("traecn.batchSyncModelsReloadFailed", { error: getErrorMessage(reloadError) }), "error");
+      } finally {
+        batchOperationRef.current = false;
+        setBatchSyncingModels(false);
+      }
     }
   };
 
@@ -1440,11 +1493,21 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
         titleAdornment={headerSlot}
         onRefresh={() => void reload()}
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              onClick={() => void handleBatchSyncModels()}
+              disabled={batchActionsBusy || loading || search.trim() !== debouncedSearch || (total === 0 && selectedIDs.size === 0)}
+              title={t("traecn.batchSyncModels")}
+              aria-label={t("traecn.batchSyncModels")}
+            >
+              {batchSyncingModels ? <Loader2 className="size-4 animate-spin" /> : <ListRestart className="size-4" />}
+              <span className="hidden sm:inline">{batchSyncingModels ? t("traecn.batchSyncModelsRunning") : t("traecn.batchSyncModels")}</span>
+            </Button>
             <Button
               variant="outline"
               onClick={() => void handleBatchCheckin()}
-              disabled={batchCheckingIn || total === 0}
+              disabled={batchActionsBusy || loading || (total === 0 && selectedIDs.size === 0)}
               title={t("traecn.batchCheckin")}
             >
               {batchCheckingIn ? <Loader2 className="size-4 animate-spin" /> : <CalendarCheck className="size-4" />}
@@ -1453,7 +1516,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
             <Button
               variant="outline"
               onClick={() => void handleBatchTest()}
-              disabled={batchTesting || total === 0}
+              disabled={batchActionsBusy || loading || (total === 0 && selectedIDs.size === 0)}
               title={t("accounts.batchTest")}
             >
               {batchTesting ? <Loader2 className="size-4 animate-spin" /> : <FlaskConical className="size-4" />}
@@ -1473,6 +1536,12 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
           </div>
         }
       />
+
+      <div className="flex justify-end">
+        <Button asChild variant="link" size="sm">
+          <Link to="/settings?tab=traecn"><CalendarCheck className="size-3.5" />{t("traecn.modelSyncSettings")}</Link>
+        </Button>
+      </div>
 
       <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 xl:grid-cols-6">
         <CompactStat label={t("traecn.statTotal")} value={summary?.total ?? total} tone="neutral" />
@@ -1517,11 +1586,15 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
         <div className="sticky top-2 z-20 flex flex-col gap-2 rounded-xl border border-primary/20 bg-card/95 px-3 py-2 shadow-lg backdrop-blur-sm sm:flex-row sm:items-center sm:justify-between">
           <span className="text-sm font-medium">{t("traecn.selectedCount", { count: selectedIDs.size })}</span>
           <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-            <Button variant="outline" size="sm" onClick={() => void handleBatchCheckin(Array.from(selectedIDs))} disabled={batchCheckingIn || batchTesting || batchDeleting}>
+            <Button variant="outline" size="sm" onClick={() => void handleBatchSyncModels(Array.from(selectedIDs))} disabled={batchActionsBusy} title={t("traecn.batchSyncModels")} aria-label={t("traecn.batchSyncModels")}>
+              {batchSyncingModels ? <Loader2 className="size-3.5 animate-spin" /> : <ListRestart className="size-3.5" />}
+              <span className="hidden sm:inline">{batchSyncingModels ? t("traecn.batchSyncModelsRunning") : t("traecn.batchSyncModels")}</span>
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => void handleBatchCheckin(Array.from(selectedIDs))} disabled={batchActionsBusy}>
               {batchCheckingIn ? <Loader2 className="size-3.5 animate-spin" /> : <CalendarCheck className="size-3.5" />}
               <span className="hidden sm:inline">{batchCheckingIn ? t("traecn.batchCheckinRunning") : t("traecn.batchCheckin")}</span>
             </Button>
-            <Button variant="outline" size="sm" onClick={() => void handleBatchTest(Array.from(selectedIDs))} disabled={batchTesting || batchDeleting}>
+            <Button variant="outline" size="sm" onClick={() => void handleBatchTest(Array.from(selectedIDs))} disabled={batchActionsBusy}>
               {batchTesting ? <Loader2 className="size-3.5 animate-spin" /> : <FlaskConical className="size-3.5" />}
               <span className="hidden sm:inline">{batchTesting ? t("accounts.batchTesting") : t("accounts.batchTest")}</span>
             </Button>
@@ -1529,7 +1602,7 @@ export default function TraeCNAccounts({ headerSlot }: { headerSlot?: ReactNode 
               {exporting ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
               {t("traecn.exportSelected", { count: selectedIDs.size })}
             </Button>
-            <Button variant="destructive" size="sm" onClick={() => void deleteSelected()} disabled={batchDeleting || exporting}>
+            <Button variant="destructive" size="sm" onClick={() => void deleteSelected()} disabled={batchActionsBusy || exporting}>
               {batchDeleting ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
               {t("traecn.batchDelete")}
             </Button>

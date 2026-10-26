@@ -170,6 +170,7 @@ import type {
   ChannelTestSettingsResponse,
   AntigravitySettingsResponse,
   TraeCNSettingsResponse,
+  TraeCNSettingsPatch,
   CodexTicketSettingsResponse,
 } from './types'
 
@@ -1141,7 +1142,7 @@ export const api = {
       body: JSON.stringify({ channels }),
     }),
   getTraeCNSettings: () => request<TraeCNSettingsResponse>('/settings/traecn'),
-  updateTraeCNSettings: (patch: { model_mapping?: Record<string, string>; preflight_sse_passthrough?: boolean }) =>
+  updateTraeCNSettings: (patch: TraeCNSettingsPatch) =>
     request<TraeCNSettingsResponse>('/settings/traecn', {
       method: 'PUT',
       body: JSON.stringify(patch),

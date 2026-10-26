@@ -62,3 +62,36 @@ func TestTraeCNSettingsValidation(t *testing.T) {
 		t.Fatalf("normalized=%v err=%v", settings, err)
 	}
 }
+
+func TestTraeCNModelSyncSettingsValidation(t *testing.T) {
+	for _, raw := range []string{"", `{}`, `{"preflight_sse_passthrough":true}`} {
+		settings, err := ParseTraeCNSettings(raw)
+		if err != nil || settings.ModelSyncEnabled || settings.ModelSyncTime != "00:00" || settings.ModelSyncTimezone != "Asia/Shanghai" {
+			t.Fatalf("legacy defaults for %q: %+v, err=%v", raw, settings, err)
+		}
+	}
+	for _, raw := range []string{
+		`{"model_sync_time":"24:00"}`,
+		`{"model_sync_time":"12:60"}`,
+		`{"model_sync_time":"0:00"}`,
+		`{"model_sync_time":"00:00:00"}`,
+		`{"model_sync_time":" "}`,
+		`{"model_sync_timezone":"Mars/Olympus"}`,
+		`{"model_sync_timezone":"Local"}`,
+		`{"model_sync_enabled":"true"}`,
+	} {
+		if _, err := ParseTraeCNSettings(raw); err == nil {
+			t.Errorf("invalid schedule accepted: %s", raw)
+		}
+	}
+	settings, err := ParseTraeCNSettings(`{"model_sync_enabled":true,"model_sync_time":" 23:59 ","model_sync_timezone":" UTC "}`)
+	if err != nil || !settings.ModelSyncEnabled || settings.ModelSyncTime != "23:59" || settings.ModelSyncTimezone != "UTC" {
+		t.Fatalf("normalized schedule=%+v err=%v", settings, err)
+	}
+	previous := ConfiguredTraeCNSettings()
+	t.Cleanup(func() { SetConfiguredTraeCNSettings(previous) })
+	SetConfiguredTraeCNSettings(settings)
+	if got := ConfiguredTraeCNSettings(); got.ModelSyncTime != "23:59" || got.ModelSyncTimezone != "UTC" || !got.ModelSyncEnabled {
+		t.Fatalf("schedule lost in immutable snapshot: %+v", got)
+	}
+}

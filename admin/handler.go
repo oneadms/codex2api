@@ -144,6 +144,7 @@ type Handler struct {
 	openAIResponsesBalanceMu    sync.RWMutex
 	openAIResponsesBalanceCache map[int64]openAIResponsesBalanceCacheEntry
 	traeCNCredits               traeCNCreditsCache
+	traeCNModelSync             traeCNModelSyncState
 
 	// 账号请求统计缓存,按渠道分键(codex/grok 各自刷新互不牵连;旧全量路径
 	// 用 "all" 键)。分页路径 stale-while-revalidate,TTL 见 requestCountCacheTTL。
@@ -1209,6 +1210,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/traecn/import-json", h.TraeCNImportJSON)
 	api.GET("/accounts/traecn/export", h.ExportTraeCNAccounts)
 	api.POST("/accounts/traecn/batch-checkin", h.BatchCheckinTraeCNAccounts)
+	api.POST("/accounts/traecn/batch-sync-models", h.BatchSyncTraeCNModels)
 	api.POST("/accounts/:id/traecn/refresh", h.RefreshTraeCNAccount)
 	api.POST("/accounts/:id/traecn/checkin", h.TriggerTraeCNCheckin)
 	api.GET("/accounts/:id/traecn/credits", h.GetTraeCNCredits)
